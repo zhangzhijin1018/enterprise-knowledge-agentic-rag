@@ -308,6 +308,7 @@ Database 层负责：
 ### 7.1 Python 规范
 
 - 使用 Python 3.10+
+- 本地开发最低支持 Python 3.10，推荐 Python 3.11；生产 Docker 镜像建议使用 Python 3.11。
 - 类型标注尽量完整
 - 优先使用 Pydantic 定义请求、响应和配置模型
 - 函数职责单一

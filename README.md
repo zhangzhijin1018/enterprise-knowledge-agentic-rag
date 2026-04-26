@@ -13,9 +13,13 @@
 ## 当前文档
 
 - `AGENTS.md`：本项目编码约束与目录边界说明
-- `docs/产品需求文档.md`：当前产品需求文档
+- `docs/PRD.md`：当前产品需求文档
 - `docs/ARCHITECTURE.md`：系统架构设计文档
 - `docs/TECH_SELECTION.md`：技术选型文档
+
+## Python 版本说明
+
+本地开发最低支持 Python 3.10，推荐 Python 3.11；生产 Docker 镜像建议使用 Python 3.11。
 
 ## 当前阶段
 
