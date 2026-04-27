@@ -9,7 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
+from sqlalchemy.orm import Session
 
 from core.database.models import Conversation, ConversationMemory, ConversationMessage
 
@@ -44,13 +45,24 @@ def reset_in_memory_conversation_store() -> None:
 class ConversationRepository:
     """会话数据访问层。"""
 
-    def __init__(self, session=None) -> None:
-        """保留 session 参数，为后续切换真实数据库实现预留入口。"""
+    def __init__(self, session: Session | None = None) -> None:
+        """初始化会话 Repository。
+
+        设计说明：
+        - 如果依赖注入层已经提供真实 SQLAlchemy Session，则当前 Repository 默认优先走数据库；
+        - 如果没有 Session，则自动回退到内存实现，保证本地无数据库时项目仍可跑；
+        - 这样可以把“数据库模式还是回退模式”的判断集中在更靠近基础设施的一层。
+        """
 
         self.session = session
 
     def _use_database(self) -> bool:
-        """判断当前是否启用真实数据库模式。"""
+        """判断当前是否启用真实数据库模式。
+
+        这里不再额外读取 Settings，
+        因为模式选择已经由 `get_db_session()` 和依赖注入层提前完成。
+        Repository 只关注“当前有没有拿到可用 Session”。
+        """
 
         return self.session is not None
 
@@ -192,12 +204,11 @@ class ConversationRepository:
                 statement = statement.where(Conversation.user_id == user_id)
             if status:
                 statement = statement.where(Conversation.current_status == status)
-            rows = list(self.session.execute(statement).scalars())
-            rows.sort(key=lambda item: item.updated_at, reverse=True)
-            total = len(rows)
             start = (page - 1) * page_size
-            end = start + page_size
-            return [self._serialize_conversation(item) for item in rows[start:end]], total
+            statement = statement.order_by(desc(Conversation.updated_at))
+            rows = list(self.session.execute(statement).scalars())
+            total = len(rows)
+            return [self._serialize_conversation(item) for item in rows[start : start + page_size]], total
 
         items = list(_CONVERSATIONS.values())
         if user_id is not None:

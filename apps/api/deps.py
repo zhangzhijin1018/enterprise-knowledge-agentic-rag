@@ -33,9 +33,10 @@ from core.services.conversation_service import ConversationService
 def get_session() -> Iterator[Session | None]:
     """提供数据库 Session 依赖。
 
-    当前默认场景下会返回 `None`，
-    让下游 Repository 自动走内存实现；
-    当后续启用真实数据库时，这里会 transparently 切到真实 Session。
+    模式规则：
+    - 如果已经配置 DATABASE_URL，且未强制回退到内存模式，则默认优先提供真实 Session；
+    - 如果没有配置数据库，或者显式要求使用内存模式，则返回 `None`；
+    - 这样可以保证第二轮尽量不改外层 API 契约，同时让真实数据库接入边界更清晰。
     """
 
     yield from get_db_session()

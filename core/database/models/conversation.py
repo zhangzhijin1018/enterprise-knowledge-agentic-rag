@@ -20,6 +20,7 @@ class Conversation(TimestampMixin, Base):
     """
 
     __tablename__ = "conversations"
+    __table_args__ = {"comment": "会话表：保存多轮对话的会话级上下文"}
 
     # 数据库内部主键。
     id: Mapped[int] = mapped_column(
@@ -68,7 +69,7 @@ class Conversation(TimestampMixin, Base):
     )
 
 
-class ConversationMessage(Base):
+class ConversationMessage(TimestampMixin, Base):
     """会话消息表。
 
     业务作用：
@@ -78,6 +79,7 @@ class ConversationMessage(Base):
     """
 
     __tablename__ = "conversation_messages"
+    __table_args__ = {"comment": "会话消息表：保存 user / assistant / system 消息明细"}
 
     # 数据库内部主键。
     id: Mapped[int] = mapped_column(
@@ -123,16 +125,7 @@ class ConversationMessage(Base):
     # 关联任务运行 ID。
     related_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="关联任务运行 ID")
 
-    # 创建时间，用于消息回放排序和审计。
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        comment="创建时间",
-    )
-
-
-class ConversationMemory(Base):
+class ConversationMemory(TimestampMixin, Base):
     """会话记忆表。
 
     业务作用：
@@ -142,6 +135,7 @@ class ConversationMemory(Base):
     """
 
     __tablename__ = "conversation_memory"
+    __table_args__ = {"comment": "会话记忆表：保存短期记忆和恢复执行所需上下文"}
 
     # 数据库内部主键。
     id: Mapped[int] = mapped_column(
@@ -208,13 +202,4 @@ class ConversationMemory(Base):
         nullable=False,
         default=dict,
         comment="短期会话记忆快照",
-    )
-
-    # 更新时间。每次上下文继承、补槽或任务恢复后都应刷新该字段。
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-        comment="更新时间",
     )

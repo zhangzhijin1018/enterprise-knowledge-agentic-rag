@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from core.database.models import ClarificationEvent, Conversation, SlotSnapshot, TaskRun
 
@@ -41,8 +42,14 @@ def reset_in_memory_task_run_store() -> None:
 class TaskRunRepository:
     """任务运行数据访问层。"""
 
-    def __init__(self, session=None) -> None:
-        """保留 session 参数，为后续切换真实 ORM 实现预留入口。"""
+    def __init__(self, session: Session | None = None) -> None:
+        """初始化任务运行 Repository。
+
+        设计说明：
+        - 如果已有真实 Session，则优先走数据库；
+        - 如果没有 Session，则自动回退到内存运行态存储；
+        - 这样 Clarification、SlotSnapshot、TaskRun 的上层工作流都不需要感知底层模式切换。
+        """
 
         self.session = session
 

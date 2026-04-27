@@ -21,6 +21,7 @@ class TaskRun(TimestampMixin, Base):
     """
 
     __tablename__ = "task_runs"
+    __table_args__ = {"comment": "任务运行表：保存工作流运行主状态与审计主对象"}
 
     # 数据库内部主键。
     id: Mapped[int] = mapped_column(
@@ -121,7 +122,7 @@ class TaskRun(TimestampMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="完成时间")
 
 
-class SlotSnapshot(Base):
+class SlotSnapshot(TimestampMixin, Base):
     """槽位快照表。
 
     业务作用：
@@ -131,6 +132,7 @@ class SlotSnapshot(Base):
     """
 
     __tablename__ = "slot_snapshots"
+    __table_args__ = {"comment": "槽位快照表：保存任务补槽、澄清与恢复执行状态"}
 
     # 数据库内部主键。
     id: Mapped[int] = mapped_column(
@@ -141,7 +143,13 @@ class SlotSnapshot(Base):
     )
 
     # 关联运行 ID，一次 run 只保留一个当前槽位快照。
-    run_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, comment="关联任务运行 ID")
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("task_runs.run_id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        comment="关联任务运行 ID",
+    )
 
     # 任务类型。
     task_type: Mapped[str] = mapped_column(String(64), nullable=False, comment="任务类型")
@@ -179,17 +187,8 @@ class SlotSnapshot(Base):
     # 恢复执行入口步骤。
     resume_step: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="恢复执行入口步骤")
 
-    # 更新时间。
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-        comment="更新时间",
-    )
 
-
-class ClarificationEvent(Base):
+class ClarificationEvent(TimestampMixin, Base):
     """澄清事件表。
 
     业务作用：
@@ -199,6 +198,7 @@ class ClarificationEvent(Base):
     """
 
     __tablename__ = "clarification_events"
+    __table_args__ = {"comment": "澄清事件表：记录系统追问、用户补充和补槽结果"}
 
     # 数据库内部主键。
     id: Mapped[int] = mapped_column(
@@ -217,7 +217,12 @@ class ClarificationEvent(Base):
     )
 
     # 关联任务运行 ID。
-    run_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="关联任务运行 ID")
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("task_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+        comment="关联任务运行 ID",
+    )
 
     # 所属会话 ID。
     conversation_id: Mapped[int | None] = mapped_column(
@@ -251,14 +256,6 @@ class ClarificationEvent(Base):
 
     # 当前澄清状态，例如 pending、resolved。
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", comment="澄清状态")
-
-    # 创建时间。
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        comment="创建时间",
-    )
 
     # 解决时间。
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="解决时间")

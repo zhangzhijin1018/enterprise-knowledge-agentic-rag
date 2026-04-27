@@ -60,6 +60,13 @@ class ChatWorkflowFacade:
         4. 构造结构化 AgentState；
         5. 依次经过 context / authorize / risk / route / execute 节点；
         6. 返回统一 data / meta 响应。
+
+        第二轮数据库完善后，这条工作流不需要知道底层到底是：
+        - PostgreSQL + SQLAlchemy Session；
+        - 还是本地内存回退模式。
+
+        这正是当前分层设计的价值：
+        工作流只依赖 Repository 抽象，不直接依赖数据库细节。
         """
 
         conversation = self._get_or_create_conversation(

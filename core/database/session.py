@@ -40,8 +40,10 @@ def reset_database_runtime_state() -> None:
 def build_engine(settings: Settings | None = None) -> Engine | None:
     """按配置决定是否创建真实数据库引擎。
 
-    当前默认 `database_enabled = False`，
-    这样项目在没有本地 PostgreSQL 的情况下也可以完成接口联调与骨架开发。
+    第二轮的设计目标是：
+    - 没有配置数据库时，项目仍可启动；
+    - 一旦提供了 DATABASE_URL，默认优先走真实数据库；
+    - 只有显式要求内存模式时，才回退到 in-memory Repository。
     """
 
     global _ENGINE, _SESSION_FACTORY
@@ -50,7 +52,7 @@ def build_engine(settings: Settings | None = None) -> Engine | None:
         return _ENGINE
 
     active_settings = settings or get_settings()
-    if not active_settings.database_enabled or active_settings.use_in_memory_repository:
+    if not active_settings.should_use_database:
         return None
 
     engine_kwargs: dict = {
@@ -63,6 +65,11 @@ def build_engine(settings: Settings | None = None) -> Engine | None:
         # 否则不同 Session 会看到不同的内存库，测试结果会不稳定。
         engine_kwargs["connect_args"] = {"check_same_thread": False}
         engine_kwargs["poolclass"] = StaticPool
+    else:
+        # PostgreSQL 等真实数据库优先使用更稳妥的连接池参数。
+        # 这些参数不会改变业务逻辑，但能让第二轮的“真实数据库可接入”边界更完整。
+        engine_kwargs["pool_pre_ping"] = active_settings.database_pool_pre_ping
+        engine_kwargs["pool_recycle"] = active_settings.database_pool_recycle
 
     _ENGINE = create_engine(
         active_settings.database_url,
@@ -90,9 +97,12 @@ def get_session_factory(settings: Settings | None = None) -> sessionmaker[Sessio
 def get_db_session() -> Iterator[Session | None]:
     """提供 FastAPI 依赖风格的数据库 Session。
 
-    当前如果数据库未启用，则 yield `None`。
-    这样 Repository / Service 可以根据是否拿到真实 Session，
-    决定走数据库实现还是内存占位实现。
+    当前如果数据库模式未启用，则 yield `None`。
+
+    这样做的业务意义是：
+    - API 层和 Service 层完全不用知道“现在是数据库模式还是内存模式”；
+    - Repository 只需要根据是否拿到真实 Session 决定走哪条实现；
+    - 这能保证第二轮尽量不改外层 API 契约。
     """
 
     session_factory = get_session_factory()
