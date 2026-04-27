@@ -42,9 +42,23 @@ enterprise-knowledge-agentic-rag
 docs/PRD.md
 docs/ARCHITECTURE.md
 docs/TECH_SELECTION.md
+docs/AGENT_WORKFLOW.md
+docs/DB_DESIGN.md
+docs/API_DESIGN.md
+docs/PROJECT_STRUCTURE.md
 ```
 
 如果文档与当前代码冲突，应优先说明冲突点，不要擅自扩大重构范围。
+
+优先级建议：
+
+```text
+架构边界：ARCHITECTURE.md
+工作流与状态机：AGENT_WORKFLOW.md
+接口契约：API_DESIGN.md
+数据库与模型：DB_DESIGN.md
+代码目录与分层：PROJECT_STRUCTURE.md
+```
 
 ---
 
@@ -68,12 +82,69 @@ Reranker：BGE-Reranker
 可观测性：OpenTelemetry + Prometheus + Grafana
 ```
 
-以下技术暂不作为首期必选：
+### 3.1 MCP 实现技术栈约束
+
+本项目第一期允许并推荐实现 MCP 接入边界，但不要求一次性接入所有外部系统。
+
+推荐实现方式：
+
+```text
+MCP Server：Python
+MCP 服务承载：FastAPI 或独立 Python 服务
+MCP 协议层：MCP Python SDK / FastMCP 风格实现
+输入输出模型：Pydantic
+传输方式：优先 HTTP；本地工具场景可预留 stdio
+项目内接入层：core/tools/mcp/
+```
+
+第一期优先落地的 MCP 服务类型：
+
+```text
+SQL MCP
+File MCP
+Report MCP
+Enterprise API MCP
+```
+
+要求：
+
+- MCP 作为 Tool / Capability Fabric 的一种实现方式；
+- 不允许在业务代码里直接硬编码外部系统调用；
+- 所有 MCP 调用必须经过统一网关、统一审计、统一权限与风险判断。
+
+### 3.2 A2A 实现技术栈约束
+
+A2A 在本项目中不是“先不管”，而是：
+
+```text
+第一期架构必须预留
+第一期代码必须预留抽象边界
+第一期不强制完整实现标准化跨系统生产协议
+```
+
+第一期推荐实现方式：
+
+```text
+A2A Gateway：Python + FastAPI
+通信方式：HTTP/JSON
+契约模型：Pydantic
+代码位置：core/tools/a2a/ 或 core/agent/gateway/
+任务契约：Task Envelope
+结果契约：Result Contract
+```
+
+也就是说：
+
+- 第一阶段先实现“内部 A2A 风格网关抽象”；
+- 先把跨 Agent 委托、任务状态、结果回传、错误语义、Trace 贯通；
+- 不要求第一天就强绑定某个重型第三方 A2A SDK；
+- 后续若标准协议成熟，可在网关层替换，不改业务层。
+
+### 3.3 当前不作为首期必选
 
 ```text
 OpenSearch：后续可选，用于审计日志搜索、后台全文搜索、复杂聚合分析
 Kafka：后续可选，用于实时设备数据、告警流、事件总线
-A2A：架构预留，用于跨 Agent / 跨系统协作
 ```
 
 ---
@@ -94,6 +165,9 @@ A2A：架构预留，用于跨 Agent / 跨系统协作
 - Agent 执行可追踪
 - RAG 检索可评估
 - 高风险任务可人工复核
+- 多轮对话可承接
+- 缺信息时可澄清
+- 用户补充后可恢复执行
 
 ### 4.2 小步提交
 
@@ -104,8 +178,9 @@ A2A：架构预留，用于跨 Agent / 跨系统协作
 ```text
 本次只创建 FastAPI 项目骨架和 /health 接口
 本次只实现 PostgreSQL 配置和数据库连接
-本次只实现 documents 表和 Alembic 迁移
-本次只实现 Tool Registry 基础抽象
+本次只实现 conversations / task_runs 最小模型
+本次只实现 /chat 最小闭环骨架
+本次只实现 clarification reply 流程骨架
 ```
 
 ### 4.3 不擅自扩大范围
@@ -129,27 +204,38 @@ A2A：架构预留，用于跨 Agent / 跨系统协作
 
 ## 5. 目录结构约束
 
-建议项目目录结构如下：
+推荐项目目录结构如下：
 
 ```text
 enterprise-knowledge-agentic-rag/
 ├── apps/
 │   ├── api/
+│   │   ├── main.py
+│   │   ├── deps.py
+│   │   ├── middleware/
+│   │   ├── routers/
+│   │   └── schemas/
 │   ├── worker/
+│   │   ├── celery_app.py
+│   │   └── tasks/
 │   └── web/
 ├── core/
+│   ├── common/
 │   ├── config/
-│   ├── domain/
-│   ├── database/
 │   ├── security/
+│   ├── database/
+│   │   └── models/
+│   ├── repositories/
+│   ├── services/
 │   ├── agent/
-│   ├── rag/
-│   ├── llm/
-│   ├── embeddings/
-│   ├── vectorstore/
+│   │   ├── control_plane/
+│   │   ├── mesh/
+│   │   └── contracts/
 │   ├── tools/
-│   ├── analytics/
-│   ├── contracts/
+│   │   ├── rag/
+│   │   ├── mcp/
+│   │   ├── a2a/
+│   │   └── local/
 │   ├── review/
 │   ├── observability/
 │   └── evaluation/
@@ -206,6 +292,7 @@ apps/worker/
 - 索引任务
 - 报告生成任务
 - 评估任务
+- 归档任务
 
 ### 5.3 Core 层
 
@@ -250,13 +337,31 @@ Service 层负责：
 - 控制事务边界
 - 组织响应数据
 
-### 6.3 Agent 层
+### 6.3 Repository 层
+
+Repository 层只负责：
+
+- ORM 查询
+- 持久化
+- 简单查询封装
+
+禁止：
+
+- 在 Repository 中写复杂业务逻辑
+- 在 Repository 中做路由决策
+- 在 Repository 中做风险判断
+
+### 6.4 Agent 层
 
 Agent 层负责：
 
 - 问题理解
 - 场景路由
 - 状态管理
+- 多轮上下文继承
+- 槽位校验
+- 澄清生成
+- 恢复执行
 - 工具选择
 - 风险判断
 - Human Review 中断
@@ -264,7 +369,7 @@ Agent 层负责：
 
 Agent 层不能直接操作数据库、Milvus 或 Redis，必须通过 Service / Repository / Gateway / Tool 抽象访问。
 
-### 6.4 RAG 层
+### 6.5 RAG 层
 
 RAG 层负责：
 
@@ -277,7 +382,7 @@ RAG 层负责：
 - Citation Builder
 - Retrieval Log
 
-### 6.5 Tool 层
+### 6.6 Tool 层
 
 Tool 层负责：
 
@@ -287,28 +392,93 @@ Tool 层负责：
 - 风险等级
 - 超时和重试
 - Tool Call Trace
-- MCP Tool Proxy 预留
-- A2A Agent Gateway 预留
+- MCP Tool Proxy
+- A2A Gateway
 
-### 6.6 Database 层
+### 6.7 Database 层
 
 Database 层负责：
 
 - SQLAlchemy model
 - Repository
 - Session 管理
-- Alembic 迁移
+- Schema 迁移
 
 业务代码不得绕过 Repository 随意执行 SQL。
 
 ---
 
-## 7. 编码规范
+## 7. API 开发规则
 
-### 7.1 Python 规范
+### 7.1 API 前缀
+
+所有正式接口统一使用：
+
+```text
+/api/v1
+```
+
+### 7.2 统一响应模型
+
+所有接口尽量返回统一结构：
+
+```json
+{
+  "success": true,
+  "trace_id": "tr_xxx",
+  "request_id": "req_xxx",
+  "data": {},
+  "meta": {}
+}
+```
+
+错误响应统一返回：
+
+```json
+{
+  "success": false,
+  "trace_id": "tr_xxx",
+  "request_id": "req_xxx",
+  "error": {
+    "error_code": "string",
+    "message": "string",
+    "detail": {}
+  }
+}
+```
+
+### 7.3 统一链路标识
+
+必须贯穿：
+
+- `request_id`
+- `trace_id`
+- `run_id`
+- `conversation_id`
+
+### 7.4 API 状态表达
+
+接口层必须能表达这些状态：
+
+- `succeeded`
+- `failed`
+- `waiting_review`
+- `awaiting_user_clarification`
+- `waiting_async_result`
+- `resuming_previous_task`
+
+不要只返回“成功 / 失败”二值语义。
+
+---
+
+## 8. 编码规范
+
+### 8.1 Python 规范
 
 - 使用 Python 3.10+
 - 本地开发最低支持 Python 3.10，推荐 Python 3.11；生产 Docker 镜像建议使用 Python 3.11。
+- 本项目本地默认开发环境为 `conda activate tmf_project`。
+- 如果当前终端无法直接 `conda activate`，则默认使用 `conda run -n tmf_project python`、`conda run -n tmf_project pytest`、`conda run -n tmf_project uvicorn` 执行 Python、测试和本地启动命令。
 - 类型标注尽量完整
 - 优先使用 Pydantic 定义请求、响应和配置模型
 - 函数职责单一
@@ -320,7 +490,7 @@ Database 层负责：
 - 不写硬编码密钥
 - 不写与业务无关的示例代码
 
-### 7.2 命名规范
+### 8.2 命名规范
 
 推荐命名：
 
@@ -335,20 +505,7 @@ xxx_node.py
 xxx_gateway.py
 ```
 
-示例：
-
-```text
-document_service.py
-document_repository.py
-document_model.py
-document_schema.py
-document_router.py
-rag_search_tool.py
-route_node.py
-llm_gateway.py
-```
-
-### 7.3 异常处理
+### 8.3 异常处理
 
 必须使用统一异常模型。
 
@@ -363,7 +520,7 @@ llm_gateway.py
 }
 ```
 
-### 7.4 配置规范
+### 8.4 配置规范
 
 所有环境相关配置必须通过：
 
@@ -381,7 +538,7 @@ core/config/settings.py
 - 硬编码 Milvus 地址
 - 硬编码 Redis 地址
 
-### 7.5 日志规范
+### 8.5 日志规范
 
 关键流程必须记录日志：
 
@@ -395,14 +552,16 @@ core/config/settings.py
 - SQL Audit
 - Human Review
 - Evaluation
+- Clarification
+- Task Resume
 
 日志中不得输出明文密钥。
 
-### 7.6 中文注释与技术讲解规范
+### 8.6 中文注释与技术讲解规范
 
 本项目不仅是生产级工程项目，也是学习、复盘和面试展示项目。因此代码注释必须详细、清晰、可读。
 
-#### 7.6.1 注释语言
+#### 8.6.1 注释语言
 
 所有核心业务代码、关键技术代码、数据模型字段、配置项和复杂流程必须使用中文注释。
 
@@ -417,11 +576,13 @@ Reranker
 Tool Calling
 Human Review
 Trace
+MCP
+A2A
 ```
 
 但需要配合中文解释。
 
-#### 7.6.2 必须添加注释的内容
+#### 8.6.2 必须添加注释的内容
 
 以下内容必须添加详细注释：
 
@@ -437,66 +598,20 @@ Trace
 10. 每个 SQL Guard 校验规则；
 11. 每个 Human Review 状态；
 12. 每个 Trace / Audit 字段；
-13. 每个配置项的含义；
-14. 关键技术点背后的原理。
+13. 每个 Clarification / Slot 字段；
+14. 每个配置项的含义；
+15. 关键技术点背后的原理。
 
-#### 7.6.3 业务逻辑注释要求
+#### 8.6.3 业务逻辑注释要求
 
 核心流程不能只写“调用某函数”，而要解释为什么这么做。
 
-错误示例：
+#### 8.6.4 字段注释要求
 
-```python
-# 检索文档
-chunks = retriever.search(query)
-```
-
-正确示例：
-
-```python
-# 根据用户问题检索知识库中的相关 chunk。
-# 这里不是直接检索所有文档，而是先根据用户角色、业务领域和知识库权限构造 metadata filter，
-# 确保用户只能召回自己有权限访问的文档内容，避免出现越权知识泄露。
-chunks = retriever.search(query=query, filters=permission_filters)
-```
-
-#### 7.6.4 字段注释要求
-
-数据模型字段必须写清楚中文含义。
-
-错误示例：
-
-```python
-class Document(Base):
-    id: str
-    status: str
-```
-
-正确示例：
-
-```python
-class Document(Base):
-    # 文档唯一 ID，用于关联 chunk、向量索引、检索日志和审计记录
-    id: str
-
-    # 文档当前处理状态，例如 uploaded、parsing、indexed、failed。
-    # 该字段用于前端展示文档入库进度，也用于 worker 判断是否需要重新处理。
-    status: str
-```
-
+数据模型字段必须写清楚中文含义。  
 如果使用 SQLAlchemy，字段也应尽量通过 `comment` 或代码注释说明含义。
 
-示例：
-
-```python
-title = Column(
-    String(255),
-    nullable=False,
-    comment="文档标题，例如《动火作业安全管理制度》",
-)
-```
-
-#### 7.6.5 函数注释要求
+#### 8.6.5 函数注释要求
 
 核心函数必须包含 docstring，说明：
 
@@ -507,106 +622,19 @@ title = Column(
 - 注意事项；
 - 是否涉及权限、安全、审计或高风险操作。
 
-示例：
-
-```python
-def build_permission_filters(user_context: UserContext) -> dict:
-    """
-    根据当前用户上下文构造 Milvus metadata filter。
-
-    业务作用：
-    - 限制用户只能检索自己有权限访问的知识库和文档；
-    - 防止普通员工检索到安全生产、合同、经营分析等敏感资料；
-    - 该 filter 会在 RAG 检索前传入 Milvus，而不是检索后再过滤。
-
-    参数：
-    - user_context: 当前用户身份、角色、部门和权限集合。
-
-    返回：
-    - dict: 可用于向量检索的 metadata filter 条件。
-
-    注意：
-    - 权限过滤必须前置；
-    - 不允许只在前端做权限控制；
-    - 不允许先检索全部 chunk 再过滤。
-    """
-```
-
-#### 7.6.6 Agent 工作流注释要求
+#### 8.6.6 Agent 工作流注释要求
 
 LangGraph / Agent 相关代码必须详细解释每个 node 的职责。
 
-示例：
-
-```python
-def route_node(state: AgentState) -> AgentState:
-    """
-    Agent 路由节点。
-
-    业务作用：
-    - 分析用户问题属于哪个业务场景；
-    - 例如制度问答、安全生产问答、设备检修、合同审查、经营分析等；
-    - 路由结果会决定后续调用哪个业务 Agent 或工具。
-
-    关键点：
-    - 不能只依赖关键词规则，后续可结合 LLM 分类；
-    - 路由结果必须写入 state.route；
-    - 路由过程需要记录 Trace，便于后续评估 Route Accuracy。
-    """
-```
-
-#### 7.6.7 RAG 代码注释要求
+#### 8.6.7 RAG 代码注释要求
 
 RAG 检索链路必须解释每一步的原理和业务目的。
 
-必须说明：
-
-```text
-为什么要 query rewrite
-为什么要 dense retrieval
-为什么要 sparse retrieval
-为什么要 hybrid search
-为什么要 rerank
-为什么要 context compression
-为什么答案必须带 citation
-为什么权限 filter 必须在检索前执行
-```
-
-示例：
-
-```python
-# 使用 BGE-M3 同时生成 dense 向量和 sparse 向量。
-# dense 向量更擅长语义相似召回，例如“动火作业安全确认”和“特殊作业审批要求”；
-# sparse 向量更擅长关键词精确匹配，例如“E101 告警”“挂牌上锁”“环评批复”。
-# 两者结合可以同时提升语义召回和关键词召回效果。
-dense_vector, sparse_vector = embedding_gateway.embed_query(query)
-```
-
-#### 7.6.8 SQL Agent 注释要求
+#### 8.6.8 SQL Agent 注释要求
 
 SQL Agent 代码必须详细说明安全控制逻辑。
 
-必须解释：
-
-```text
-为什么只能 SELECT
-为什么要自动 LIMIT
-为什么要校验敏感字段
-为什么要记录 SQL Audit
-为什么不能让 LLM 直接执行 SQL
-```
-
-示例：
-
-```python
-# SQL 由 LLM 生成后不能直接执行。
-# 因为 LLM 可能生成 DELETE、UPDATE、DROP 等危险语句，
-# 也可能查询当前用户无权限访问的敏感字段。
-# 所以必须先经过 SQL Guard 做语法、操作类型、表权限、字段权限和 LIMIT 校验。
-checked_sql = sql_guard.validate(generated_sql, user_context)
-```
-
-#### 7.6.9 Tool Calling 注释要求
+#### 8.6.9 Tool Calling 注释要求
 
 每个 Tool 必须注释说明：
 
@@ -618,57 +646,11 @@ checked_sql = sql_guard.validate(generated_sql, user_context)
 - 是否需要 Human Review；
 - 调用结果如何进入 Trace。
 
-示例：
-
-```python
-class SQLQueryTool(BaseTool):
-    """
-    经营数据查询工具。
-
-    业务作用：
-    - 用于经营分析 Agent 查询煤炭产量、销售收入、新能源发电量、成本利润等数据；
-    - 工具只允许执行经过 SQL Guard 校验的只读 SQL；
-    - 查询结果会返回给 Agent，用于生成经营分析结论或报告。
-
-    风险控制：
-    - risk_level = medium；
-    - 查询敏感字段时需要权限校验；
-    - 所有 SQL 必须记录到 sql_audits 表；
-    - 禁止执行写操作。
-    """
-```
-
-#### 7.6.10 配置项注释要求
+#### 8.6.10 配置项注释要求
 
 配置文件中的每个关键配置都要说明中文含义。
 
-示例：
-
-```python
-class Settings(BaseSettings):
-    # PostgreSQL 数据库连接地址，用于存储用户、知识库、文档元数据、Trace 和评估数据
-    database_url: str
-
-    # Redis 连接地址，用作 Celery Broker 和短期缓存
-    redis_url: str
-
-    # Milvus 服务地址，用于存储和检索文档 chunk 的 dense/sparse 向量
-    milvus_uri: str
-```
-
-#### 7.6.11 注释不要写成废话
-
-禁止无意义注释。
-
-错误示例：
-
-```python
-# 定义变量
-x = 1
-
-# 调用函数
-result = func()
-```
+#### 8.6.11 注释不要写成废话
 
 注释应该解释：
 
@@ -680,7 +662,7 @@ result = func()
 边界条件
 ```
 
-#### 7.6.12 面试友好原则
+#### 8.6.12 面试友好原则
 
 关键模块的注释要做到：
 
@@ -689,13 +671,11 @@ result = func()
 - 后续复盘时能快速理解为什么这样设计；
 - Codex 后续修改时不会破坏架构边界。
 
-也就是说，本项目代码不仅要“能运行”，还要“能讲清楚”。
-
 ---
 
-## 8. Agent 开发规则
+## 9. Agent 开发规则
 
-### 8.1 Agent State
+### 9.1 Agent State
 
 Agent State 必须结构化，不允许用散乱 dict 到处传。
 
@@ -716,9 +696,12 @@ need_human_review
 review_status
 final_answer
 status
+conversation_id
+slot_snapshot
+clarification_state
 ```
 
-### 8.2 Agent Router
+### 9.2 Agent Router
 
 Router 负责判断任务类型：
 
@@ -735,7 +718,7 @@ human_review_required
 unsupported
 ```
 
-### 8.3 业务 Agent
+### 9.3 业务 Agent
 
 业务 Agent 包括：
 
@@ -750,7 +733,36 @@ unsupported
 报告生成 Agent
 ```
 
-### 8.4 高风险任务
+### 9.4 多轮对话规则
+
+系统必须支持：
+
+- `conversation_id` 承接多轮；
+- 会话记忆读取；
+- 指代消解；
+- 槽位抽取；
+- 缺失槽位时进入澄清；
+- 用户补充后恢复原任务。
+
+禁止：
+
+- 把所有请求都当成单轮请求处理；
+- 缺少关键槽位时盲猜执行；
+- 高风险场景基于模糊上下文直接执行。
+
+### 9.5 最小可执行条件规则
+
+对经营分析、合同审查、报告生成等任务，必须在执行前校验最小可执行条件。
+
+例如：
+
+- 合同审查至少要有 `contract_file_id`
+- 经营分析至少要有 `metric + time_range`
+- 项目问答至少要能确定项目对象或唯一引用
+
+如果不满足，则必须生成澄清，不允许硬执行。
+
+### 9.6 高风险任务
 
 以下任务不得直接自动执行：
 
@@ -767,15 +779,15 @@ unsupported
 
 ---
 
-## 9. Tool Calling / Function Call 规则
+## 10. Tool Calling / Function Call 规则
 
-### 9.1 必须通过 Tool Registry
+### 10.1 必须通过 Tool Registry
 
 所有 Agent 可调用工具必须注册到 Tool Registry。
 
 工具不得散落在业务代码中直接调用。
 
-### 9.2 Tool 元数据
+### 10.2 Tool 元数据
 
 每个 Tool 必须包含：
 
@@ -792,7 +804,7 @@ audit_enabled
 human_review_required
 ```
 
-### 9.3 Tool 调用流程
+### 10.3 Tool 调用流程
 
 工具调用必须经过：
 
@@ -816,7 +828,7 @@ Agent 选择工具
 返回工具结果
 ```
 
-### 9.4 内部工具
+### 10.4 内部工具
 
 内部工具包括：
 
@@ -832,22 +844,37 @@ resume_agent_run
 record_trace
 ```
 
-### 9.5 MCP 与 A2A
+### 10.5 MCP 规则
 
-本项目预留：
+MCP 在本项目中属于 Tool / Capability Fabric 的实现方式之一。
 
-```text
-MCP Tool Proxy
-A2A Agent Gateway
-```
+要求：
 
-当前代码可以先设计接口和目录，不要求立刻实现完整协议。
+- 所有 MCP 调用必须经过统一的 `mcp gateway/client` 抽象；
+- MCP Server 输入输出必须使用结构化 schema；
+- MCP 调用必须记录到 `mcp_calls`；
+- SQL MCP 必须经过 SQL Guard；
+- File MCP 必须走权限过滤；
+- 不允许业务代码绕过统一网关直接调用外部服务。
+
+### 10.6 A2A 规则
+
+A2A 在本项目中属于跨 Agent 委托能力。
+
+要求：
+
+- 所有 A2A 调用必须经过统一 A2A Gateway；
+- 必须使用 `task envelope / result contract / status contract`；
+- 必须支持 trace_id / run_id 透传；
+- 必须记录 `a2a_delegations`；
+- 第一阶段可先实现“内部 HTTP/JSON 契约版 A2A”；
+- 不允许把 A2A 逻辑散落在业务 Agent 中随意拼请求。
 
 ---
 
-## 10. RAG 开发规则
+## 11. RAG 开发规则
 
-### 10.1 检索主链路
+### 11.1 检索主链路
 
 本项目 RAG 主链路为：
 
@@ -865,7 +892,7 @@ Citation Builder
 LLM Answer
 ```
 
-### 10.2 权限过滤必须前置
+### 11.2 权限过滤必须前置
 
 检索时必须使用 metadata filter 限制：
 
@@ -880,7 +907,7 @@ security_level
 
 禁止先检索全部结果再在前端过滤。
 
-### 10.3 答案必须可溯源
+### 11.3 答案必须可溯源
 
 RAG 答案必须返回：
 
@@ -894,7 +921,7 @@ score
 content_preview
 ```
 
-### 10.4 无依据回答规则
+### 11.4 无依据回答规则
 
 如果知识库中没有明确依据，必须回答：
 
@@ -906,13 +933,13 @@ content_preview
 
 ---
 
-## 11. SQL Agent 开发规则
+## 12. SQL Agent 开发规则
 
-### 11.1 SQL 必须经过安全校验
+### 12.1 SQL 必须经过安全校验
 
 任何 SQL 执行前必须经过 SQL Guard。
 
-### 11.2 禁止 SQL 操作
+### 12.2 禁止 SQL 操作
 
 默认禁止：
 
@@ -928,7 +955,7 @@ GRANT
 REVOKE
 ```
 
-### 11.3 查询限制
+### 12.3 查询限制
 
 必须支持：
 
@@ -940,7 +967,7 @@ REVOKE
 - 字段级权限
 - SQL Audit
 
-### 11.4 SQL 输出
+### 12.4 SQL 输出
 
 经营分析页面应展示：
 
@@ -953,7 +980,7 @@ REVOKE
 
 ---
 
-## 12. 合同审查开发规则
+## 13. 合同审查开发规则
 
 合同审查必须包含：
 
@@ -971,9 +998,9 @@ REVOKE
 
 ---
 
-## 13. Human Review 开发规则
+## 14. Human Review 开发规则
 
-### 13.1 触发条件
+### 14.1 触发条件
 
 以下任务必须支持 Human Review：
 
@@ -984,7 +1011,7 @@ REVOKE
 - 正式报告发布
 - 邮件或工单正式提交
 
-### 13.2 Review 状态
+### 14.2 Review 状态
 
 Review 状态包括：
 
@@ -997,7 +1024,7 @@ expired
 cancelled
 ```
 
-### 13.3 Review 数据
+### 14.3 Review 数据
 
 Review 必须记录：
 
@@ -1014,7 +1041,7 @@ reviewed_at
 
 ---
 
-## 14. Trace 与审计规则
+## 15. Trace 与审计规则
 
 所有关键链路必须记录 Trace。
 
@@ -1025,9 +1052,13 @@ agent_runs
 tool_calls
 retrieval_logs
 llm_calls
+mcp_calls
+a2a_delegations
 sql_audits
 human_reviews
 evaluation_tasks
+clarification_events
+workflow_events
 ```
 
 每次用户请求必须有唯一：
@@ -1036,22 +1067,26 @@ evaluation_tasks
 run_id / trace_id
 ```
 
-### 14.1 不允许缺失审计的操作
+### 15.1 不允许缺失审计的操作
 
 以下操作必须记录：
 
 - Agent 执行
 - Tool 调用
+- MCP 调用
+- A2A 委托
 - SQL 查询
 - 文档入库
 - 合同审查
 - Human Review
 - Evaluation
 - 高风险拒绝
+- Clarification 生成
+- 任务恢复执行
 
 ---
 
-## 15. Evaluation 开发规则
+## 16. Evaluation 开发规则
 
 系统需要支持：
 
@@ -1067,7 +1102,7 @@ run_id / trace_id
 
 ---
 
-## 16. 前端开发规则
+## 17. 前端开发规则
 
 前端技术栈：
 
@@ -1094,11 +1129,11 @@ TailwindCSS
 
 ---
 
-## 17. 测试规则
+## 18. 测试规则
 
 新增核心功能必须补充测试。
 
-### 17.1 单元测试
+### 18.1 单元测试
 
 必须覆盖：
 
@@ -1110,8 +1145,10 @@ TailwindCSS
 - Tool Registry
 - Risk Policy
 - Agent Router
+- Clarification Manager
+- Review Manager
 
-### 17.2 集成测试
+### 18.2 集成测试
 
 必须覆盖：
 
@@ -1120,17 +1157,20 @@ TailwindCSS
 - SQL 分析链路
 - 合同审查链路
 - Human Review 链路
+- Clarification 链路
 - Trace 查询链路
 
-### 17.3 测试命令
+### 18.3 测试命令
 
 如果项目已有测试命令，修改完成后必须运行相关测试。
 
 如果暂时没有完整测试框架，应至少保证新增代码可导入、基础接口可启动。
 
+默认优先在 `tmf_project` 环境下执行测试与启动命令。
+
 ---
 
-## 18. Codex 执行任务格式
+## 19. Codex 执行任务格式
 
 每次执行任务时，应遵循以下流程：
 
@@ -1155,9 +1195,27 @@ TailwindCSS
 后续建议
 ```
 
+### 19.1 Codex 本轮任务提示词要求
+
+如果任务是由上层设计文档驱动，Codex 应优先遵循：
+
+1. `ARCHITECTURE.md`
+2. `AGENT_WORKFLOW.md`
+3. `API_DESIGN.md`
+4. `DB_DESIGN.md`
+5. `PROJECT_STRUCTURE.md`
+
+### 19.2 Codex 不得擅自做的事
+
+- 不得擅自引入未讨论的新重型依赖；
+- 不得擅自把单轮接口写成最终版完整业务系统；
+- 不得忽略 conversation / run / clarification / review 状态；
+- 不得只写“能跑”的代码而破坏分层边界；
+- 不得省略核心中文注释。
+
 ---
 
-## 19. 禁止事项
+## 20. 禁止事项
 
 禁止：
 
@@ -1171,48 +1229,54 @@ TailwindCSS
 - 绕过权限校验检索文档
 - 绕过 SQL Guard 执行 SQL
 - 高风险任务绕过 Human Review
+- 缺少关键槽位时盲猜执行
+- 绕过澄清流程直接执行高风险任务
 - 编造制度、安全规程、合同条款或经营数据
 - 删除已有文档和测试，除非用户明确要求
 - 引入未讨论的新重型依赖
 - 把 OpenSearch 或 Kafka 作为首期必选组件
-- 将 A2A 作为当前必须实现功能
 - 生成缺少中文注释的核心业务代码
 - 生成没有字段中文说明的数据模型
-- 生成没有解释关键技术原理的 RAG、Agent、SQL、Tool 代码
+- 生成没有解释关键技术原理的 RAG、Agent、SQL、Tool、MCP、A2A 代码
 
 ---
 
-## 20. 当前开发优先级
+## 21. 当前开发优先级
 
-在正式写业务代码前，推荐开发顺序为：
+在正式写完整业务代码前，推荐开发顺序为：
 
 ```text
 1. 项目目录结构
 2. FastAPI 基础骨架
 3. 配置系统
-4. PostgreSQL + SQLAlchemy + Alembic
+4. PostgreSQL + SQLAlchemy
 5. 用户、角色、权限基础模型
-6. 知识库与文档元数据模型
+6. conversations / task_runs / clarification / review 基础模型
 7. Redis + Celery
-8. 文档解析与异步入库
-9. BGE-M3 Embedding Gateway
-10. Milvus VectorStore
-11. Hybrid Search
-12. BGE-Reranker
-13. LangGraph Agent 基础工作流
-14. Tool Registry
-15. Trace 与审计
-16. Human Review
-17. SQL Agent
-18. 合同审查 Agent
-19. Evaluation
-20. 前端页面
-21. OpenTelemetry + Prometheus + Grafana
+8. API 基础路由与统一响应模型
+9. /chat 最小闭环
+10. 多轮会话与澄清恢复
+11. 文档解析与异步入库
+12. BGE-M3 Embedding Gateway
+13. Milvus VectorStore
+14. Hybrid Search
+15. BGE-Reranker
+16. LangGraph Agent 基础工作流
+17. Tool Registry
+18. MCP Gateway
+19. Trace 与审计
+20. Human Review
+21. SQL Agent
+22. 合同审查 Agent
+23. A2A Gateway
+24. Evaluation
+25. 前端页面
+26. OpenTelemetry + Prometheus + Grafana
 ```
 
 ---
 
-## 21. 输出风格要求
+## 22. 输出风格要求
 
 输出要工程化、简洁、明确。
 
@@ -1227,16 +1291,17 @@ TailwindCSS
 
 ---
 
-## 22. 当前版本说明
+## 23. 当前版本说明
 
-当前 `AGENTS.md` 为 v2 版本，用于约束 Codex 在本项目中的编码行为。
+当前 `AGENTS.md` 用于约束 Codex 在本项目中的编码行为。
 
-v2 重点新增：
+本版重点强调：
 
-- 中文详细注释规范；
-- 字段级中文注释要求；
-- 业务逻辑逐步说明要求；
-- RAG / Agent / SQL / Tool 关键技术原理注释要求；
-- 面试友好型代码说明要求。
+- 与最新架构、工作流、数据库、API、项目骨架文档保持一致；
+- MCP 采用 Python 服务 + 统一网关抽象；
+- A2A 第一阶段采用内部 HTTP/JSON 契约式网关预留；
+- 多轮对话、槽位澄清、恢复执行上升为项目级开发规则；
+- API 响应、状态、链路标识统一；
+- 中文详细注释与面试友好型代码说明要求继续保持。
 
 后续如 PRD、架构或技术选型发生变化，应同步更新本文件。

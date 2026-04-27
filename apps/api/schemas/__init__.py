@@ -1,4 +1,8 @@
 """API Schema 包。
 
-该目录未来负责定义请求体、响应体和通用错误模型。
+当前阶段已经开始承载第一批真正用于联调的接口模型：
+- common
+- chat
+- conversation
+- clarification
 """

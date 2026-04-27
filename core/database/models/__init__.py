@@ -1,4 +1,13 @@
-"""数据库模型包。
+"""数据库模型包。"""
 
-该目录未来用于放置用户、文档、知识库、Trace、Review 等表模型。
-"""
+from core.database.models.conversation import Conversation, ConversationMemory, ConversationMessage
+from core.database.models.runtime import ClarificationEvent, SlotSnapshot, TaskRun
+
+__all__ = [
+    "Conversation",
+    "ConversationMessage",
+    "ConversationMemory",
+    "TaskRun",
+    "SlotSnapshot",
+    "ClarificationEvent",
+]

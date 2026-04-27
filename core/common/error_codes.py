@@ -1,0 +1,21 @@
+"""统一错误码定义。
+
+当前阶段先沉淀第一批最常用错误码常量，目的不是把所有错误一次性枚举完，
+而是先把 API、Service、异常处理之间的错误语义稳定下来。
+
+这样后续继续开发文档上传、合同审查、经营分析、Review、Trace 等模块时，
+可以复用同一套错误码入口，避免字符串散落在各个文件里。
+"""
+
+# 通用请求与系统错误
+REQUEST_VALIDATION_ERROR = "REQUEST_VALIDATION_ERROR"
+INTERNAL_SERVER_ERROR = "INTERNAL_SERVER_ERROR"
+PERMISSION_DENIED = "PERMISSION_DENIED"
+UNAUTHORIZED = "UNAUTHORIZED"
+INVALID_AUTH_CONTEXT = "INVALID_AUTH_CONTEXT"
+
+# 会话相关错误
+CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND"
+
+# 澄清相关错误
+CLARIFICATION_NOT_FOUND = "CLARIFICATION_NOT_FOUND"

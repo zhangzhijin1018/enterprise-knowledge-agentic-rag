@@ -1,0 +1,13 @@
+"""Repository 包。
+
+该目录用于放置真正面向业务用例的数据访问层。
+当前阶段先用内存实现打通最小闭环，后续可逐步切换到 SQLAlchemy Session 实现。
+"""
+
+from core.repositories.conversation_repository import ConversationRepository
+from core.repositories.task_run_repository import TaskRunRepository
+
+__all__ = [
+    "ConversationRepository",
+    "TaskRunRepository",
+]
