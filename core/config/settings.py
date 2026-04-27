@@ -125,6 +125,15 @@ class Settings(BaseSettings):
         description="默认大模型名称",
     )
 
+    # 本地开发阶段的文档上传目录。
+    # 当前阶段文档文件先直接写到工作区内的 `storage/uploads/`，
+    # 这样可以在不引入对象存储的前提下把“上传 -> 元数据落库”链路跑通。
+    # 后续如果切换到 MinIO、OSS、S3，只需要替换 DocumentService 中的存储实现。
+    local_upload_dir: str = Field(
+        default="storage/uploads",
+        description="本地开发上传目录",
+    )
+
     @property
     def is_database_configured(self) -> bool:
         """判断是否已经提供真实数据库连接配置。

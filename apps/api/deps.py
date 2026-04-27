@@ -22,12 +22,14 @@ from core.agent.workflow import ChatWorkflowFacade
 from core.config import get_settings
 from core.database.session import get_db_session
 from core.repositories.conversation_repository import ConversationRepository
+from core.repositories.document_repository import DocumentRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
 from core.security.auth import resolve_user_context_from_request
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
 from core.services.conversation_service import ConversationService
+from core.services.document_service import DocumentService
 
 
 def get_session() -> Iterator[Session | None]:
@@ -76,6 +78,14 @@ def get_task_run_repository(
     return TaskRunRepository(session=session)
 
 
+def get_document_repository(
+    session: Session | None = Depends(get_session),
+) -> DocumentRepository:
+    """提供文档 Repository 依赖。"""
+
+    return DocumentRepository(session=session)
+
+
 def get_chat_service(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
@@ -106,4 +116,15 @@ def get_clarification_service(
     return ClarificationService(
         conversation_repository=conversation_repository,
         task_run_repository=task_run_repository,
+    )
+
+
+def get_document_service(
+    document_repository: DocumentRepository = Depends(get_document_repository),
+) -> DocumentService:
+    """提供 DocumentService 依赖。"""
+
+    return DocumentService(
+        document_repository=document_repository,
+        settings=get_settings(),
     )

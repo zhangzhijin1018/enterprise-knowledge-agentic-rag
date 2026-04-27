@@ -5,9 +5,11 @@
 """
 
 from core.repositories.conversation_repository import ConversationRepository
+from core.repositories.document_repository import DocumentRepository
 from core.repositories.task_run_repository import TaskRunRepository
 
 __all__ = [
     "ConversationRepository",
+    "DocumentRepository",
     "TaskRunRepository",
 ]

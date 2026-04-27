@@ -5,4 +5,5 @@
 - chat
 - conversation
 - clarification
+- document
 """
