@@ -179,6 +179,20 @@ class ConversationRepository:
         record["updated_at"] = _utcnow()
         return record
 
+    def cancel_conversation(self, conversation_id: str) -> dict | None:
+        """将会话标记为已取消。
+
+        设计说明：
+        - 当前阶段使用“状态取消”而不是“物理删除”；
+        - 这样历史消息、澄清记录和运行轨迹仍可保留，便于后续 Trace 与审计；
+        - Repository 只负责落库，不在这里扩展额外业务副作用。
+        """
+
+        return self.update_conversation(
+            conversation_id,
+            current_status="cancelled",
+        )
+
     def list_conversations(
         self,
         page: int = 1,

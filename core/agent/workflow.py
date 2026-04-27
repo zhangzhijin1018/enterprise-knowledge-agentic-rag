@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timezone
 
 from apps.api.schemas.chat import ChatRequest
+from core.agent.control_plane import ClarificationManager, TaskRouter, WorkflowStateManager
 from core.agent.state import AgentState
 from core.common.response import build_response_meta
 from core.repositories.conversation_repository import ConversationRepository
@@ -45,10 +46,24 @@ class ChatWorkflowFacade:
         conversation_repository: ConversationRepository,
         task_run_repository: TaskRunRepository,
     ) -> None:
-        """注入工作流执行依赖。"""
+        """注入工作流执行依赖。
+
+        第三轮开始，workflow 内部做了轻拆分：
+        - `TaskRouter` 负责路由判断；
+        - `WorkflowStateManager` 负责运行态持久化；
+        - `ClarificationManager` 负责澄清分支细节。
+
+        这样不会改变外部 API 契约，但能让主流程编排更清晰。
+        """
 
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
+        self.task_router = TaskRouter()
+        self.state_manager = WorkflowStateManager(task_run_repository=task_run_repository)
+        self.clarification_manager = ClarificationManager(
+            conversation_repository=conversation_repository,
+            state_manager=self.state_manager,
+        )
 
     def execute_chat(self, payload: ChatRequest, user_context: UserContext) -> dict:
         """执行最小 chat 工作流。
@@ -74,14 +89,10 @@ class ChatWorkflowFacade:
             user_id=user_context.user_id,
             query=payload.query,
         )
-        task_run = self.task_run_repository.create_task_run(
+        task_run = self.state_manager.create_task_run(
             conversation_id=conversation["conversation_id"],
             user_id=user_context.user_id,
-            task_type="chat",
-            route="chat",
-            status="created",
-            sub_status="request_received",
-            input_snapshot=payload.model_dump(),
+            payload=payload,
         )
 
         self.conversation_repository.add_message(
@@ -237,22 +248,11 @@ class ChatWorkflowFacade:
         后续接真实路由模型时，优先替换本节点，而不是外围 API 契约。
         """
 
-        query = state["query"]
-        if self._should_require_clarification(query):
-            state["route"] = "business_analysis"
-            state["business_domain"] = "analytics"
-            state["selected_agent"] = "mock_business_analysis_agent"
-            state["selected_capability"] = "clarification_workflow"
-        elif any(keyword in query for keyword in ("制度", "政策", "规程")):
-            state["route"] = "policy_qa"
-            state["business_domain"] = "policy"
-            state["selected_agent"] = "mock_policy_agent"
-            state["selected_capability"] = "mock_rag_answer"
-        else:
-            state["route"] = "general_qa"
-            state["business_domain"] = "general"
-            state["selected_agent"] = "mock_general_agent"
-            state["selected_capability"] = "mock_direct_answer"
+        decision = self.task_router.route(state["query"])
+        state["route"] = decision.route
+        state["business_domain"] = decision.business_domain
+        state["selected_agent"] = decision.selected_agent
+        state["selected_capability"] = decision.selected_capability
 
         self._update_task_run_stage(
             state,
@@ -288,83 +288,13 @@ class ChatWorkflowFacade:
         return self._execute_answer_path(state)
 
     def _execute_clarification_path(self, state: AgentState) -> dict:
-        """执行澄清分支。"""
+        """执行澄清分支。
 
-        clarification_question = "你想看哪个指标？发电量、收入还是成本？"
-        clarification_slots = ["metric"]
+        workflow 本身只负责决定“进入澄清”；
+        具体的运行态创建、消息落库和响应构造都交给 `ClarificationManager`。
+        """
 
-        self.task_run_repository.create_slot_snapshot(
-            run_id=state["run_id"],
-            task_type=state["task_type"],
-            required_slots=clarification_slots,
-            collected_slots={},
-            missing_slots=clarification_slots,
-            min_executable_satisfied=False,
-            awaiting_user_input=True,
-            resume_step="resume_after_metric_clarification",
-        )
-        clarification_event = self.task_run_repository.create_clarification_event(
-            run_id=state["run_id"],
-            conversation_id=state["conversation_id"],
-            question_text=clarification_question,
-            target_slots=clarification_slots,
-        )
-
-        self.conversation_repository.add_message(
-            conversation_id=state["conversation_id"],
-            role="assistant",
-            message_type="clarification",
-            content=clarification_question,
-            related_run_id=state["run_id"],
-            structured_content={
-                "clarification_id": clarification_event["clarification_id"],
-                "target_slots": clarification_slots,
-            },
-        )
-        self.conversation_repository.upsert_memory(
-            state["conversation_id"],
-            last_route=state["route"],
-            short_term_memory={
-                "last_status": "awaiting_user_clarification",
-                "clarification_id": clarification_event["clarification_id"],
-            },
-        )
-        self.conversation_repository.update_conversation(
-            state["conversation_id"],
-            current_route=state["route"],
-            current_status="active",
-            last_run_id=state["run_id"],
-        )
-
-        state["clarification_id"] = clarification_event["clarification_id"]
-        state["clarification_question"] = clarification_question
-        state["clarification_slots"] = clarification_slots
-        state["status"] = "awaiting_user_clarification"
-        state["sub_status"] = "awaiting_slot_fill"
-
-        self._update_task_run_stage(
-            state,
-            status="awaiting_user_clarification",
-            sub_status="awaiting_slot_fill",
-        )
-
-        return {
-            "data": {
-                "clarification": {
-                    "clarification_id": clarification_event["clarification_id"],
-                    "question": clarification_question,
-                    "target_slots": clarification_slots,
-                }
-            },
-            "meta": build_response_meta(
-                conversation_id=state["conversation_id"],
-                run_id=state["run_id"],
-                status="awaiting_user_clarification",
-                sub_status="awaiting_slot_fill",
-                need_clarification=True,
-                is_async=False,
-            ),
-        }
+        return self.clarification_manager.handle_metric_clarification(state)
 
     def _execute_answer_path(self, state: AgentState) -> dict:
         """执行直接回答分支。"""
@@ -414,11 +344,10 @@ class ChatWorkflowFacade:
         state["status"] = "succeeded"
         state["sub_status"] = "drafting_answer"
 
-        self._update_task_run_stage(
-            state,
-            status="succeeded",
-            sub_status="drafting_answer",
-            output_snapshot={"answer": answer, "citations": citations},
+        self.state_manager.mark_answer_succeeded(
+            state=state,
+            answer=answer,
+            citations=citations,
             finished_at=finished_at,
         )
 
@@ -447,7 +376,7 @@ class ChatWorkflowFacade:
         - 集中到一个方法里，更方便未来接审计日志或状态迁移校验。
         """
 
-        self.task_run_repository.update_task_run(state["run_id"], **updates)
+        self.state_manager.update_task_run_stage(state, **updates)
 
     def _get_or_create_conversation(self, conversation_id: str | None, user_id: int, query: str) -> dict:
         """获取或创建会话。"""
@@ -464,23 +393,3 @@ class ChatWorkflowFacade:
             current_route="chat",
             current_status="active",
         )
-
-    def _should_require_clarification(self, query: str) -> bool:
-        """判断是否需要先追问澄清。
-
-        当前先使用可解释规则，演示“信息不足时先补槽，再恢复执行”的平台能力。
-        """
-
-        normalized_query = query.lower()
-        analytics_keywords = ("分析", "统计", "指标", "经营", "趋势")
-        known_metrics = ("发电量", "收入", "成本", "利润", "产量")
-
-        if any(keyword in query for keyword in analytics_keywords) and not any(
-            metric in query for metric in known_metrics
-        ):
-            return True
-
-        if "clarify" in normalized_query or "澄清" in query:
-            return True
-
-        return False

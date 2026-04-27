@@ -132,3 +132,30 @@ class ConversationService:
             },
             "meta": build_response_meta(conversation_id=conversation_id),
         }
+
+    def cancel_conversation(self, conversation_id: str, user_context: UserContext) -> dict:
+        """取消当前用户自己的会话。
+
+        业务说明：
+        - 取消不是删除，而是把当前会话标记为终止状态；
+        - 当前先做最小状态流转，不联动更复杂的 task_run 中断；
+        - 接口保持幂等，即重复调用不会造成额外副作用。
+        """
+
+        conversation = self._get_accessible_conversation_or_raise(
+            conversation_id=conversation_id,
+            user_context=user_context,
+        )
+
+        if conversation["current_status"] != "cancelled":
+            self.conversation_repository.cancel_conversation(conversation_id)
+
+        return {
+            "data": {
+                "message": "会话已取消",
+            },
+            "meta": build_response_meta(
+                conversation_id=conversation_id,
+                status="cancelled",
+            ),
+        }

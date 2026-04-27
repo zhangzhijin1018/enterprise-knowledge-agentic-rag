@@ -45,3 +45,15 @@ class ConversationMessageItem(BaseModel):
 
     # 创建时间。
     created_at: str = Field(description="创建时间")
+
+
+class ConversationCancelData(BaseModel):
+    """取消会话响应数据。
+
+    当前接口保持极简，只返回一条稳定提示文案。
+    这样前端可以先据此刷新列表、关闭输入框或提示用户重新开始，
+    后续如果要补更多上下文信息，也可以在这个数据模型上继续扩展。
+    """
+
+    # 返回给前端的最小提示信息。
+    message: str = Field(description="取消结果提示信息")
