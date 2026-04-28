@@ -259,3 +259,79 @@ class ClarificationEvent(TimestampMixin, Base):
 
     # 解决时间。
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="解决时间")
+
+
+class SQLAudit(Base):
+    """SQL 审计表。
+
+    业务作用：
+    - 记录经营分析链路中的 SQL 生成、安全检查、执行结果；
+    - 即使当前阶段还是最小规则式 SQL Builder，也必须把审计对象先立起来；
+    - 后续当系统升级到 LLM 辅助 SQL 生成、更多表查询和更严格权限治理时，
+      审计数据仍然可以沿用，不需要重新设计主链路。
+    """
+
+    __tablename__ = "sql_audits"
+    __table_args__ = {"comment": "SQL 审计表：存储经营分析 SQL 生成、安全校验与执行审计记录"}
+
+    # 数据库内部主键。
+    id: Mapped[int] = mapped_column(
+        build_bigint_type(),
+        primary_key=True,
+        autoincrement=True,
+        comment="数据库内部主键",
+    )
+
+    # 关联任务运行 ID。
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="关联任务运行 ID")
+
+    # 发起用户 ID。当前阶段保持可空，便于兼容本地测试和历史骨架。
+    user_id: Mapped[int | None] = mapped_column(
+        build_bigint_type(),
+        nullable=True,
+        comment="发起用户 ID",
+    )
+
+    # 数据库类型，例如 postgres、sqlite、mock。
+    db_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="数据库类型")
+
+    # 指标或分析范围说明，便于快速检索审计记录。
+    metric_scope: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="指标或分析范围说明")
+
+    # SQL Builder 原始生成 SQL。
+    generated_sql: Mapped[str] = mapped_column(Text, nullable=False, comment="原始生成 SQL")
+
+    # SQL Guard 安全检查后的 SQL。当前阶段一般是补 LIMIT 或拒绝执行后的保留值。
+    checked_sql: Mapped[str | None] = mapped_column(Text, nullable=True, comment="安全检查后的 SQL")
+
+    # 是否通过安全检查。
+    is_safe: Mapped[bool] = mapped_column(nullable=False, default=False, comment="是否通过安全检查")
+
+    # 如果被拦截，这里记录拦截原因。
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True, comment="拦截原因")
+
+    # 执行状态，例如 created、blocked、succeeded、failed。
+    execution_status: Mapped[str] = mapped_column(String(32), nullable=False, comment="执行状态")
+
+    # 返回行数，用于前端展示和审计回放。
+    row_count: Mapped[int | None] = mapped_column(nullable=True, comment="返回行数")
+
+    # 查询耗时，单位毫秒。
+    latency_ms: Mapped[int | None] = mapped_column(nullable=True, comment="查询耗时（毫秒）")
+
+    # 扩展信息。当前阶段可存槽位、group_by、compare_target 等附加上下文。
+    metadata_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="metadata",
+        comment="扩展信息",
+    )
+
+    # 审计记录创建时间。
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间",
+    )

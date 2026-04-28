@@ -83,7 +83,12 @@ class ClarificationService:
                 },
             )
 
-        resolved_slots = {"metric": payload.reply}
+        # 当前阶段澄清回复仍然是最小规则式解析，
+        # 但不能再把所有回复都硬编码成 metric。
+        # 否则经营分析如果追问的是 time_range，这里会把用户回答错误地写进 metric。
+        target_slots = clarification_event.get("target_slots") or []
+        primary_target_slot = target_slots[0] if target_slots else "metric"
+        resolved_slots = {primary_target_slot: payload.reply}
         now = datetime.now(timezone.utc)
 
         self.task_run_repository.update_clarification_event(
@@ -111,7 +116,7 @@ class ClarificationService:
         )
 
         resumed_answer = (
-            f"已收到你补充的指标“{payload.reply}”。"
+            f"已收到你补充的{primary_target_slot}信息“{payload.reply}”。"
             "当前系统继续执行最小 mock 流程，"
             "后续这里会替换为真实工作流恢复与结果生成逻辑。"
         )
@@ -127,10 +132,12 @@ class ClarificationService:
         self.conversation_repository.upsert_memory(
             clarification_event["conversation_id"],
             last_route="chat",
-            last_metric=payload.reply,
+            last_metric=payload.reply if primary_target_slot == "metric" else None,
+            last_time_range={"label": payload.reply} if primary_target_slot == "time_range" else {},
             short_term_memory={
                 "last_status": "succeeded_after_clarification",
                 "clarification_id": clarification_id,
+                "resolved_slot_name": primary_target_slot,
             },
         )
 

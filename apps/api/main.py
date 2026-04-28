@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from apps.api.middlewares import attach_request_context
 from apps.api.routers import (
+    analytics_router,
     chat_router,
     clarifications_router,
     conversations_router,
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.middleware("http")(attach_request_context)
     register_exception_handlers(app)
     app.include_router(health_router)
+    app.include_router(analytics_router, prefix=settings.api_prefix)
     app.include_router(chat_router, prefix=settings.api_prefix)
     app.include_router(conversations_router, prefix=settings.api_prefix)
     app.include_router(clarifications_router, prefix=settings.api_prefix)

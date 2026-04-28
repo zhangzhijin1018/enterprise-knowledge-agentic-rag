@@ -19,15 +19,20 @@ from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from core.agent.workflow import ChatWorkflowFacade
+from core.agent.control_plane.analytics_planner import AnalyticsPlanner
+from core.agent.control_plane.sql_builder import SQLBuilder
+from core.agent.control_plane.sql_guard import SQLGuard
 from core.config import get_settings
 from core.database.session import get_db_session
 from core.embedding.gateway import EmbeddingGateway
 from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
+from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
 from core.security.auth import resolve_user_context_from_request
+from core.services.analytics_service import AnalyticsService
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
 from core.services.conversation_service import ConversationService
@@ -35,6 +40,7 @@ from core.services.document_ingestion_service import DocumentIngestionService
 from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
 from core.services.retrieval_service import RetrievalService
+from core.tools.local.sql_executor import LocalSQLExecutor
 from core.vectorstore import MilvusStore
 
 
@@ -84,6 +90,14 @@ def get_task_run_repository(
     return TaskRunRepository(session=session)
 
 
+def get_sql_audit_repository(
+    session: Session | None = Depends(get_session),
+) -> SQLAuditRepository:
+    """提供 SQL 审计 Repository 依赖。"""
+
+    return SQLAuditRepository(session=session)
+
+
 def get_document_repository(
     session: Session | None = Depends(get_session),
 ) -> DocumentRepository:
@@ -111,6 +125,34 @@ def get_vector_store() -> MilvusStore:
 
     settings = get_settings()
     return MilvusStore(collection_name=settings.milvus_collection_name)
+
+
+def get_analytics_planner() -> AnalyticsPlanner:
+    """提供经营分析 Planner 依赖。"""
+
+    return AnalyticsPlanner()
+
+
+def get_sql_builder() -> SQLBuilder:
+    """提供规则式 SQL Builder 依赖。"""
+
+    return SQLBuilder()
+
+
+def get_sql_guard() -> SQLGuard:
+    """提供 SQL Guard 依赖。"""
+
+    return SQLGuard(allowed_tables=["analytics_metrics_daily"])
+
+
+def get_sql_executor() -> LocalSQLExecutor:
+    """提供本地只读 SQL 执行器。
+
+    当前阶段先用本地 SQLite 样例数据打通经营分析主链路，
+    后续切真实只读数据库或 MCP SQL Client 时，只需要替换这一层。
+    """
+
+    return LocalSQLExecutor()
 
 
 def get_chat_service(
@@ -202,4 +244,26 @@ def get_retrieval_service(
         embedding_gateway=embedding_gateway,
         vector_store=vector_store,
         settings=get_settings(),
+    )
+
+
+def get_analytics_service(
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
+    task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
+    sql_audit_repository: SQLAuditRepository = Depends(get_sql_audit_repository),
+    analytics_planner: AnalyticsPlanner = Depends(get_analytics_planner),
+    sql_builder: SQLBuilder = Depends(get_sql_builder),
+    sql_guard: SQLGuard = Depends(get_sql_guard),
+    sql_executor: LocalSQLExecutor = Depends(get_sql_executor),
+) -> AnalyticsService:
+    """提供 AnalyticsService 依赖。"""
+
+    return AnalyticsService(
+        conversation_repository=conversation_repository,
+        task_run_repository=task_run_repository,
+        sql_audit_repository=sql_audit_repository,
+        analytics_planner=analytics_planner,
+        sql_builder=sql_builder,
+        sql_guard=sql_guard,
+        sql_executor=sql_executor,
     )

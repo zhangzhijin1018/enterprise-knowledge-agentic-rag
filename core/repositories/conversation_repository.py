@@ -370,3 +370,41 @@ class ConversationRepository:
         memory.update(updates)
         memory["updated_at"] = _utcnow()
         return memory
+
+    def get_memory(self, conversation_id: str) -> dict | None:
+        """读取会话记忆快照。
+
+        业务意义：
+        - 经营分析、多轮问答、合同审查后续都需要继承上一轮上下文；
+        - 读取接口应该放在 Repository，而不是让上层业务直接摸 ORM 或内存字典；
+        - 这样后续无论切数据库模式还是增加更多记忆字段，调用方都不需要改。
+        """
+
+        if self._use_database():
+            conversation = self._get_conversation_model(conversation_id)
+            if conversation is None:
+                return None
+
+            statement = select(ConversationMemory).where(ConversationMemory.conversation_id == conversation.id)
+            memory = self.session.execute(statement).scalar_one_or_none()
+            if memory is None:
+                return None
+            return {
+                "conversation_id": conversation_id,
+                "last_route": memory.last_route,
+                "last_agent": memory.last_agent,
+                "last_primary_object": memory.last_primary_object,
+                "last_metric": memory.last_metric,
+                "last_time_range": memory.last_time_range or {},
+                "last_org_scope": memory.last_org_scope or {},
+                "last_kb_scope": memory.last_kb_scope or {},
+                "last_report_id": memory.last_report_id,
+                "last_contract_id": memory.last_contract_id,
+                "short_term_memory": memory.short_term_memory or {},
+                "updated_at": memory.updated_at,
+            }
+
+        memory = _CONVERSATION_MEMORIES.get(conversation_id)
+        if memory is None:
+            return None
+        return dict(memory)

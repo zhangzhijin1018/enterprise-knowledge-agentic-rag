@@ -7,6 +7,7 @@ Service 层负责应用级业务编排：
 - 返回适合 API 响应封装的数据结构。
 """
 
+from core.services.analytics_service import AnalyticsService
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
 from core.services.conversation_service import ConversationService
@@ -16,6 +17,7 @@ from core.services.document_service import DocumentService
 from core.services.retrieval_service import RetrievalService
 
 __all__ = [
+    "AnalyticsService",
     "ChatService",
     "ConversationService",
     "ClarificationService",
