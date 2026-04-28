@@ -83,3 +83,80 @@ def test_document_chunk_repository_in_memory_mode() -> None:
     assert repository.count_by_document_id("doc_001") == 0
 
     reset_in_memory_document_chunk_store()
+
+
+def test_document_chunk_repository_preserves_table_parent_child_metadata() -> None:
+    """应保留表格父子关系和跨页表元数据，便于后续重建逻辑表。"""
+
+    reset_in_memory_document_chunk_store()
+    repository = DocumentChunkRepository(session=None)
+
+    repository.create_chunks(
+        [
+            {
+                "chunk_uuid": "chunk_table_parent_001",
+                "document_id": "doc_table_001",
+                "knowledge_base_id": "kb_table_001",
+                "chunk_index": 1,
+                "chunk_type": "table_parent",
+                "parent_chunk_uuid": None,
+                "level": 1,
+                "page_start": 2,
+                "page_end": 3,
+                "section_title": "第三章 经营数据",
+                "content_preview": "表1 发电量统计",
+                "token_count": 10,
+                "metadata": {
+                    "heading_path": ["第三章 经营数据"],
+                    "clause_no": None,
+                    "chunk_strategy_version": "v1_table_grouping",
+                    "is_table": True,
+                    "is_cross_page_table": True,
+                    "table_group_id": "tblgrp_cross_page_001",
+                    "table_part_no": 1,
+                    "char_count": 10,
+                    "table_title": "表1 发电量统计",
+                    "column_names": ["月份", "发电量"],
+                    "row_count": 4,
+                },
+            },
+            {
+                "chunk_uuid": "chunk_table_child_001",
+                "document_id": "doc_table_001",
+                "knowledge_base_id": "kb_table_001",
+                "chunk_index": 2,
+                "chunk_type": "table_child",
+                "parent_chunk_uuid": "chunk_table_parent_001",
+                "level": 2,
+                "page_start": 2,
+                "page_end": 3,
+                "section_title": "第三章 经营数据",
+                "content_preview": "1月 | 100\n2月 | 120",
+                "token_count": 18,
+                "metadata": {
+                    "heading_path": ["第三章 经营数据"],
+                    "clause_no": None,
+                    "chunk_strategy_version": "v1_table_grouping",
+                    "is_table": True,
+                    "is_cross_page_table": True,
+                    "table_group_id": "tblgrp_cross_page_001",
+                    "table_part_no": 1,
+                    "char_count": 18,
+                    "table_title": "表1 发电量统计",
+                    "column_names": ["月份", "发电量"],
+                    "row_count": 2,
+                },
+            },
+        ]
+    )
+
+    chunks = repository.list_by_document_id("doc_table_001")
+
+    assert len(chunks) == 2
+    assert chunks[0]["chunk_type"] == "table_parent"
+    assert chunks[1]["parent_chunk_uuid"] == "chunk_table_parent_001"
+    assert chunks[0]["metadata"]["table_group_id"] == "tblgrp_cross_page_001"
+    assert chunks[1]["metadata"]["table_part_no"] == 1
+    assert chunks[1]["metadata"]["is_cross_page_table"] is True
+
+    reset_in_memory_document_chunk_store()

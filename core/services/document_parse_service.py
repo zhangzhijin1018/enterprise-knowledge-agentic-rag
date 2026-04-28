@@ -22,16 +22,16 @@ class DocumentParseService:
     当前阶段的职责是：
     1. 根据 document 元数据找到本地文件；
     2. 更新解析状态；
-    3. 调用本地最小解析器产出结构块；
+    3. 根据文件类型调用本地解析器产出结构块；
     4. 应用“结构优先 + 固定窗口回退”的 V1 切片策略；
     5. 落库父块、子块和表格块；
     6. 更新最终 parse_status。
 
-    当前明确不做：
-    - OCR
-    - embedding
-    - Milvus
-    - semantic chunking
+    当前增强点：
+    - docx 走原生段落/表格解析；
+    - 文本型 pdf 走文本 + 表格抽取；
+    - 扫描 pdf / 图片走 OCR 回退；
+    - 下游 chunk 逻辑尽量保持兼容，不推翻第五轮设计。
     """
 
     def __init__(
@@ -49,7 +49,14 @@ class DocumentParseService:
         self.parser = parser or LocalDocumentParser()
 
     def parse_document(self, document_id: str, user_context: UserContext) -> dict:
-        """手动触发某个文档的最小解析与切片流程。"""
+        """手动触发某个文档的最小解析与切片流程。
+
+        路由策略说明：
+        - docx 不走 OCR，因为原生 XML 结构本身就包含段落和表格；
+        - pdf 采用“三层路线”：文本抽取 -> 表格抽取 -> OCR 回退；
+        - image 直接走 OCR；
+        - 这样可以在保证结构质量的同时，避免把所有文档都粗暴丢给 OCR。
+        """
 
         document = self._get_accessible_document_or_raise(
             document_id=document_id,
@@ -402,12 +409,15 @@ class DocumentParseService:
             current_segment = None
 
         for block in blocks:
-            if block["block_type"] == "table":
+            if block["block_type"] in {"table", "ocr_table", "image"}:
                 flush_current_segment()
                 continue
 
             if block["block_type"] == "heading":
                 flush_current_segment()
+                continue
+
+            if block["block_type"] not in {"paragraph", "ocr_paragraph"}:
                 continue
 
             text = block["text"].strip()
@@ -503,7 +513,7 @@ class DocumentParseService:
         - 存在“续表”时增强合并信号。
         """
 
-        table_blocks = [block for block in blocks if block["block_type"] == "table"]
+        table_blocks = [block for block in blocks if block["block_type"] in {"table", "ocr_table"}]
         if not table_blocks:
             return []
 
