@@ -13,83 +13,112 @@
 
 from __future__ import annotations
 
+from core.analytics.metric_catalog import MetricCatalog
+from core.analytics.schema_registry import SchemaRegistry
+
 
 class SQLBuilder:
-    """最小规则式 SQL 构造器。"""
+    """Schema-aware 规则式 SQL 构造器。
 
-    TABLE_NAME = "analytics_metrics_daily"
-    METRIC_CODE_MAP = {
-        "发电量": "generation",
-        "收入": "revenue",
-        "成本": "cost",
-        "利润": "profit",
-        "产量": "output",
-    }
+    当前阶段仍坚持“规则模板优先”，但模板的元信息不再散落在类常量里，
+    而是统一从 `SchemaRegistry` 和 `MetricCatalog` 读取。
+
+    这样做的好处：
+    - SQL Builder 知道自己能查哪些表、哪些字段；
+    - 指标别名和口径映射不会分散在多个模块；
+    - 后续接多数据源、SQL MCP、更多维度时，扩展成本更低。
+    """
+
+    def __init__(
+        self,
+        *,
+        schema_registry: SchemaRegistry | None = None,
+        metric_catalog: MetricCatalog | None = None,
+    ) -> None:
+        self.schema_registry = schema_registry or SchemaRegistry()
+        self.metric_catalog = metric_catalog or MetricCatalog()
 
     def build(self, slots: dict) -> dict:
         """根据槽位构造最小 SQL 和解释信息。"""
 
         metric = slots["metric"]
-        metric_code = self.METRIC_CODE_MAP.get(metric, metric)
+        metric_definition = self.metric_catalog.resolve_metric(metric)
+        if metric_definition is None:
+            raise ValueError(f"未知指标定义：{metric}")
+
+        data_source = metric_definition.data_source
+        table_definition = self.schema_registry.get_table_definition(
+            table_name=metric_definition.table_name,
+            data_source=data_source,
+        )
         time_range = slots["time_range"]
         org_scope = slots.get("org_scope")
         group_by = slots.get("group_by")
         compare_target = slots.get("compare_target")
 
         where_clauses = [
-            f"metric_code = '{metric_code}'",
-            f"biz_date >= '{time_range['start_date']}'",
-            f"biz_date <= '{time_range['end_date']}'",
+            f"{table_definition.metric_code_column} = '{metric_definition.metric_code}'",
+            f"{table_definition.time_column} >= '{time_range['start_date']}'",
+            f"{table_definition.time_column} <= '{time_range['end_date']}'",
         ]
 
         if org_scope:
             if org_scope["type"] == "region":
-                where_clauses.append(f"region_name = '{org_scope['value']}'")
+                where_clauses.append(
+                    f"{table_definition.dimension_columns['region']} = '{org_scope['value']}'"
+                )
             elif org_scope["type"] == "station":
-                where_clauses.append(f"station_name = '{org_scope['value']}'")
+                where_clauses.append(
+                    f"{table_definition.dimension_columns['station']} = '{org_scope['value']}'"
+                )
 
         select_fields = []
         group_by_fields = []
         order_by_clause = ""
 
-        if group_by == "month":
-            # SQLite 环境下使用 substr 兼容最小月度聚合；
-            # 生产 PostgreSQL 后续可以替换成 date_trunc('month', biz_date)。
-            select_fields.append("substr(biz_date, 1, 7) AS month")
-            group_by_fields.append("substr(biz_date, 1, 7)")
-            order_by_clause = " ORDER BY month ASC"
-        elif group_by == "region":
-            select_fields.append("region_name AS region")
-            group_by_fields.append("region_name")
-            order_by_clause = " ORDER BY total_value DESC"
-        elif group_by == "station":
-            select_fields.append("station_name AS station")
-            group_by_fields.append("station_name")
-            order_by_clause = " ORDER BY total_value DESC"
+        group_by_rule = None
+        if group_by:
+            group_by_rule = self.schema_registry.get_group_by_rule(
+                group_by,
+                table_name=table_definition.name,
+                data_source=data_source,
+            )
+        if group_by_rule is not None:
+            select_fields.append(f"{group_by_rule.select_expression} AS {group_by_rule.alias}")
+            group_by_fields.append(group_by_rule.group_expression)
+            order_by_clause = f" ORDER BY {group_by_rule.order_by_expression}"
 
         select_fields.extend(
             [
-                "metric_name",
-                "SUM(metric_value) AS total_value",
+                table_definition.metric_name_column,
+                f"{metric_definition.aggregation}({table_definition.metric_value_column}) AS total_value",
             ]
         )
 
-        sql = f"SELECT {', '.join(select_fields)} FROM {self.TABLE_NAME} WHERE {' AND '.join(where_clauses)}"
+        sql = (
+            f"SELECT {', '.join(select_fields)} "
+            f"FROM {table_definition.name} "
+            f"WHERE {' AND '.join(where_clauses)}"
+        )
         if group_by_fields:
-            sql += f" GROUP BY {', '.join(group_by_fields + ['metric_name'])}"
+            sql += f" GROUP BY {', '.join(group_by_fields + [table_definition.metric_name_column])}"
         else:
             # 不做 group by 时，返回一行汇总结果。
-            sql += " GROUP BY metric_name"
+            sql += f" GROUP BY {table_definition.metric_name_column}"
         sql += order_by_clause
 
         return {
             "generated_sql": sql,
             "metric_scope": metric,
+            "data_source": data_source,
             "builder_metadata": {
                 "group_by": group_by,
                 "compare_target": compare_target,
                 "time_range_label": time_range.get("label"),
                 "org_scope": org_scope,
-                "sql_template_version": "analytics_v1",
+                "table_name": table_definition.name,
+                "db_type": self.schema_registry.get_data_source(data_source).db_type,
+                "metric_code": metric_definition.metric_code,
+                "sql_template_version": "analytics_v2",
             },
         }

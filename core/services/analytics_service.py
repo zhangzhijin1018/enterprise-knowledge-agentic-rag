@@ -33,7 +33,7 @@ from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
-from core.tools.local.sql_executor import LocalSQLExecutor
+from core.tools.sql.sql_gateway import SQLGateway
 
 
 class AnalyticsService:
@@ -47,7 +47,7 @@ class AnalyticsService:
         analytics_planner: AnalyticsPlanner,
         sql_builder: SQLBuilder,
         sql_guard: SQLGuard,
-        sql_executor: LocalSQLExecutor,
+        sql_gateway: SQLGateway,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -55,7 +55,7 @@ class AnalyticsService:
         self.analytics_planner = analytics_planner
         self.sql_builder = sql_builder
         self.sql_guard = sql_guard
-        self.sql_executor = sql_executor
+        self.sql_gateway = sql_gateway
 
     def submit_query(
         self,
@@ -229,6 +229,15 @@ class AnalyticsService:
                 "slots": slot_snapshot.get("collected_slots", {}),
                 "latest_sql_audit": latest_sql_audit,
                 "output_snapshot": task_run.get("output_snapshot") or {},
+                "summary": (task_run.get("output_snapshot") or {}).get("summary"),
+                "tables": (task_run.get("output_snapshot") or {}).get("tables", []),
+                "sql_explain": (task_run.get("output_snapshot") or {}).get("sql_explain"),
+                "sql_preview": (task_run.get("output_snapshot") or {}).get("sql_preview"),
+                "safety_check_result": (task_run.get("output_snapshot") or {}).get("safety_check_result"),
+                "metric_scope": (task_run.get("output_snapshot") or {}).get("metric_scope"),
+                "data_source": (task_run.get("output_snapshot") or {}).get("data_source"),
+                "row_count": (task_run.get("output_snapshot") or {}).get("row_count"),
+                "latency_ms": (task_run.get("output_snapshot") or {}).get("latency_ms"),
             },
             "meta": build_response_meta(
                 conversation_id=task_run["conversation_id"],
@@ -314,7 +323,10 @@ class AnalyticsService:
                     execution_status="blocked",
                     row_count=None,
                     latency_ms=None,
-                    metadata=sql_bundle["builder_metadata"],
+                    metadata={
+                        **sql_bundle["builder_metadata"],
+                        "data_source": sql_bundle["data_source"],
+                    },
                 )
                 self.task_run_repository.update_task_run(
                     task_run["run_id"],
@@ -335,7 +347,12 @@ class AnalyticsService:
                 task_run["run_id"],
                 sub_status="running_sql",
             )
-            execution_result = self.sql_executor.execute_readonly_query(guard_result.checked_sql)
+            execution_result = self.sql_gateway.execute_readonly_query(
+                guard_result.checked_sql,
+                data_source=sql_bundle["data_source"],
+                timeout_ms=3000,
+                row_limit=500,
+            )
 
             self.sql_audit_repository.create_audit(
                 run_id=task_run["run_id"],
@@ -349,7 +366,10 @@ class AnalyticsService:
                 execution_status="succeeded",
                 row_count=execution_result["row_count"],
                 latency_ms=execution_result["latency_ms"],
-                metadata=sql_bundle["builder_metadata"],
+                metadata={
+                    **sql_bundle["builder_metadata"],
+                    "data_source": execution_result["data_source"],
+                },
             )
 
             self.task_run_repository.update_task_run(
@@ -367,15 +387,25 @@ class AnalyticsService:
             sql_explain = None
             if need_sql_explain:
                 sql_explain = (
-                    "当前阶段采用规则模板 SQL。"
+                    "当前阶段采用 schema-aware 规则模板 SQL。"
                     f"主指标={plan.slots['metric']}，时间范围={plan.slots['time_range'].get('label')}，"
-                    f"group_by={plan.slots.get('group_by') or 'none'}。"
+                    f"group_by={plan.slots.get('group_by') or 'none'}，"
+                    f"data_source={execution_result['data_source']}。"
                 )
 
             output_snapshot = {
                 "summary": summary,
                 "tables": tables,
                 "sql_explain": sql_explain,
+                "sql_preview": guard_result.checked_sql,
+                "safety_check_result": {
+                    "is_safe": guard_result.is_safe,
+                    "blocked_reason": guard_result.blocked_reason,
+                },
+                "metric_scope": sql_bundle["metric_scope"],
+                "data_source": execution_result["data_source"],
+                "row_count": execution_result["row_count"],
+                "latency_ms": execution_result["latency_ms"],
                 "slots": plan.slots,
             }
             self.task_run_repository.update_task_run(
@@ -395,6 +425,7 @@ class AnalyticsService:
                 structured_content={
                     "tables": tables,
                     "sql_explain": sql_explain,
+                    "sql_preview": guard_result.checked_sql,
                 },
             )
             self.conversation_repository.upsert_memory(
@@ -415,6 +446,15 @@ class AnalyticsService:
                     "summary": summary,
                     "tables": tables,
                     "sql_explain": sql_explain,
+                    "sql_preview": guard_result.checked_sql,
+                    "safety_check_result": {
+                        "is_safe": guard_result.is_safe,
+                        "blocked_reason": guard_result.blocked_reason,
+                    },
+                    "metric_scope": sql_bundle["metric_scope"],
+                    "data_source": execution_result["data_source"],
+                    "row_count": execution_result["row_count"],
+                    "latency_ms": execution_result["latency_ms"],
                 },
                 "meta": build_response_meta(
                     conversation_id=conversation_id,
@@ -440,7 +480,10 @@ class AnalyticsService:
                 execution_status="failed",
                 row_count=None,
                 latency_ms=None,
-                metadata={"stage": "analytics_service_runtime"},
+                metadata={
+                    "stage": "analytics_service_runtime",
+                    "data_source": plan.data_source,
+                },
             )
             self.task_run_repository.update_task_run(
                 task_run["run_id"],

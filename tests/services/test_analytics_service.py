@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from core.analytics.metric_catalog import MetricCatalog
+from core.analytics.schema_registry import SchemaRegistry
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
@@ -13,7 +15,7 @@ from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_
 from core.repositories.task_run_repository import TaskRunRepository, reset_in_memory_task_run_store
 from core.security.auth import UserContext
 from core.services.analytics_service import AnalyticsService
-from core.tools.local.sql_executor import LocalSQLExecutor
+from core.tools.sql.sql_gateway import SQLGateway
 
 
 @pytest.fixture(autouse=True)
@@ -45,14 +47,19 @@ def build_user_context(user_id: int = 1201) -> UserContext:
 def build_service() -> AnalyticsService:
     """构造最小 AnalyticsService。"""
 
+    schema_registry = SchemaRegistry()
+    metric_catalog = MetricCatalog()
     return AnalyticsService(
         conversation_repository=ConversationRepository(session=None),
         task_run_repository=TaskRunRepository(session=None),
         sql_audit_repository=SQLAuditRepository(session=None),
-        analytics_planner=AnalyticsPlanner(),
-        sql_builder=SQLBuilder(),
+        analytics_planner=AnalyticsPlanner(metric_catalog=metric_catalog),
+        sql_builder=SQLBuilder(
+            schema_registry=schema_registry,
+            metric_catalog=metric_catalog,
+        ),
         sql_guard=SQLGuard(allowed_tables=["analytics_metrics_daily"]),
-        sql_executor=LocalSQLExecutor(),
+        sql_gateway=SQLGateway(schema_registry=schema_registry),
     )
 
 
@@ -72,6 +79,11 @@ def test_analytics_service_runs_successfully_when_metric_and_time_range_are_pres
     assert result["meta"]["status"] == "succeeded"
     assert "summary" in result["data"]
     assert result["data"]["tables"]
+    assert result["data"]["sql_preview"] is not None
+    assert result["data"]["metric_scope"] == "发电量"
+    assert result["data"]["data_source"] == "local_analytics"
+    assert result["data"]["row_count"] is not None
+    assert result["data"]["latency_ms"] is not None
 
 
 def test_analytics_service_returns_clarification_when_metric_missing() -> None:
@@ -129,6 +141,7 @@ def test_analytics_service_get_run_detail_contains_sql_audit() -> None:
 
     assert detail_result["data"]["latest_sql_audit"] is not None
     assert detail_result["data"]["latest_sql_audit"]["is_safe"] is True
+    assert detail_result["data"]["data_source"] == "local_analytics"
 
 
 def test_analytics_service_raises_for_unauthorized_run_detail() -> None:
@@ -149,3 +162,33 @@ def test_analytics_service_raises_for_unauthorized_run_detail() -> None:
             run_id=submit_result["meta"]["run_id"],
             user_context=build_user_context(user_id=1202),
         )
+
+
+def test_analytics_service_supports_multi_turn_slot_inheritance_and_update() -> None:
+    """多轮分析应支持继承上一轮上下文并增量更新槽位。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1203)
+
+    first_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+    conversation_id = first_result["meta"]["conversation_id"]
+
+    second_result = service.submit_query(
+        query="再按月看",
+        conversation_id=conversation_id,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert second_result["meta"]["status"] == "succeeded"
+    assert second_result["data"]["tables"]
+    first_table = second_result["data"]["tables"][0]
+    assert "month" in first_table["columns"]
+    assert second_result["data"]["metric_scope"] == "发电量"

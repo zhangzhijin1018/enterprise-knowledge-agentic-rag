@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from core.analytics.metric_catalog import MetricCatalog
+
 
 @dataclass(slots=True)
 class AnalyticsPlan:
@@ -31,24 +33,25 @@ class AnalyticsPlan:
     is_executable: bool
     clarification_question: str | None
     clarification_target_slots: list[str]
+    data_source: str | None
 
 
 class AnalyticsPlanner:
     """经营分析最小规划器。"""
 
     REQUIRED_SLOTS = ["metric", "time_range"]
-    KNOWN_METRICS = {
-        "发电量": "generation",
-        "收入": "revenue",
-        "成本": "cost",
-        "利润": "profit",
-        "产量": "output",
-    }
     GROUP_BY_HINTS = {
         "按月": "month",
         "按月份": "month",
+        "按月看": "month",
+        "按月度": "month",
         "按区域": "region",
+        "按区域看": "region",
+        "按区域维度": "region",
         "按电站": "station",
+        "按站点": "station",
+        "按站点看": "station",
+        "按电站维度": "station",
     }
     COMPARE_HINTS = {
         "同比": "yoy",
@@ -62,6 +65,15 @@ class AnalyticsPlanner:
         "吐鲁番电站": {"type": "station", "value": "吐鲁番电站"},
     }
 
+    def __init__(self, metric_catalog: MetricCatalog | None = None) -> None:
+        """初始化 Planner。
+
+        这里显式依赖 `MetricCatalog`，意味着指标识别不再散落在规则代码里，
+        而是统一从指标目录读取定义。
+        """
+
+        self.metric_catalog = metric_catalog or MetricCatalog()
+
     def plan(self, query: str, conversation_memory: dict | None = None) -> AnalyticsPlan:
         """把自然语言问题转换成结构化经营分析任务。
 
@@ -74,12 +86,22 @@ class AnalyticsPlanner:
         normalized_query = query.strip()
         memory = conversation_memory or {}
 
+        short_term_memory = memory.get("short_term_memory") or {}
+
+        metric_definition = self._extract_metric(normalized_query)
+        inherited_metric = memory.get("last_metric")
+        if metric_definition is None and inherited_metric:
+            metric_definition = self.metric_catalog.resolve_metric(inherited_metric)
+        inherited_org_scope = memory.get("last_org_scope") or None
+        inherited_group_by = short_term_memory.get("last_group_by")
+        inherited_compare_target = short_term_memory.get("last_compare_target")
+
         slots = {
-            "metric": self._extract_metric(normalized_query) or memory.get("last_metric"),
+            "metric": metric_definition.name if metric_definition is not None else inherited_metric,
             "time_range": self._extract_time_range(normalized_query) or memory.get("last_time_range") or None,
-            "org_scope": self._extract_org_scope(normalized_query) or memory.get("last_org_scope") or None,
-            "group_by": self._extract_group_by(normalized_query),
-            "compare_target": self._extract_compare_target(normalized_query),
+            "org_scope": self._extract_org_scope(normalized_query) or inherited_org_scope,
+            "group_by": self._extract_group_by(normalized_query) or inherited_group_by,
+            "compare_target": self._extract_compare_target(normalized_query) or inherited_compare_target,
         }
 
         # 清理空字典和空字符串，避免把“无意义占位值”当成已满足槽位。
@@ -108,21 +130,17 @@ class AnalyticsPlanner:
             is_executable=not missing_slots,
             clarification_question=clarification_question,
             clarification_target_slots=clarification_target_slots,
+            data_source=metric_definition.data_source if metric_definition is not None else None,
         )
 
-    def _extract_metric(self, query: str) -> str | None:
+    def _extract_metric(self, query: str):
         """从问题中识别指标。
 
-        当前阶段使用关键词规则：
-        - 足够稳、足够可解释；
-        - 方便后续把“规则命中”和“LLM 补充识别”并行接入；
-        - 避免一上来就用自由文本生成 SQL，增加误判风险。
+        当前阶段不再把指标词直接硬编码在 Planner 中，
+        而是交给 `MetricCatalog` 统一解析别名与同义词。
         """
 
-        for metric in self.KNOWN_METRICS:
-            if metric in query:
-                return metric
-        return None
+        return self.metric_catalog.find_metric_in_query(query)
 
     def _extract_time_range(self, query: str) -> dict | None:
         """解析最小时间范围。
@@ -136,14 +154,14 @@ class AnalyticsPlanner:
         当前不是完整中文时间解析器，但已经能支撑最小经营分析闭环。
         """
 
-        if "上个月" in query:
+        if "上个月" in query or "上月" in query:
             return {
                 "type": "relative_month",
                 "label": "上个月",
                 "start_date": "2024-03-01",
                 "end_date": "2024-03-31",
             }
-        if "本月" in query:
+        if "本月" in query or "这个月" in query:
             return {
                 "type": "relative_month",
                 "label": "本月",

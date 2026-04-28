@@ -59,6 +59,12 @@ def test_analytics_query_returns_summary_and_tables_when_slots_are_complete(clie
     assert payload["data"]["summary"]
     assert payload["data"]["tables"]
     assert payload["meta"]["run_id"]
+    assert payload["data"]["sql_preview"] is not None
+    assert payload["data"]["safety_check_result"]["is_safe"] is True
+    assert payload["data"]["metric_scope"] == "发电量"
+    assert payload["data"]["data_source"] == "local_analytics"
+    assert payload["data"]["row_count"] is not None
+    assert payload["data"]["latency_ms"] is not None
 
 
 def test_analytics_query_returns_clarification_when_metric_missing(client: TestClient) -> None:

@@ -18,6 +18,8 @@ from collections.abc import Iterator
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
+from core.analytics.metric_catalog import MetricCatalog
+from core.analytics.schema_registry import SchemaRegistry
 from core.agent.workflow import ChatWorkflowFacade
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
@@ -40,7 +42,7 @@ from core.services.document_ingestion_service import DocumentIngestionService
 from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
 from core.services.retrieval_service import RetrievalService
-from core.tools.local.sql_executor import LocalSQLExecutor
+from core.tools.sql.sql_gateway import SQLGateway
 from core.vectorstore import MilvusStore
 
 
@@ -130,13 +132,16 @@ def get_vector_store() -> MilvusStore:
 def get_analytics_planner() -> AnalyticsPlanner:
     """提供经营分析 Planner 依赖。"""
 
-    return AnalyticsPlanner()
+    return AnalyticsPlanner(metric_catalog=get_metric_catalog())
 
 
 def get_sql_builder() -> SQLBuilder:
     """提供规则式 SQL Builder 依赖。"""
 
-    return SQLBuilder()
+    return SQLBuilder(
+        schema_registry=get_schema_registry(),
+        metric_catalog=get_metric_catalog(),
+    )
 
 
 def get_sql_guard() -> SQLGuard:
@@ -145,14 +150,26 @@ def get_sql_guard() -> SQLGuard:
     return SQLGuard(allowed_tables=["analytics_metrics_daily"])
 
 
-def get_sql_executor() -> LocalSQLExecutor:
-    """提供本地只读 SQL 执行器。
+def get_schema_registry() -> SchemaRegistry:
+    """提供经营分析 Schema Registry 依赖。"""
 
-    当前阶段先用本地 SQLite 样例数据打通经营分析主链路，
-    后续切真实只读数据库或 MCP SQL Client 时，只需要替换这一层。
+    return SchemaRegistry()
+
+
+def get_metric_catalog() -> MetricCatalog:
+    """提供经营分析 Metric Catalog 依赖。"""
+
+    return MetricCatalog()
+
+
+def get_sql_gateway() -> SQLGateway:
+    """提供 SQL Gateway 依赖。
+
+    当前阶段先使用本地样例数据源，
+    但接口已经按未来 SQL MCP 风格抽象。
     """
 
-    return LocalSQLExecutor()
+    return SQLGateway(schema_registry=get_schema_registry())
 
 
 def get_chat_service(
@@ -254,7 +271,7 @@ def get_analytics_service(
     analytics_planner: AnalyticsPlanner = Depends(get_analytics_planner),
     sql_builder: SQLBuilder = Depends(get_sql_builder),
     sql_guard: SQLGuard = Depends(get_sql_guard),
-    sql_executor: LocalSQLExecutor = Depends(get_sql_executor),
+    sql_gateway: SQLGateway = Depends(get_sql_gateway),
 ) -> AnalyticsService:
     """提供 AnalyticsService 依赖。"""
 
@@ -265,5 +282,5 @@ def get_analytics_service(
         analytics_planner=analytics_planner,
         sql_builder=sql_builder,
         sql_guard=sql_guard,
-        sql_executor=sql_executor,
+        sql_gateway=sql_gateway,
     )
