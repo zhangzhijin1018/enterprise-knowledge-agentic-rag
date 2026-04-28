@@ -22,6 +22,7 @@ from core.agent.workflow import ChatWorkflowFacade
 from core.config import get_settings
 from core.database.session import get_db_session
 from core.repositories.conversation_repository import ConversationRepository
+from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
@@ -29,6 +30,7 @@ from core.security.auth import resolve_user_context_from_request
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
 from core.services.conversation_service import ConversationService
+from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
 
 
@@ -86,6 +88,14 @@ def get_document_repository(
     return DocumentRepository(session=session)
 
 
+def get_document_chunk_repository(
+    session: Session | None = Depends(get_session),
+) -> DocumentChunkRepository:
+    """提供文档切片 Repository 依赖。"""
+
+    return DocumentChunkRepository(session=session)
+
+
 def get_chat_service(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
@@ -121,10 +131,25 @@ def get_clarification_service(
 
 def get_document_service(
     document_repository: DocumentRepository = Depends(get_document_repository),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
 ) -> DocumentService:
     """提供 DocumentService 依赖。"""
 
     return DocumentService(
         document_repository=document_repository,
+        document_chunk_repository=document_chunk_repository,
+        settings=get_settings(),
+    )
+
+
+def get_document_parse_service(
+    document_repository: DocumentRepository = Depends(get_document_repository),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
+) -> DocumentParseService:
+    """提供 DocumentParseService 依赖。"""
+
+    return DocumentParseService(
+        document_repository=document_repository,
+        document_chunk_repository=document_chunk_repository,
         settings=get_settings(),
     )

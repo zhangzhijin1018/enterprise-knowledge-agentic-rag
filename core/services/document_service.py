@@ -11,6 +11,7 @@ from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
 from core.config.settings import Settings
+from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
 from core.security.auth import UserContext
 
@@ -32,11 +33,13 @@ class DocumentService:
     def __init__(
         self,
         document_repository: DocumentRepository,
+        document_chunk_repository: DocumentChunkRepository,
         settings: Settings,
     ) -> None:
         """显式注入文档仓储和配置对象。"""
 
         self.document_repository = document_repository
+        self.document_chunk_repository = document_chunk_repository
         self.settings = settings
 
     async def upload_document(
@@ -235,6 +238,7 @@ class DocumentService:
             "security_level": document["security_level"],
             "parse_status": document["parse_status"],
             "index_status": document["index_status"],
+            "chunk_count": self.document_chunk_repository.count_by_document_id(document["document_id"]),
             "uploaded_by": document["uploaded_by"],
             "metadata": document["metadata"],
             "created_at": document["created_at"].isoformat(),

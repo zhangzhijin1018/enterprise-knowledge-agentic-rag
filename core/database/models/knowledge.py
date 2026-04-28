@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Date, String, Text
+from sqlalchemy import Date, DateTime, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database.base import Base, TimestampMixin, build_bigint_type, build_json_type
@@ -148,4 +148,110 @@ class Document(TimestampMixin, Base):
         nullable=False,
         default=dict,
         comment="扩展元数据",
+    )
+
+
+class DocumentChunk(Base):
+    """文档切片表。
+
+    业务作用：
+    - 保存文档解析后的父块、子块和表格块；
+    - 为后续 embedding、Milvus、RAG 检索提供真实输入数据；
+    - 当前阶段先不接向量库，但需要先把切片结构和父子关系稳定下来。
+
+    设计说明：
+    - 这里优先记录对外稳定的 `document_id / knowledge_base_id / chunk_uuid`，
+      便于后续异步任务、日志和调试直接串联；
+    - `parent_chunk_uuid` 用于父子块关联；
+    - `metadata` 预留切片策略版本、标题路径、表格关联信息等扩展字段。
+    """
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_document_chunk_index"),
+        {"comment": "文档切片表：存储结构级块、检索级块和表格块"},
+    )
+
+    # 数据库内部主键。
+    id: Mapped[int] = mapped_column(
+        build_bigint_type(),
+        primary_key=True,
+        autoincrement=True,
+        comment="数据库内部主键",
+    )
+
+    # 对外稳定切片标识，例如 chunk_xxx。
+    chunk_uuid: Mapped[str] = mapped_column(
+        String(128),
+        unique=True,
+        nullable=False,
+        comment="对外稳定切片标识",
+    )
+
+    # 所属文档的对外稳定 ID。
+    document_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="所属文档 ID",
+    )
+
+    # 所属知识库的对外稳定 ID。
+    knowledge_base_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="所属知识库 ID",
+    )
+
+    # 切片顺序号，用于重建切片顺序和父子块相对位置。
+    chunk_index: Mapped[int] = mapped_column(nullable=False, comment="切片序号")
+
+    # 切片类型，例如 parent_text、child_text、table_parent、table_child、table_summary。
+    chunk_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="切片类型")
+
+    # 父切片 UUID。子块指向父块；父块自身为空。
+    parent_chunk_uuid: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="父切片 UUID",
+    )
+
+    # 切片层级。1 表示父块，2 表示子块。
+    level: Mapped[int] = mapped_column(nullable=False, comment="切片层级")
+
+    # 起始页码。为跨页表格和跨页结构块预留范围表达能力。
+    page_start: Mapped[int | None] = mapped_column(nullable=True, comment="起始页码")
+
+    # 结束页码。跨页时可大于 `page_start`。
+    page_end: Mapped[int | None] = mapped_column(nullable=True, comment="结束页码")
+
+    # 当前切片所属章节标题。
+    section_title: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="章节标题",
+    )
+
+    # 切片内容。
+    # 虽然字段名沿用了 `content_preview`，但当前阶段这里保存的是切片实际正文，
+    # 目的是让后续 embedding 与检索链路可以直接复用，不必再回源重组内容。
+    content_preview: Mapped[str] = mapped_column(Text, nullable=False, comment="切片内容")
+
+    # 估算的 Token 数。当前阶段先用字符长度近似，后续可替换为真实 tokenizer。
+    token_count: Mapped[int] = mapped_column(nullable=False, comment="切片 Token 数")
+
+    # 扩展元数据，至少包含标题路径、条款号、切片策略版本和表格关联信息。
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        comment="扩展元数据",
+    )
+
+    # 创建时间。当前只记录创建时刻，不做更新时刻。
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间",
     )

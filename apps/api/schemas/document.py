@@ -63,6 +63,9 @@ class DocumentDetailResponseData(BaseModel):
     # 索引状态。
     index_status: str = Field(description="索引状态")
 
+    # 当前文档已生成的切片数量。后续前端可据此展示“是否已完成解析与切片”。
+    chunk_count: int = Field(description="切片数量")
+
     # 上传人用户 ID。
     uploaded_by: int | None = Field(default=None, description="上传人 ID")
 
@@ -112,3 +115,22 @@ class DocumentListResponseData(BaseModel):
 
     # 满足条件的总记录数。
     total: int = Field(description="总记录数")
+
+
+class DocumentParseResponseData(BaseModel):
+    """手动触发文档解析后的返回数据。"""
+
+    # 对外稳定文档标识。
+    document_id: str = Field(description="文档 ID")
+
+    # 当前解析状态。
+    parse_status: str = Field(description="解析状态")
+
+    # 本次解析后总切片数。
+    chunk_count: int = Field(description="切片总数")
+
+    # 父块数量，用于观察结构级块的生成结果。
+    parent_chunk_count: int = Field(description="父块数量")
+
+    # 子块数量，用于观察检索级块的生成结果。
+    child_chunk_count: int = Field(description="子块数量")

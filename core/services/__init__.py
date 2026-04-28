@@ -10,6 +10,7 @@ Service 层负责应用级业务编排：
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
 from core.services.conversation_service import ConversationService
+from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "ConversationService",
     "ClarificationService",
     "DocumentService",
+    "DocumentParseService",
 ]

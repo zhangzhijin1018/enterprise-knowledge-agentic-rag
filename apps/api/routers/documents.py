@@ -1,7 +1,8 @@
-"""文档上传与元数据查询路由。
+"""文档上传、解析与元数据查询路由。
 
 当前阶段只实现：
 - 文档上传；
+- 文档解析；
 - 文档详情查询；
 - 文档列表查询。
 
@@ -15,10 +16,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 
-from apps.api.deps import get_current_user_context, get_document_service
+from apps.api.deps import (
+    get_current_user_context,
+    get_document_parse_service,
+    get_document_service,
+)
 from apps.api.schemas.common import SuccessResponse
 from core.common.response import build_success_response
 from core.security.auth import UserContext
+from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -62,6 +68,26 @@ def get_document_detail(
     """查询单个文档详情。"""
 
     result = document_service.get_document_detail(
+        document_id=document_id,
+        user_context=user_context,
+    )
+    return build_success_response(
+        request=request,
+        data=result["data"],
+        meta=result["meta"],
+    )
+
+
+@router.post("/{document_id}/parse", response_model=SuccessResponse)
+def parse_document(
+    request: Request,
+    document_id: str,
+    document_parse_service: DocumentParseService = Depends(get_document_parse_service),
+    user_context: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """手动触发某个文档的最小解析与切片流程。"""
+
+    result = document_parse_service.parse_document(
         document_id=document_id,
         user_context=user_context,
     )
