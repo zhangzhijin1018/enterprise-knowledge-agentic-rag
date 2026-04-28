@@ -295,14 +295,30 @@ class DocumentRepository:
         record["updated_at"] = _utcnow()
         return record
 
-    def update_index_status(self, document_id: str, index_status: str) -> dict | None:
-        """更新文档索引状态。"""
+    def update_index_status(
+        self,
+        document_id: str,
+        index_status: str,
+        metadata_updates: dict | None = None,
+    ) -> dict | None:
+        """更新文档索引状态。
+
+        设计说明：
+        - 文档整体的入库结果通常还会伴随一些摘要信息，
+          例如已入库 chunk 数、使用的 embedding 模型、向量库 provider；
+        - 因此这里允许在更新状态时顺手合并 metadata，
+          便于后续做可观测、排障和审计。
+        """
 
         if self._use_database():
             document = self._get_document_model(document_id)
             if document is None:
                 return None
             document.index_status = index_status
+            if metadata_updates:
+                merged_metadata = dict(document.metadata_json or {})
+                merged_metadata.update(metadata_updates)
+                document.metadata_json = merged_metadata
             self.session.flush()
             statement = select(KnowledgeBase).where(KnowledgeBase.id == document.knowledge_base_id)
             knowledge_base = self.session.execute(statement).scalar_one_or_none()
@@ -313,5 +329,9 @@ class DocumentRepository:
         if record is None:
             return None
         record["index_status"] = index_status
+        if metadata_updates:
+            merged_metadata = dict(record.get("metadata") or {})
+            merged_metadata.update(metadata_updates)
+            record["metadata"] = merged_metadata
         record["updated_at"] = _utcnow()
         return record

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from core.agent.workflow import ChatWorkflowFacade
 from core.config import get_settings
 from core.database.session import get_db_session
+from core.embedding.gateway import EmbeddingGateway
 from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
@@ -30,8 +31,11 @@ from core.security.auth import resolve_user_context_from_request
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
 from core.services.conversation_service import ConversationService
+from core.services.document_ingestion_service import DocumentIngestionService
 from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
+from core.services.retrieval_service import RetrievalService
+from core.vectorstore import MilvusStore
 
 
 def get_session() -> Iterator[Session | None]:
@@ -96,6 +100,19 @@ def get_document_chunk_repository(
     return DocumentChunkRepository(session=session)
 
 
+def get_embedding_gateway() -> EmbeddingGateway:
+    """提供 Embedding Gateway 依赖。"""
+
+    return EmbeddingGateway(settings=get_settings())
+
+
+def get_vector_store() -> MilvusStore:
+    """提供向量存储依赖。"""
+
+    settings = get_settings()
+    return MilvusStore(collection_name=settings.milvus_collection_name)
+
+
 def get_chat_service(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
@@ -151,5 +168,38 @@ def get_document_parse_service(
     return DocumentParseService(
         document_repository=document_repository,
         document_chunk_repository=document_chunk_repository,
+        settings=get_settings(),
+    )
+
+
+def get_document_ingestion_service(
+    document_repository: DocumentRepository = Depends(get_document_repository),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
+    embedding_gateway: EmbeddingGateway = Depends(get_embedding_gateway),
+    vector_store: MilvusStore = Depends(get_vector_store),
+) -> DocumentIngestionService:
+    """提供 DocumentIngestionService 依赖。"""
+
+    return DocumentIngestionService(
+        document_repository=document_repository,
+        document_chunk_repository=document_chunk_repository,
+        embedding_gateway=embedding_gateway,
+        vector_store=vector_store,
+    )
+
+
+def get_retrieval_service(
+    document_repository: DocumentRepository = Depends(get_document_repository),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
+    embedding_gateway: EmbeddingGateway = Depends(get_embedding_gateway),
+    vector_store: MilvusStore = Depends(get_vector_store),
+) -> RetrievalService:
+    """提供 RetrievalService 依赖。"""
+
+    return RetrievalService(
+        document_repository=document_repository,
+        document_chunk_repository=document_chunk_repository,
+        embedding_gateway=embedding_gateway,
+        vector_store=vector_store,
         settings=get_settings(),
     )

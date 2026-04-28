@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 
 from apps.api.deps import (
     get_current_user_context,
+    get_document_ingestion_service,
     get_document_parse_service,
     get_document_service,
 )
@@ -26,6 +27,7 @@ from core.common.response import build_success_response
 from core.security.auth import UserContext
 from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
+from core.services.document_ingestion_service import DocumentIngestionService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -88,6 +90,26 @@ def parse_document(
     """手动触发某个文档的最小解析与切片流程。"""
 
     result = document_parse_service.parse_document(
+        document_id=document_id,
+        user_context=user_context,
+    )
+    return build_success_response(
+        request=request,
+        data=result["data"],
+        meta=result["meta"],
+    )
+
+
+@router.post("/{document_id}/ingest", response_model=SuccessResponse)
+def ingest_document(
+    request: Request,
+    document_id: str,
+    document_ingestion_service: DocumentIngestionService = Depends(get_document_ingestion_service),
+    user_context: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """手动触发某个文档的完整入库流程。"""
+
+    result = document_ingestion_service.ingest_document(
         document_id=document_id,
         user_context=user_context,
     )

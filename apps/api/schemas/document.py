@@ -134,3 +134,13 @@ class DocumentParseResponseData(BaseModel):
 
     # 子块数量，用于观察检索级块的生成结果。
     child_chunk_count: int = Field(description="子块数量")
+
+
+class DocumentIngestResponseData(BaseModel):
+    """手动触发文档入库后的返回数据。"""
+
+    document_id: str = Field(description="文档 ID")
+    parse_status: str = Field(description="解析状态")
+    index_status: str = Field(description="入库状态")
+    chunk_count: int = Field(description="文档总切片数")
+    indexed_chunk_count: int = Field(description="已入库主检索切片数量")

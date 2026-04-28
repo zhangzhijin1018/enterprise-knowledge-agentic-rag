@@ -134,6 +134,51 @@ class Settings(BaseSettings):
         description="本地开发上传目录",
     )
 
+    # Embedding 网关 provider 名称。
+    # 当前按 BGE-M3 设计，但保留 provider 抽象，
+    # 这样后续切换私有化 embedding 服务时无需改业务层。
+    embedding_provider: str = Field(
+        default="bge_m3",
+        description="Embedding Provider 名称",
+    )
+
+    # 默认 embedding 模型名称。
+    # 当前阶段即使本地没有真实模型，也会把该字段写入索引元数据，
+    # 便于后续追踪“这批向量是按哪个模型生成的”。
+    embedding_model_name: str = Field(
+        default="BAAI/bge-m3",
+        description="Embedding 模型名称",
+    )
+
+    # 是否允许优先尝试真实 embedding 模型。
+    # 默认关闭的原因是：
+    # - 当前阶段的目标是先把“完整入库闭环”跑通；
+    # - 本地环境未必已经准备好真实模型权重；
+    # - 如果默认一上来就尝试加载真实模型，测试和开发启动会明显变慢。
+    embedding_allow_real_model: bool = Field(
+        default=False,
+        description="是否允许尝试真实 embedding 模型",
+    )
+
+    # 向量存储 provider 名称。
+    # 当前默认按 Milvus 设计，但允许本地内存回退。
+    vectorstore_provider: str = Field(
+        default="milvus",
+        description="向量存储 Provider 名称",
+    )
+
+    # Milvus collection 名称。
+    milvus_collection_name: str = Field(
+        default="document_chunks_v1",
+        description="Milvus Collection 名称",
+    )
+
+    # 检索默认返回条数。
+    retrieval_default_top_k: int = Field(
+        default=5,
+        description="检索默认返回条数",
+    )
+
     @property
     def is_database_configured(self) -> bool:
         """判断是否已经提供真实数据库连接配置。

@@ -248,6 +248,46 @@ class DocumentChunk(Base):
         comment="扩展元数据",
     )
 
+    # 向量库主键。当前阶段通常与 chunk_uuid 保持一致，
+    # 但仍单独保留字段，便于后续适配真实 Milvus 自增主键或业务主键策略。
+    milvus_primary_key: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="向量库主键",
+    )
+
+    # 该切片的向量入库状态。
+    # 注意它与 documents.index_status 的区别：
+    # - documents.index_status 表示整份文档的整体入库状态；
+    # - document_chunks.index_status 表示单个切片的入库状态。
+    index_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        comment="切片入库状态",
+    )
+
+    # 该切片使用的 embedding 模型名称，例如 BAAI/bge-m3。
+    embedding_model: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Embedding 模型名称",
+    )
+
+    # 该切片成功写入向量库的时间。
+    indexed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="向量入库时间",
+    )
+
+    # 最近一次入库失败原因。
+    last_index_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="最近一次入库失败原因",
+    )
+
     # 创建时间。当前只记录创建时刻，不做更新时刻。
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

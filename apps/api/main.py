@@ -14,7 +14,13 @@
 from fastapi import FastAPI
 
 from apps.api.middlewares import attach_request_context
-from apps.api.routers import chat_router, clarifications_router, conversations_router, documents_router
+from apps.api.routers import (
+    chat_router,
+    clarifications_router,
+    conversations_router,
+    documents_router,
+    retrieval_router,
+)
 from apps.api.routes import health_router
 from core.common.exceptions import register_exception_handlers
 from core.config import configure_logging, get_settings
@@ -39,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(conversations_router, prefix=settings.api_prefix)
     app.include_router(clarifications_router, prefix=settings.api_prefix)
     app.include_router(documents_router, prefix=settings.api_prefix)
+    app.include_router(retrieval_router, prefix=settings.api_prefix)
     return app
 
 
