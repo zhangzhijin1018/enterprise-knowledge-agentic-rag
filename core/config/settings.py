@@ -208,6 +208,38 @@ class Settings(BaseSettings):
         description="SQL Gateway 默认返回行数上限",
     )
 
+    # 真实经营分析数据源的唯一标识。
+    # 当前阶段一旦配置了真实只读库，Schema Registry 会优先把它当作默认 data_source，
+    # 这样 AnalyticsService 不需要为“本地样例源”和“真实企业源”写两套逻辑。
+    analytics_real_data_source_key: str = Field(
+        default="enterprise_readonly",
+        description="真实经营分析数据源标识",
+    )
+
+    # 真实经营分析数据源连接地址。
+    # 该配置允许使用 PostgreSQL、MySQL 或 SQLite 文件库做最小只读接入，
+    # 当前阶段最重要的是把“配置化接入 + data_source routing”边界做对。
+    analytics_real_data_source_url: str | None = Field(
+        default=None,
+        description="真实经营分析数据源连接地址",
+    )
+
+    # 访问真实经营分析数据源所需的附加权限。
+    # 当前阶段先做最小字符串权限校验，
+    # 后续如果接更正式 RBAC / ABAC，可以把这个字段映射到完整权限模型。
+    analytics_real_data_source_required_permission: str | None = Field(
+        default="analytics:query:enterprise",
+        description="访问真实经营分析数据源所需权限",
+    )
+
+    # SQL Gateway 当前采用的 transport 模式。
+    # 目前默认是 `inprocess_mcp_server`，表示 Gateway 通过进程内 SQL MCP server 调用执行链路；
+    # 后续如果切成远端 MCP server，只需要扩展 transport 实现，而不需要改 AnalyticsService。
+    analytics_sql_gateway_transport_mode: str = Field(
+        default="inprocess_mcp_server",
+        description="经营分析 SQL Gateway transport 模式",
+    )
+
     @property
     def is_database_configured(self) -> bool:
         """判断是否已经提供真实数据库连接配置。

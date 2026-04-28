@@ -28,12 +28,20 @@ class MetricDefinition:
     data_source: str = "local_analytics"
     table_name: str = "analytics_metrics_daily"
     aggregation: str = "SUM"
+    required_permissions: list[str] = field(default_factory=lambda: ["analytics:query"])
 
 
 class MetricCatalog:
     """经营分析指标目录。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        default_data_source: str = "local_analytics",
+        default_table_name: str = "analytics_metrics_daily",
+    ) -> None:
+        self.default_data_source = default_data_source
+        self.default_table_name = default_table_name
         self._metrics = self._build_default_metrics()
         self._alias_index = self._build_alias_index()
 
@@ -46,30 +54,45 @@ class MetricCatalog:
                 metric_code="generation",
                 description="新能源电站发电量指标",
                 aliases=["发电", "发电总量", "发电情况", "发电表现"],
+                data_source=self.default_data_source,
+                table_name=self.default_table_name,
+                required_permissions=["analytics:query", "analytics:metric:generation"],
             ),
             "收入": MetricDefinition(
                 name="收入",
                 metric_code="revenue",
                 description="经营收入指标",
                 aliases=["营收", "营业收入", "收入情况", "收入表现"],
+                data_source=self.default_data_source,
+                table_name=self.default_table_name,
+                required_permissions=["analytics:query", "analytics:metric:revenue"],
             ),
             "成本": MetricDefinition(
                 name="成本",
                 metric_code="cost",
                 description="经营成本指标",
                 aliases=["成本情况", "支出成本", "成本表现"],
+                data_source=self.default_data_source,
+                table_name=self.default_table_name,
+                required_permissions=["analytics:query", "analytics:metric:cost"],
             ),
             "利润": MetricDefinition(
                 name="利润",
                 metric_code="profit",
                 description="利润指标",
                 aliases=["利润情况", "盈利", "利润表现"],
+                data_source=self.default_data_source,
+                table_name=self.default_table_name,
+                required_permissions=["analytics:query", "analytics:metric:profit"],
             ),
             "产量": MetricDefinition(
                 name="产量",
                 metric_code="output",
                 description="产量指标",
                 aliases=["生产量", "产出量", "产量情况"],
+                data_source=self.default_data_source,
+                table_name=self.default_table_name,
+                required_permissions=["analytics:query", "analytics:metric:output"],
             ),
         }
 

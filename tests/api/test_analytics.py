@@ -67,6 +67,9 @@ def test_analytics_query_returns_summary_and_tables_when_slots_are_complete(clie
     assert payload["data"]["latency_ms"] is not None
     assert "group_by" in payload["data"]
     assert "compare_target" in payload["data"]
+    assert payload["data"]["chart_spec"] is not None
+    assert payload["data"]["insight_cards"]
+    assert payload["data"]["audit_info"] is not None
 
 
 def test_analytics_query_returns_clarification_when_metric_missing(client: TestClient) -> None:
@@ -113,3 +116,6 @@ def test_analytics_run_detail_returns_latest_sql_audit(client: TestClient) -> No
     assert detail_response.status_code == 200
     assert payload["data"]["latest_sql_audit"] is not None
     assert payload["data"]["latest_sql_audit"]["execution_status"] == "succeeded"
+    assert payload["data"]["chart_spec"] is not None
+    assert payload["data"]["insight_cards"]
+    assert payload["data"]["audit_info"] is not None

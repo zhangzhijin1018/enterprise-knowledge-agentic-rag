@@ -85,3 +85,27 @@ def test_sql_builder_generates_topn_sql() -> None:
 
     assert "ORDER BY total_value ASC" in result["generated_sql"]
     assert result["generated_sql"].endswith("LIMIT 5")
+
+
+def test_sql_builder_generates_month_trend_sql() -> None:
+    """按月趋势场景应生成 month 分组 SQL。"""
+
+    builder = SQLBuilder(
+        schema_registry=SchemaRegistry(),
+        metric_catalog=MetricCatalog(),
+    )
+
+    result = builder.build(
+        {
+            "metric": "收入",
+            "time_range": {
+                "label": "上个月",
+                "start_date": "2024-03-01",
+                "end_date": "2024-03-31",
+            },
+            "group_by": "month",
+        }
+    )
+
+    assert "substr(biz_date, 1, 7) AS month" in result["generated_sql"]
+    assert result["builder_metadata"]["sql_template_version"] == "analytics_v4"

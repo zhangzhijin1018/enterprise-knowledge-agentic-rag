@@ -157,13 +157,19 @@ def get_sql_guard() -> SQLGuard:
 def get_schema_registry() -> SchemaRegistry:
     """提供经营分析 Schema Registry 依赖。"""
 
-    return SchemaRegistry()
+    return SchemaRegistry(settings=get_settings())
 
 
-def get_metric_catalog() -> MetricCatalog:
+def get_metric_catalog(
+    schema_registry: SchemaRegistry = Depends(get_schema_registry),
+) -> MetricCatalog:
     """提供经营分析 Metric Catalog 依赖。"""
 
-    return MetricCatalog()
+    default_data_source = schema_registry.get_default_data_source()
+    return MetricCatalog(
+        default_data_source=default_data_source.key,
+        default_table_name=default_data_source.default_table,
+    )
 
 
 def get_llm_analytics_planner_gateway() -> LLMAnalyticsPlannerGateway:
@@ -175,11 +181,14 @@ def get_llm_analytics_planner_gateway() -> LLMAnalyticsPlannerGateway:
 def get_sql_gateway() -> SQLGateway:
     """提供 SQL Gateway 依赖。
 
-    当前阶段先使用本地样例数据源，
-    但接口已经按未来 SQL MCP 风格抽象。
+    当前阶段默认通过“进程内 SQL MCP Server”执行，
+    既能保持 MCP-compatible contract，又不强依赖独立服务部署。
     """
 
-    return SQLGateway(schema_registry=get_schema_registry())
+    return SQLGateway(
+        schema_registry=get_schema_registry(),
+        settings=get_settings(),
+    )
 
 
 def get_chat_service(
@@ -282,6 +291,8 @@ def get_analytics_service(
     sql_builder: SQLBuilder = Depends(get_sql_builder),
     sql_guard: SQLGuard = Depends(get_sql_guard),
     sql_gateway: SQLGateway = Depends(get_sql_gateway),
+    schema_registry: SchemaRegistry = Depends(get_schema_registry),
+    metric_catalog: MetricCatalog = Depends(get_metric_catalog),
 ) -> AnalyticsService:
     """提供 AnalyticsService 依赖。"""
 
@@ -293,4 +304,6 @@ def get_analytics_service(
         sql_builder=sql_builder,
         sql_guard=sql_guard,
         sql_gateway=sql_gateway,
+        schema_registry=schema_registry,
+        metric_catalog=metric_catalog,
     )

@@ -51,6 +51,9 @@ class AnalyticsQueryResponseData(BaseModel):
     latency_ms: int | None = Field(default=None, description="执行耗时")
     compare_target: str | None = Field(default=None, description="对比目标")
     group_by: str | None = Field(default=None, description="分组维度")
+    chart_spec: dict | None = Field(default=None, description="前端可渲染的图表描述")
+    insight_cards: list[dict] = Field(default_factory=list, description="最小洞察卡片")
+    audit_info: dict | None = Field(default=None, description="最小 SQL 审计摘要")
     clarification: AnalyticsClarificationData | None = Field(default=None, description="澄清信息")
 
 
@@ -77,4 +80,7 @@ class AnalyticsRunDetailData(BaseModel):
     latency_ms: int | None = Field(default=None, description="执行耗时")
     compare_target: str | None = Field(default=None, description="对比目标")
     group_by: str | None = Field(default=None, description="分组维度")
+    chart_spec: dict | None = Field(default=None, description="前端可渲染的图表描述")
+    insight_cards: list[dict] = Field(default_factory=list, description="最小洞察卡片")
+    audit_info: dict | None = Field(default=None, description="最小 SQL 审计摘要")
     output_snapshot: dict = Field(default_factory=dict, description="结果快照")

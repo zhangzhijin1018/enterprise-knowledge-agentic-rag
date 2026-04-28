@@ -28,3 +28,14 @@ def test_sql_guard_blocks_dangerous_sql() -> None:
 
     assert result.is_safe is False
     assert result.blocked_reason is not None
+
+
+def test_sql_guard_blocks_table_outside_whitelist() -> None:
+    """不在表白名单中的表必须被拦截。"""
+
+    guard = SQLGuard(allowed_tables=["analytics_metrics_daily"])
+
+    result = guard.validate("SELECT * FROM secret_finance_table")
+
+    assert result.is_safe is False
+    assert result.blocked_reason == "存在未授权表：secret_finance_table"

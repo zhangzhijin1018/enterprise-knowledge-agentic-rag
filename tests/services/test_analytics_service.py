@@ -53,7 +53,10 @@ def build_service(
     """构造最小 AnalyticsService。"""
 
     schema_registry = SchemaRegistry()
-    metric_catalog = MetricCatalog()
+    metric_catalog = MetricCatalog(
+        default_data_source=schema_registry.get_default_data_source().key,
+        default_table_name=schema_registry.get_default_data_source().default_table,
+    )
     return AnalyticsService(
         conversation_repository=ConversationRepository(session=None),
         task_run_repository=TaskRunRepository(session=None),
@@ -68,6 +71,8 @@ def build_service(
         ),
         sql_guard=SQLGuard(allowed_tables=["analytics_metrics_daily"]),
         sql_gateway=SQLGateway(schema_registry=schema_registry),
+        schema_registry=schema_registry,
+        metric_catalog=metric_catalog,
     )
 
 
@@ -94,6 +99,9 @@ def test_analytics_service_runs_successfully_when_metric_and_time_range_are_pres
     assert result["data"]["latency_ms"] is not None
     assert result["data"]["group_by"] is None
     assert result["data"]["compare_target"] is None
+    assert result["data"]["chart_spec"] is not None
+    assert result["data"]["insight_cards"]
+    assert result["data"]["audit_info"] is not None
 
 
 def test_analytics_service_returns_clarification_when_metric_missing() -> None:
@@ -152,6 +160,9 @@ def test_analytics_service_get_run_detail_contains_sql_audit() -> None:
     assert detail_result["data"]["latest_sql_audit"] is not None
     assert detail_result["data"]["latest_sql_audit"]["is_safe"] is True
     assert detail_result["data"]["data_source"] == "local_analytics"
+    assert detail_result["data"]["chart_spec"] is not None
+    assert detail_result["data"]["insight_cards"]
+    assert detail_result["data"]["audit_info"] is not None
 
 
 def test_analytics_service_raises_for_unauthorized_run_detail() -> None:

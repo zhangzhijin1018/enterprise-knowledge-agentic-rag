@@ -1,31 +1,34 @@
-"""经营分析最小主链路 Service。
+"""经营分析主链路 Service。
 
-本 Service 的定位不是最终版 BI / NL2SQL 引擎，
-而是把“经营分析最小闭环”先打通并且纳入现有运行态体系：
+本 Service 的职责不是做最终版 BI / 自由 NL2SQL，
+而是把当前阶段企业经营分析的稳定主链路编排清楚：
 
 用户问题
 -> Planner 做意图识别与槽位提取
 -> 缺槽位则澄清
--> 满足最小条件后构造 SQL
--> SQL Guard 做安全检查
--> 只读执行
--> 结果解释
--> SQL 审计
+-> 满足最小条件后构造 schema-aware SQL
+-> SQL Guard 做安全检查与治理
+-> 通过 SQL Gateway / SQL MCP-compatible server 执行只读查询
+-> 生成最小业务解释、图表描述、洞察卡片
+-> 记录 SQL Audit
 
 关键设计原则：
 1. router 只收参与返回，业务编排都在这里；
 2. 不能跳过槽位化直接自由生成 SQL；
 3. 不能跳过 SQL Guard；
-4. 不能只执行不审计。
+4. 不能只执行不审计；
+5. 权限、数据源治理、表白名单等基础治理必须在这里显式落点。
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from core.agent.control_plane.analytics_planner import AnalyticsPlanner
+from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
+from core.analytics.metric_catalog import MetricCatalog
+from core.analytics.schema_registry import SchemaRegistry
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
@@ -38,7 +41,7 @@ from core.tools.sql.sql_gateway import SQLGateway
 
 
 class AnalyticsService:
-    """经营分析最小业务编排层。"""
+    """经营分析应用编排层。"""
 
     def __init__(
         self,
@@ -49,6 +52,8 @@ class AnalyticsService:
         sql_builder: SQLBuilder,
         sql_guard: SQLGuard,
         sql_gateway: SQLGateway,
+        schema_registry: SchemaRegistry,
+        metric_catalog: MetricCatalog,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -57,6 +62,8 @@ class AnalyticsService:
         self.sql_builder = sql_builder
         self.sql_guard = sql_guard
         self.sql_gateway = sql_gateway
+        self.schema_registry = schema_registry
+        self.metric_catalog = metric_catalog
 
     def submit_query(
         self,
@@ -111,6 +118,8 @@ class AnalyticsService:
                 "output_mode": output_mode,
                 "need_sql_explain": need_sql_explain,
                 "planner_slots": plan.slots,
+                "planning_source": plan.planning_source,
+                "confidence": plan.confidence,
             },
             risk_level="medium",
             review_status="not_required",
@@ -134,46 +143,11 @@ class AnalyticsService:
         )
 
         if not plan.is_executable:
-            clarification = self.task_run_repository.create_clarification_event(
-                run_id=task_run["run_id"],
+            return self._build_clarification_response(
                 conversation_id=conversation["conversation_id"],
-                question_text=plan.clarification_question or "请补充经营分析关键条件",
-                target_slots=plan.clarification_target_slots,
+                task_run=task_run,
+                plan=plan,
             )
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                status="awaiting_user_clarification",
-                sub_status="awaiting_slot_fill",
-                context_snapshot={"slots": plan.slots, "missing_slots": plan.missing_slots},
-            )
-            self.conversation_repository.add_message(
-                conversation_id=conversation["conversation_id"],
-                role="assistant",
-                message_type="clarification",
-                content=clarification["question_text"],
-                related_run_id=task_run["run_id"],
-                structured_content={
-                    "clarification_id": clarification["clarification_id"],
-                    "target_slots": clarification["target_slots"],
-                },
-            )
-            return {
-                "data": {
-                    "clarification": {
-                        "clarification_id": clarification["clarification_id"],
-                        "question": clarification["question_text"],
-                        "target_slots": clarification["target_slots"],
-                    }
-                },
-                "meta": build_response_meta(
-                    conversation_id=conversation["conversation_id"],
-                    run_id=task_run["run_id"],
-                    status="awaiting_user_clarification",
-                    sub_status="awaiting_slot_fill",
-                    need_clarification=True,
-                    is_async=False,
-                ),
-            }
 
         return self._execute_analytics_plan(
             conversation_id=conversation["conversation_id"],
@@ -218,6 +192,7 @@ class AnalyticsService:
 
         slot_snapshot = self.task_run_repository.get_slot_snapshot(run_id) or {}
         latest_sql_audit = self.sql_audit_repository.get_latest_by_run_id(run_id)
+        output_snapshot = task_run.get("output_snapshot") or {}
         return {
             "data": {
                 "run_id": task_run["run_id"],
@@ -229,24 +204,77 @@ class AnalyticsService:
                 "trace_id": task_run["trace_id"],
                 "slots": slot_snapshot.get("collected_slots", {}),
                 "latest_sql_audit": latest_sql_audit,
-                "output_snapshot": task_run.get("output_snapshot") or {},
-                "summary": (task_run.get("output_snapshot") or {}).get("summary"),
-                "tables": (task_run.get("output_snapshot") or {}).get("tables", []),
-                "sql_explain": (task_run.get("output_snapshot") or {}).get("sql_explain"),
-                "sql_preview": (task_run.get("output_snapshot") or {}).get("sql_preview"),
-                "safety_check_result": (task_run.get("output_snapshot") or {}).get("safety_check_result"),
-                "metric_scope": (task_run.get("output_snapshot") or {}).get("metric_scope"),
-                "data_source": (task_run.get("output_snapshot") or {}).get("data_source"),
-                "row_count": (task_run.get("output_snapshot") or {}).get("row_count"),
-                "latency_ms": (task_run.get("output_snapshot") or {}).get("latency_ms"),
-                "compare_target": (task_run.get("output_snapshot") or {}).get("compare_target"),
-                "group_by": (task_run.get("output_snapshot") or {}).get("group_by"),
+                "output_snapshot": output_snapshot,
+                "summary": output_snapshot.get("summary"),
+                "tables": output_snapshot.get("tables", []),
+                "sql_explain": output_snapshot.get("sql_explain"),
+                "sql_preview": output_snapshot.get("sql_preview"),
+                "safety_check_result": output_snapshot.get("safety_check_result"),
+                "metric_scope": output_snapshot.get("metric_scope"),
+                "data_source": output_snapshot.get("data_source"),
+                "row_count": output_snapshot.get("row_count"),
+                "latency_ms": output_snapshot.get("latency_ms"),
+                "compare_target": output_snapshot.get("compare_target"),
+                "group_by": output_snapshot.get("group_by"),
+                "chart_spec": output_snapshot.get("chart_spec"),
+                "insight_cards": output_snapshot.get("insight_cards", []),
+                "audit_info": output_snapshot.get("audit_info"),
             },
             "meta": build_response_meta(
                 conversation_id=task_run["conversation_id"],
                 run_id=task_run["run_id"],
                 status=task_run["status"],
                 sub_status=task_run["sub_status"],
+                is_async=False,
+            ),
+        }
+
+    def _build_clarification_response(
+        self,
+        *,
+        conversation_id: str,
+        task_run: dict,
+        plan: AnalyticsPlan,
+    ) -> dict:
+        """构造经营分析澄清响应。"""
+
+        clarification = self.task_run_repository.create_clarification_event(
+            run_id=task_run["run_id"],
+            conversation_id=conversation_id,
+            question_text=plan.clarification_question or "请补充经营分析关键条件",
+            target_slots=plan.clarification_target_slots,
+        )
+        self.task_run_repository.update_task_run(
+            task_run["run_id"],
+            status="awaiting_user_clarification",
+            sub_status="awaiting_slot_fill",
+            context_snapshot={"slots": plan.slots, "missing_slots": plan.missing_slots},
+        )
+        self.conversation_repository.add_message(
+            conversation_id=conversation_id,
+            role="assistant",
+            message_type="clarification",
+            content=clarification["question_text"],
+            related_run_id=task_run["run_id"],
+            structured_content={
+                "clarification_id": clarification["clarification_id"],
+                "target_slots": clarification["target_slots"],
+            },
+        )
+        return {
+            "data": {
+                "clarification": {
+                    "clarification_id": clarification["clarification_id"],
+                    "question": clarification["question_text"],
+                    "target_slots": clarification["target_slots"],
+                }
+            },
+            "meta": build_response_meta(
+                conversation_id=conversation_id,
+                run_id=task_run["run_id"],
+                status="awaiting_user_clarification",
+                sub_status="awaiting_slot_fill",
+                need_clarification=True,
                 is_async=False,
             ),
         }
@@ -294,17 +322,47 @@ class AnalyticsService:
         *,
         conversation_id: str,
         task_run: dict,
-        plan,
+        plan: AnalyticsPlan,
         need_sql_explain: bool,
         user_context: UserContext,
     ) -> dict:
-        """执行最小经营分析链路。"""
+        """执行经营分析主链路。"""
+
+        metric_definition = self.metric_catalog.resolve_metric(plan.slots.get("metric"))
+        if metric_definition is None:
+            raise AppException(
+                error_code=error_codes.ANALYTICS_QUERY_FAILED,
+                message="未识别到可执行指标",
+                status_code=400,
+                detail={"metric": plan.slots.get("metric")},
+            )
+
+        data_source_definition = self.schema_registry.get_data_source(plan.data_source)
+        table_definition = self.schema_registry.get_table_definition(
+            table_name=metric_definition.table_name,
+            data_source=data_source_definition.key,
+        )
+
+        # 治理前置说明：
+        # - 指标级权限决定“这个人能不能看这个业务指标”；
+        # - 数据源级权限决定“这个人能不能访问这类数据库/数仓”；
+        # - 表白名单 / 字段白名单决定“即使生成了 SQL，也只能落到受控物理范围”。
+        # 这些校验必须在真正执行 SQL 之前完成，不能等查完再补救。
+        self._assert_metric_permission(metric_definition=metric_definition, user_context=user_context)
+        self._assert_data_source_permission(
+            data_source_definition=data_source_definition,
+            user_context=user_context,
+        )
 
         try:
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 sub_status="building_sql",
-                context_snapshot={"slots": plan.slots},
+                context_snapshot={
+                    "slots": plan.slots,
+                    "planning_source": plan.planning_source,
+                    "confidence": plan.confidence,
+                },
             )
             sql_bundle = self.sql_builder.build(plan.slots)
 
@@ -312,12 +370,16 @@ class AnalyticsService:
                 task_run["run_id"],
                 sub_status="checking_sql",
             )
-            guard_result = self.sql_guard.validate(sql_bundle["generated_sql"])
+            guard_result = self.sql_guard.validate(
+                sql_bundle["generated_sql"],
+                allowed_tables=self.schema_registry.get_allowed_tables(data_source=sql_bundle["data_source"]),
+            )
+
             if not guard_result.is_safe or not guard_result.checked_sql:
-                self.sql_audit_repository.create_audit(
+                blocked_audit = self.sql_audit_repository.create_audit(
                     run_id=task_run["run_id"],
                     user_id=user_context.user_id,
-                    db_type="sqlite",
+                    db_type=data_source_definition.db_type,
                     metric_scope=sql_bundle["metric_scope"],
                     generated_sql=sql_bundle["generated_sql"],
                     checked_sql=guard_result.checked_sql,
@@ -343,11 +405,15 @@ class AnalyticsService:
                     error_code=error_codes.SQL_GUARD_BLOCKED,
                     message="SQL 安全检查未通过",
                     status_code=400,
-                    detail={"blocked_reason": guard_result.blocked_reason},
+                    detail={
+                        "blocked_reason": guard_result.blocked_reason,
+                        "audit_info": self._build_audit_info(blocked_audit),
+                    },
                 )
 
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
+                status="executing",
                 sub_status="running_sql",
             )
             execution_result = self.sql_gateway.execute_readonly_query(
@@ -358,10 +424,14 @@ class AnalyticsService:
                     row_limit=500,
                     trace_id=task_run["trace_id"],
                     run_id=task_run["run_id"],
+                    metadata={
+                        "planning_source": plan.planning_source,
+                        "confidence": plan.confidence,
+                    },
                 )
             )
 
-            self.sql_audit_repository.create_audit(
+            audit_record = self.sql_audit_repository.create_audit(
                 run_id=task_run["run_id"],
                 user_id=user_context.user_id,
                 db_type=execution_result.db_type,
@@ -376,6 +446,8 @@ class AnalyticsService:
                 metadata={
                     **sql_bundle["builder_metadata"],
                     "data_source": execution_result.data_source,
+                    "department_filter_column": table_definition.department_filter_column,
+                    "sensitive_fields": table_definition.sensitive_fields,
                 },
             )
 
@@ -394,12 +466,23 @@ class AnalyticsService:
             sql_explain = None
             if need_sql_explain:
                 sql_explain = (
-                    "当前阶段采用 schema-aware 规则模板 SQL。"
+                    "当前阶段采用 schema-aware 受控模板 SQL。"
                     f"主指标={plan.slots['metric']}，时间范围={plan.slots['time_range'].get('label')}，"
                     f"group_by={plan.slots.get('group_by') or 'none'}，"
                     f"compare_target={plan.slots.get('compare_target') or 'none'}，"
                     f"data_source={execution_result.data_source}。"
                 )
+
+            chart_spec = self._build_chart_spec(
+                slots=plan.slots,
+                execution_result=execution_result,
+                metric_name=plan.slots["metric"],
+            )
+            insight_cards = self._build_insight_cards(
+                slots=plan.slots,
+                execution_result=execution_result,
+            )
+            audit_info = self._build_audit_info(audit_record)
 
             output_snapshot = {
                 "summary": summary,
@@ -409,6 +492,13 @@ class AnalyticsService:
                 "safety_check_result": {
                     "is_safe": guard_result.is_safe,
                     "blocked_reason": guard_result.blocked_reason,
+                    "table_whitelist": self.schema_registry.get_allowed_tables(
+                        data_source=sql_bundle["data_source"]
+                    ),
+                    "field_whitelist_reserved": self.schema_registry.get_table_field_whitelist(
+                        table_name=metric_definition.table_name,
+                        data_source=sql_bundle["data_source"],
+                    ),
                 },
                 "metric_scope": sql_bundle["metric_scope"],
                 "data_source": execution_result.data_source,
@@ -416,7 +506,11 @@ class AnalyticsService:
                 "latency_ms": execution_result.latency_ms,
                 "compare_target": plan.slots.get("compare_target"),
                 "group_by": plan.slots.get("group_by"),
+                "chart_spec": chart_spec,
+                "insight_cards": insight_cards,
+                "audit_info": audit_info,
                 "slots": plan.slots,
+                "planning_source": plan.planning_source,
             }
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
@@ -436,6 +530,7 @@ class AnalyticsService:
                     "tables": tables,
                     "sql_explain": sql_explain,
                     "sql_preview": guard_result.checked_sql,
+                    "chart_spec": chart_spec,
                 },
             )
             self.conversation_repository.upsert_memory(
@@ -448,6 +543,8 @@ class AnalyticsService:
                     "last_analytics_run_id": task_run["run_id"],
                     "last_group_by": plan.slots.get("group_by"),
                     "last_compare_target": plan.slots.get("compare_target"),
+                    "last_top_n": plan.slots.get("top_n"),
+                    "last_sort_direction": plan.slots.get("sort_direction"),
                 },
             )
 
@@ -457,16 +554,16 @@ class AnalyticsService:
                     "tables": tables,
                     "sql_explain": sql_explain,
                     "sql_preview": guard_result.checked_sql,
-                    "safety_check_result": {
-                        "is_safe": guard_result.is_safe,
-                        "blocked_reason": guard_result.blocked_reason,
-                    },
+                    "safety_check_result": output_snapshot["safety_check_result"],
                     "metric_scope": sql_bundle["metric_scope"],
                     "data_source": execution_result.data_source,
                     "row_count": execution_result.row_count,
                     "latency_ms": execution_result.latency_ms,
                     "compare_target": plan.slots.get("compare_target"),
                     "group_by": plan.slots.get("group_by"),
+                    "chart_spec": chart_spec,
+                    "insight_cards": insight_cards,
+                    "audit_info": audit_info,
                 },
                 "meta": build_response_meta(
                     conversation_id=conversation_id,
@@ -483,7 +580,7 @@ class AnalyticsService:
             self.sql_audit_repository.create_audit(
                 run_id=task_run["run_id"],
                 user_id=user_context.user_id,
-                db_type="sqlite",
+                db_type=data_source_definition.db_type,
                 metric_scope=plan.slots.get("metric"),
                 generated_sql="",
                 checked_sql=None,
@@ -512,7 +609,67 @@ class AnalyticsService:
                 detail={"reason": str(exc)},
             ) from exc
 
-    def _build_summary(self, slots: dict, execution_result: dict) -> str:
+    def _assert_metric_permission(self, *, metric_definition, user_context: UserContext) -> None:
+        """执行最小指标级权限校验。
+
+        当前阶段先采用“指标定义声明权限 + 用户上下文显式权限集合”的简单模型：
+        - 如果用户拥有指标定义声明的任一权限，则允许继续；
+        - 这样既保留了指标级治理边界，又不会把当前阶段的权限系统做得过重。
+        """
+
+        required_permissions = metric_definition.required_permissions or ["analytics:query"]
+        if not self._has_any_permission(user_context.permissions, required_permissions):
+            raise AppException(
+                error_code=error_codes.PERMISSION_DENIED,
+                message="当前用户无权查询该经营指标",
+                status_code=403,
+                detail={
+                    "metric": metric_definition.name,
+                    "required_permissions": required_permissions,
+                },
+            )
+
+    def _assert_data_source_permission(self, *, data_source_definition, user_context: UserContext) -> None:
+        """执行最小数据源级权限校验。
+
+        为什么经营分析必须做数据源级治理：
+        - 同一个系统未来会接多个库、多个数仓、多个权限域；
+        - 即使指标相同，不同数据源的敏感级别和可见范围也可能完全不同；
+        - 所以不能只判断“是不是经营分析用户”，还要判断“能不能访问这个 data_source”。
+        """
+
+        required_permissions = data_source_definition.required_permissions
+        if required_permissions and not self._has_all_permissions(
+            user_context.permissions,
+            required_permissions,
+        ):
+            raise AppException(
+                error_code=error_codes.PERMISSION_DENIED,
+                message="当前用户无权访问该经营分析数据源",
+                status_code=403,
+                detail={
+                    "data_source": data_source_definition.key,
+                    "required_permissions": required_permissions,
+                },
+            )
+
+    def _has_any_permission(self, user_permissions: list[str], required_permissions: list[str]) -> bool:
+        """判断用户是否至少满足一项权限。"""
+
+        if not required_permissions:
+            return True
+        permission_set = set(user_permissions or [])
+        return any(permission in permission_set for permission in required_permissions)
+
+    def _has_all_permissions(self, user_permissions: list[str], required_permissions: list[str]) -> bool:
+        """判断用户是否满足全部权限。"""
+
+        if not required_permissions:
+            return True
+        permission_set = set(user_permissions or [])
+        return all(permission in permission_set for permission in required_permissions)
+
+    def _build_summary(self, slots: dict, execution_result) -> str:
         """把结构化查询结果转换成最小业务解释文本。"""
 
         metric = slots["metric"]
@@ -525,13 +682,7 @@ class AnalyticsService:
         if not rows:
             return f"在{time_label}的{scope_text}范围内，未查询到与“{metric}”相关的数据。"
 
-        if group_by in {"region", "station", "month"}:
-            return (
-                f"已完成“{metric}”在{time_label}范围内的分组查询，"
-                f"当前返回 {execution_result.row_count} 行结果，可继续做趋势或对比分析。"
-            )
-
-        if slots.get("compare_target") in {"mom", "yoy"}:
+        if slots.get("compare_target") in {"mom", "yoy"} and group_by not in {"region", "station", "month"}:
             current_value = rows[0].get("current_value")
             compare_value = rows[0].get("compare_value")
             compare_label = "环比" if slots.get("compare_target") == "mom" else "同比"
@@ -540,5 +691,120 @@ class AnalyticsService:
                 f"{compare_label}对比值为 {compare_value}。"
             )
 
+        if group_by in {"region", "station", "month"}:
+            analysis_name = "趋势" if group_by == "month" else "排名"
+            return (
+                f"已完成“{metric}”在{time_label}范围内的{analysis_name}查询，"
+                f"当前返回 {execution_result.row_count} 行结果，可继续做对比或下钻分析。"
+            )
+
         total_value = rows[0].get("total_value")
         return f"{time_label}{scope_text}的{metric}汇总值为 {total_value}。"
+
+    def _build_chart_spec(self, *, slots: dict, execution_result, metric_name: str) -> dict | None:
+        """生成前端可直接消费的最小图表描述。
+
+        当前阶段不生成真实图片，而是返回结构化 chart_spec：
+        - 前端可以按 type / x_field / y_field / title 直接渲染；
+        - 后续如果要接更复杂 BI 图层，也能继续沿用这层描述。
+        """
+
+        rows = execution_result.rows
+        if not rows:
+            return None
+
+        group_by = slots.get("group_by")
+        compare_target = slots.get("compare_target")
+        if group_by == "month":
+            return {
+                "type": "line",
+                "title": f"{metric_name}按月趋势",
+                "x_field": "month",
+                "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
+                "series": ["current_value", "compare_value"] if compare_target in {"mom", "yoy"} else ["total_value"],
+            }
+        if group_by in {"region", "station"}:
+            return {
+                "type": "bar",
+                "title": f"{metric_name}{'对比' if compare_target else ''}{group_by}分布",
+                "x_field": group_by,
+                "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
+                "series": ["current_value", "compare_value"] if compare_target in {"mom", "yoy"} else ["total_value"],
+            }
+        return {
+            "type": "metric_card",
+            "title": f"{metric_name}汇总",
+            "x_field": None,
+            "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
+            "series": ["current_value", "compare_value"] if compare_target in {"mom", "yoy"} else ["total_value"],
+        }
+
+    def _build_insight_cards(self, *, slots: dict, execution_result) -> list[dict]:
+        """生成最小洞察卡片。
+
+        当前阶段先用规则模板生成卡片，而不是依赖 LLM 大段总结：
+        - 更稳定、可测；
+        - 适合后续再叠加 LLM explain 或报表生成；
+        - 也便于前端直接渲染卡片组件。
+        """
+
+        rows = execution_result.rows
+        if not rows:
+            return [
+                {
+                    "title": "查询结果",
+                    "value": "无数据",
+                    "description": "当前筛选条件下未命中任何经营数据。",
+                }
+            ]
+
+        metric = slots["metric"]
+        compare_target = slots.get("compare_target")
+        group_by = slots.get("group_by")
+        primary_row = rows[0]
+        primary_value = primary_row.get("current_value")
+        if primary_value is None:
+            primary_value = primary_row.get("total_value")
+        cards = [
+            {
+                "title": f"{metric}主指标",
+                "value": primary_value,
+                "description": "当前结果集中最核心的指标值。",
+            },
+            {
+                "title": "返回行数",
+                "value": execution_result.row_count,
+                "description": "用于前端判断当前结果是汇总、趋势还是分组排行。",
+            },
+        ]
+        if compare_target in {"mom", "yoy"}:
+            cards.append(
+                {
+                    "title": "对比口径",
+                    "value": "环比" if compare_target == "mom" else "同比",
+                    "description": "当前结果已按固定 compare 模板返回当前值与对比值。",
+                }
+            )
+        elif group_by in {"region", "station", "month"}:
+            cards.append(
+                {
+                    "title": "分析维度",
+                    "value": group_by,
+                    "description": "当前结果按该维度完成分组聚合。",
+                }
+            )
+        return cards
+
+    def _build_audit_info(self, audit_record: dict | None) -> dict | None:
+        """构造前端可展示的最小审计摘要。"""
+
+        if audit_record is None:
+            return None
+        return {
+            "execution_status": audit_record.get("execution_status"),
+            "is_safe": audit_record.get("is_safe"),
+            "row_count": audit_record.get("row_count"),
+            "latency_ms": audit_record.get("latency_ms"),
+            "db_type": audit_record.get("db_type"),
+            "blocked_reason": audit_record.get("blocked_reason"),
+        }

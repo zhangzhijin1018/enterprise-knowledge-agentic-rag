@@ -172,7 +172,12 @@ class SQLBuilder:
                 "table_name": table_definition.name,
                 "db_type": self.schema_registry.get_data_source(data_source).db_type,
                 "metric_code": metric_definition.metric_code,
-                "sql_template_version": "analytics_v3",
+                "allowed_tables": self.schema_registry.get_allowed_tables(data_source=data_source),
+                "field_whitelist_reserved": self.schema_registry.get_table_field_whitelist(
+                    table_name=table_definition.name,
+                    data_source=data_source,
+                ),
+                "sql_template_version": "analytics_v4",
             },
         }
 

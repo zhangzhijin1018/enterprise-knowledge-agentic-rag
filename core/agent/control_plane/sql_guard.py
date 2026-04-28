@@ -61,8 +61,20 @@ class SQLGuard:
         self.allowed_fields = set(allowed_fields or [])
         self.default_limit = default_limit
 
-    def validate(self, sql: str) -> SQLGuardResult:
-        """校验 SQL 并补齐最小安全约束。"""
+    def validate(
+        self,
+        sql: str,
+        *,
+        allowed_tables: list[str] | None = None,
+        allowed_fields: list[str] | None = None,
+    ) -> SQLGuardResult:
+        """校验 SQL 并补齐最小安全约束。
+
+        这里既保留全局默认白名单，也允许调用方按 data_source / table 动态覆盖：
+        - `allowed_tables` 用于真正的表级治理；
+        - `allowed_fields` 先做最小字段级白名单预留；
+        - 这样 AnalyticsService 可以根据 Schema Registry 把治理规则显式传进来。
+        """
 
         normalized_sql = sql.strip()
         if not normalized_sql:
@@ -110,13 +122,29 @@ class SQLGuard:
                 blocked_reason="未识别到合法表名",
             )
 
-        disallowed_tables = [table for table in tables if table not in self.allowed_tables]
+        effective_allowed_tables = set(allowed_tables or self.allowed_tables)
+        disallowed_tables = [table for table in tables if table not in effective_allowed_tables]
         if disallowed_tables:
             return SQLGuardResult(
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason=f"存在未授权表：{', '.join(disallowed_tables)}",
             )
+
+        effective_allowed_fields = set(allowed_fields or self.allowed_fields)
+        if effective_allowed_fields:
+            projected_fields = self._extract_selected_fields(normalized_sql)
+            disallowed_fields = [
+                field_name
+                for field_name in projected_fields
+                if field_name not in effective_allowed_fields and field_name != "*"
+            ]
+            if disallowed_fields:
+                return SQLGuardResult(
+                    is_safe=False,
+                    checked_sql=None,
+                    blocked_reason=f"存在未授权字段：{', '.join(disallowed_fields)}",
+                )
 
         checked_sql = normalized_sql
         if not re.search(r"\bLIMIT\s+\d+\b", upper_sql):
@@ -138,3 +166,33 @@ class SQLGuard:
         from_tables = re.findall(r"\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, flags=re.IGNORECASE)
         join_tables = re.findall(r"\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, flags=re.IGNORECASE)
         return from_tables + join_tables
+
+    def _extract_selected_fields(self, sql: str) -> list[str]:
+        """提取 SELECT 投影字段。
+
+        当前阶段这里只做最小模板场景下的字段解析，
+        目的不是覆盖所有复杂 SQL 语法，而是为“字段级白名单预留”提供一个稳定入口。
+        当后续 SQL 模板变复杂时，可以把这里升级成 AST 解析器。
+        """
+
+        match = re.search(r"\bSELECT\s+(.*?)\s+\bFROM\b", sql, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return []
+
+        raw_projection = match.group(1)
+        projection_items = [item.strip() for item in raw_projection.split(",") if item.strip()]
+        extracted_fields: list[str] = []
+        for item in projection_items:
+            alias_match = re.search(r"\bAS\s+([a-zA-Z_][a-zA-Z0-9_]*)$", item, flags=re.IGNORECASE)
+            if alias_match:
+                extracted_fields.append(alias_match.group(1))
+                continue
+
+            function_match = re.search(r"\(([^()]+)\)", item)
+            if function_match:
+                extracted_fields.append(function_match.group(1).split(".")[-1].strip())
+                continue
+
+            normalized_item = item.split(".")[-1].strip()
+            extracted_fields.append(normalized_item)
+        return extracted_fields
