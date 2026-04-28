@@ -20,6 +20,11 @@ import sqlite3
 import time
 
 from core.analytics.schema_registry import SchemaRegistry
+from core.tools.mcp.sql_mcp_contracts import (
+    SQLGatewayExecutionError,
+    SQLReadQueryRequest,
+    SQLReadQueryResponse,
+)
 
 
 class SQLGateway:
@@ -29,44 +34,50 @@ class SQLGateway:
         self.schema_registry = schema_registry
         self._connections: dict[str, sqlite3.Connection] = {}
 
-    def execute_readonly_query(
-        self,
-        sql: str,
-        *,
-        data_source: str | None = None,
-        timeout_ms: int = 3000,
-        row_limit: int = 500,
-    ) -> dict:
+    def execute_readonly_query(self, request: SQLReadQueryRequest) -> SQLReadQueryResponse:
         """执行只读 SQL。
 
-        当前阶段虽然底层还是 SQLite 样例数据，
-        但方法签名已经对齐未来 SQL MCP / 多数据源风格：
-        - `data_source`：数据源路由
-        - `timeout_ms`：超时预算
-        - `row_limit`：返回上限
+        当前方法的 request / response 已经向 SQL MCP-compatible 契约收口：
+        - request 中显式携带 data_source、sql、timeout_ms、row_limit、trace_id、run_id；
+        - response 中显式携带 rows、columns、row_count、latency_ms、checked_sql；
+        - 后续如果 transport 改成真实 MCP client，AnalyticsService 不需要改调用方式。
         """
 
-        source_definition = self.schema_registry.get_data_source(data_source)
+        source_definition = self.schema_registry.get_data_source(request.data_source)
         connection = self._get_connection(source_definition.key)
-        normalized_sql = self._apply_row_limit(sql, row_limit=row_limit)
+        normalized_sql = self._apply_row_limit(request.sql, row_limit=request.row_limit)
 
-        started_at = time.perf_counter()
-        cursor = connection.cursor()
-        cursor.execute(normalized_sql)
-        rows = [dict(item) for item in cursor.fetchall()]
-        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        try:
+            started_at = time.perf_counter()
+            cursor = connection.cursor()
+            cursor.execute(normalized_sql)
+            rows = [dict(item) for item in cursor.fetchall()]
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+        except Exception as exc:  # pragma: no cover - 底层执行异常兜底
+            raise SQLGatewayExecutionError(
+                "SQL Gateway 执行失败",
+                detail={
+                    "data_source": request.data_source,
+                    "trace_id": request.trace_id,
+                    "run_id": request.run_id,
+                },
+            ) from exc
 
         columns = list(rows[0].keys()) if rows else [item[0] for item in cursor.description or []]
-        return {
-            "rows": rows,
-            "columns": columns,
-            "row_count": len(rows),
-            "latency_ms": latency_ms,
-            "db_type": source_definition.db_type,
-            "data_source": source_definition.key,
-            "timeout_ms": timeout_ms,
-            "checked_sql": normalized_sql,
-        }
+        return SQLReadQueryResponse(
+            data_source=source_definition.key,
+            db_type=source_definition.db_type,
+            rows=rows,
+            columns=columns,
+            row_count=len(rows),
+            latency_ms=latency_ms,
+            checked_sql=normalized_sql,
+            trace_id=request.trace_id,
+            run_id=request.run_id,
+            metadata={
+                "timeout_ms": request.timeout_ms,
+            },
+        )
 
     def healthcheck(self, data_source: str | None = None) -> dict:
         """执行最小健康检查。"""

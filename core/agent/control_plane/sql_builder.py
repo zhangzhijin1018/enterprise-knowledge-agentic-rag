@@ -13,6 +13,9 @@
 
 from __future__ import annotations
 
+import calendar
+from datetime import datetime
+
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
 
@@ -55,11 +58,11 @@ class SQLBuilder:
         org_scope = slots.get("org_scope")
         group_by = slots.get("group_by")
         compare_target = slots.get("compare_target")
+        top_n = slots.get("top_n")
+        sort_direction = slots.get("sort_direction") or "desc"
 
         where_clauses = [
             f"{table_definition.metric_code_column} = '{metric_definition.metric_code}'",
-            f"{table_definition.time_column} >= '{time_range['start_date']}'",
-            f"{table_definition.time_column} <= '{time_range['end_date']}'",
         ]
 
         if org_scope:
@@ -88,24 +91,72 @@ class SQLBuilder:
             group_by_fields.append(group_by_rule.group_expression)
             order_by_clause = f" ORDER BY {group_by_rule.order_by_expression}"
 
-        select_fields.extend(
-            [
-                table_definition.metric_name_column,
-                f"{metric_definition.aggregation}({table_definition.metric_value_column}) AS total_value",
-            ]
-        )
-
-        sql = (
-            f"SELECT {', '.join(select_fields)} "
-            f"FROM {table_definition.name} "
-            f"WHERE {' AND '.join(where_clauses)}"
-        )
+        sql = ""
+        if compare_target in {"mom", "yoy"}:
+            compare_range = self._build_compare_range(time_range, compare_target)
+            select_fields.extend(
+                [
+                    table_definition.metric_name_column,
+                    (
+                        f"{metric_definition.aggregation}(CASE "
+                        f"WHEN {table_definition.time_column} >= '{time_range['start_date']}' "
+                        f"AND {table_definition.time_column} <= '{time_range['end_date']}' "
+                        f"THEN {table_definition.metric_value_column} ELSE 0 END) AS current_value"
+                    ),
+                    (
+                        f"{metric_definition.aggregation}(CASE "
+                        f"WHEN {table_definition.time_column} >= '{compare_range['start_date']}' "
+                        f"AND {table_definition.time_column} <= '{compare_range['end_date']}' "
+                        f"THEN {table_definition.metric_value_column} ELSE 0 END) AS compare_value"
+                    ),
+                ]
+            )
+            where_clauses.extend(
+                [
+                    f"{table_definition.time_column} >= '{compare_range['start_date']}'",
+                    f"{table_definition.time_column} <= '{time_range['end_date']}'",
+                ]
+            )
+            sql = (
+                f"SELECT {', '.join(select_fields)} "
+                f"FROM {table_definition.name} "
+                f"WHERE {' AND '.join(where_clauses)}"
+            )
+        else:
+            select_fields.extend(
+                [
+                    table_definition.metric_name_column,
+                    f"{metric_definition.aggregation}({table_definition.metric_value_column}) AS total_value",
+                ]
+            )
+            where_clauses.extend(
+                [
+                    f"{table_definition.time_column} >= '{time_range['start_date']}'",
+                    f"{table_definition.time_column} <= '{time_range['end_date']}'",
+                ]
+            )
+            sql = (
+                f"SELECT {', '.join(select_fields)} "
+                f"FROM {table_definition.name} "
+                f"WHERE {' AND '.join(where_clauses)}"
+            )
         if group_by_fields:
             sql += f" GROUP BY {', '.join(group_by_fields + [table_definition.metric_name_column])}"
         else:
             # 不做 group by 时，返回一行汇总结果。
             sql += f" GROUP BY {table_definition.metric_name_column}"
-        sql += order_by_clause
+        if compare_target in {"mom", "yoy"} and not top_n:
+            if group_by == "month":
+                order_by_clause = " ORDER BY month ASC"
+            elif group_by in {"region", "station"}:
+                order_by_clause = " ORDER BY current_value DESC"
+        if top_n:
+            ranking_order = "ASC" if sort_direction == "asc" else "DESC"
+            order_by_clause = f" ORDER BY {'current_value' if compare_target in {'mom', 'yoy'} else 'total_value'} {ranking_order}"
+            sql += order_by_clause
+            sql += f" LIMIT {top_n}"
+        else:
+            sql += order_by_clause
 
         return {
             "generated_sql": sql,
@@ -114,11 +165,51 @@ class SQLBuilder:
             "builder_metadata": {
                 "group_by": group_by,
                 "compare_target": compare_target,
+                "top_n": top_n,
+                "sort_direction": sort_direction,
                 "time_range_label": time_range.get("label"),
                 "org_scope": org_scope,
                 "table_name": table_definition.name,
                 "db_type": self.schema_registry.get_data_source(data_source).db_type,
                 "metric_code": metric_definition.metric_code,
-                "sql_template_version": "analytics_v2",
+                "sql_template_version": "analytics_v3",
             },
         }
+
+    def _build_compare_range(self, time_range: dict, compare_target: str) -> dict:
+        """构造环比 / 同比比较时间范围。
+
+        当前阶段仍然坚持受控模板：
+        - compare 只在固定时间粒度下展开；
+        - 先支持最常见的 month-over-month / year-over-year；
+        - 不开放让模型任意推导复杂对比区间。
+        """
+
+        start_date = datetime.strptime(time_range["start_date"], "%Y-%m-%d")
+        end_date = datetime.strptime(time_range["end_date"], "%Y-%m-%d")
+        if compare_target == "mom":
+            compare_start = self._shift_month(start_date, month_delta=-1)
+            compare_end = self._shift_month(end_date, month_delta=-1)
+        else:
+            compare_start = start_date.replace(year=start_date.year - 1)
+            compare_end = end_date.replace(year=end_date.year - 1)
+
+        return {
+            "start_date": compare_start.strftime("%Y-%m-%d"),
+            "end_date": compare_end.strftime("%Y-%m-%d"),
+        }
+
+    def _shift_month(self, target_date: datetime, month_delta: int) -> datetime:
+        """按月平移日期，并自动处理月底越界。
+
+        例如：
+        - 2024-03-31 向前一个月，应落到 2024-02-29；
+        - 这样才能稳定支持环比模板，而不会因为月底日期不存在而抛错。
+        """
+
+        total_month = (target_date.year * 12 + target_date.month - 1) + month_delta
+        new_year = total_month // 12
+        new_month = total_month % 12 + 1
+        max_day = calendar.monthrange(new_year, new_month)[1]
+        new_day = min(target_date.day, max_day)
+        return target_date.replace(year=new_year, month=new_month, day=new_day)

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
+from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.workflow import ChatWorkflowFacade
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
@@ -132,7 +133,10 @@ def get_vector_store() -> MilvusStore:
 def get_analytics_planner() -> AnalyticsPlanner:
     """提供经营分析 Planner 依赖。"""
 
-    return AnalyticsPlanner(metric_catalog=get_metric_catalog())
+    return AnalyticsPlanner(
+        metric_catalog=get_metric_catalog(),
+        llm_planner_gateway=get_llm_analytics_planner_gateway(),
+    )
 
 
 def get_sql_builder() -> SQLBuilder:
@@ -160,6 +164,12 @@ def get_metric_catalog() -> MetricCatalog:
     """提供经营分析 Metric Catalog 依赖。"""
 
     return MetricCatalog()
+
+
+def get_llm_analytics_planner_gateway() -> LLMAnalyticsPlannerGateway:
+    """提供经营分析 LLM fallback 网关。"""
+
+    return LLMAnalyticsPlannerGateway(settings=get_settings())
 
 
 def get_sql_gateway() -> SQLGateway:

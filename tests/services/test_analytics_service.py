@@ -7,9 +7,11 @@ import pytest
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
+from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
 from core.common.exceptions import AppException
+from core.config.settings import Settings
 from core.repositories.conversation_repository import ConversationRepository, reset_in_memory_conversation_store
 from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_memory_sql_audit_store
 from core.repositories.task_run_repository import TaskRunRepository, reset_in_memory_task_run_store
@@ -44,7 +46,10 @@ def build_user_context(user_id: int = 1201) -> UserContext:
     )
 
 
-def build_service() -> AnalyticsService:
+def build_service(
+    *,
+    analytics_planner_gateway: LLMAnalyticsPlannerGateway | None = None,
+) -> AnalyticsService:
     """构造最小 AnalyticsService。"""
 
     schema_registry = SchemaRegistry()
@@ -53,7 +58,10 @@ def build_service() -> AnalyticsService:
         conversation_repository=ConversationRepository(session=None),
         task_run_repository=TaskRunRepository(session=None),
         sql_audit_repository=SQLAuditRepository(session=None),
-        analytics_planner=AnalyticsPlanner(metric_catalog=metric_catalog),
+        analytics_planner=AnalyticsPlanner(
+            metric_catalog=metric_catalog,
+            llm_planner_gateway=analytics_planner_gateway,
+        ),
         sql_builder=SQLBuilder(
             schema_registry=schema_registry,
             metric_catalog=metric_catalog,
@@ -84,6 +92,8 @@ def test_analytics_service_runs_successfully_when_metric_and_time_range_are_pres
     assert result["data"]["data_source"] == "local_analytics"
     assert result["data"]["row_count"] is not None
     assert result["data"]["latency_ms"] is not None
+    assert result["data"]["group_by"] is None
+    assert result["data"]["compare_target"] is None
 
 
 def test_analytics_service_returns_clarification_when_metric_missing() -> None:
@@ -192,3 +202,88 @@ def test_analytics_service_supports_multi_turn_slot_inheritance_and_update() -> 
     first_table = second_result["data"]["tables"][0]
     assert "month" in first_table["columns"]
     assert second_result["data"]["metric_scope"] == "发电量"
+    assert second_result["data"]["group_by"] == "month"
+
+
+def test_analytics_service_supports_incremental_metric_switch() -> None:
+    """多轮分析时应支持换指标并继承时间范围。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1204)
+
+    first_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+    conversation_id = first_result["meta"]["conversation_id"]
+
+    second_result = service.submit_query(
+        query="换成收入",
+        conversation_id=conversation_id,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert second_result["meta"]["status"] == "succeeded"
+    assert second_result["data"]["metric_scope"] == "收入"
+
+
+def test_analytics_service_supports_compare_and_topn_query() -> None:
+    """compare / topN 的最小链路应可运行。"""
+
+    service = build_service()
+
+    result = service.submit_query(
+        query="最近发电表现按站点排名前3做环比",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=True,
+        user_context=build_user_context(user_id=1205),
+    )
+
+    assert result["meta"]["status"] == "succeeded"
+    assert result["data"]["compare_target"] == "mom"
+    assert result["data"]["group_by"] == "station"
+    assert result["data"]["sql_preview"] is not None
+
+
+def test_analytics_service_can_use_llm_fallback_for_low_confidence_query() -> None:
+    """规则不足但语义明显时，应允许 LLM fallback 补强槽位。"""
+
+    def mock_planner_callable(*, query: str, current_slots: dict, conversation_memory: dict) -> dict:
+        return {
+            "slots": {
+                "metric": "利润",
+                "time_range": {
+                    "type": "relative_30_days",
+                    "label": "近一个月",
+                    "start_date": "2024-03-02",
+                    "end_date": "2024-04-01",
+                },
+            },
+            "confidence": 0.95,
+            "source": "mock_llm",
+            "should_use": True,
+        }
+
+    service = build_service(
+        analytics_planner_gateway=LLMAnalyticsPlannerGateway(
+            settings=Settings(analytics_planner_enable_llm_fallback=True),
+            planner_callable=mock_planner_callable,
+        )
+    )
+
+    result = service.submit_query(
+        query="最近经营表现怎么样",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=build_user_context(user_id=1206),
+    )
+
+    assert result["meta"]["status"] == "succeeded"
+    assert result["data"]["metric_scope"] == "利润"

@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 
 from core.analytics.metric_catalog import MetricCatalog
+from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 
 
 @dataclass(slots=True)
@@ -34,6 +35,8 @@ class AnalyticsPlan:
     clarification_question: str | None
     clarification_target_slots: list[str]
     data_source: str | None
+    planning_source: str
+    confidence: float
 
 
 class AnalyticsPlanner:
@@ -59,13 +62,21 @@ class AnalyticsPlanner:
     }
     ORG_HINTS = {
         "新疆区域": {"type": "region", "value": "新疆区域"},
+        "新疆这边": {"type": "region", "value": "新疆区域"},
+        "新疆": {"type": "region", "value": "新疆区域"},
         "北疆区域": {"type": "region", "value": "北疆区域"},
+        "北疆": {"type": "region", "value": "北疆区域"},
         "南疆区域": {"type": "region", "value": "南疆区域"},
+        "南疆": {"type": "region", "value": "南疆区域"},
         "哈密电站": {"type": "station", "value": "哈密电站"},
         "吐鲁番电站": {"type": "station", "value": "吐鲁番电站"},
     }
 
-    def __init__(self, metric_catalog: MetricCatalog | None = None) -> None:
+    def __init__(
+        self,
+        metric_catalog: MetricCatalog | None = None,
+        llm_planner_gateway: LLMAnalyticsPlannerGateway | None = None,
+    ) -> None:
         """初始化 Planner。
 
         这里显式依赖 `MetricCatalog`，意味着指标识别不再散落在规则代码里，
@@ -73,6 +84,7 @@ class AnalyticsPlanner:
         """
 
         self.metric_catalog = metric_catalog or MetricCatalog()
+        self.llm_planner_gateway = llm_planner_gateway
 
     def plan(self, query: str, conversation_memory: dict | None = None) -> AnalyticsPlan:
         """把自然语言问题转换成结构化经营分析任务。
@@ -102,7 +114,16 @@ class AnalyticsPlanner:
             "org_scope": self._extract_org_scope(normalized_query) or inherited_org_scope,
             "group_by": self._extract_group_by(normalized_query) or inherited_group_by,
             "compare_target": self._extract_compare_target(normalized_query) or inherited_compare_target,
+            "top_n": self._extract_top_n(normalized_query),
+            "sort_direction": self._extract_sort_direction(normalized_query),
         }
+
+        if slots["group_by"] is None:
+            slots["group_by"] = self._infer_group_by_from_query(normalized_query) or inherited_group_by
+        if slots["top_n"] and not slots["group_by"]:
+            slots["group_by"] = "station"
+        if self._is_trend_query(normalized_query) and not slots["group_by"]:
+            slots["group_by"] = "month"
 
         # 清理空字典和空字符串，避免把“无意义占位值”当成已满足槽位。
         cleaned_slots = {
@@ -110,6 +131,29 @@ class AnalyticsPlanner:
             for key, value in slots.items()
             if value not in (None, "", {}, [])
         }
+
+        planning_source = "rule"
+        confidence = self._compute_local_confidence(query=normalized_query, slots=cleaned_slots)
+
+        # “规则优先 + LLM 补强”的关键边界：
+        # 1. 先用本地确定性规则识别；
+        # 2. 只有当规则置信度较低，或明显属于经营分析但关键槽位缺失时，才尝试 LLM 补强；
+        # 3. 即使走了 LLM fallback，最终最小可执行条件判断仍然要回到本地确定性规则。
+        if self._should_try_llm_fallback(
+            query=normalized_query,
+            confidence=confidence,
+            slots=cleaned_slots,
+        ):
+            fallback_result = self.llm_planner_gateway.enhance_slots(
+                query=normalized_query,
+                current_slots=cleaned_slots,
+                conversation_memory=memory,
+            ) if self.llm_planner_gateway is not None else None
+
+            if fallback_result is not None and fallback_result.should_use:
+                planning_source = f"rule+{fallback_result.source}"
+                confidence = max(confidence, fallback_result.confidence)
+                cleaned_slots = self._merge_llm_slots(cleaned_slots, fallback_result.slots)
 
         missing_slots = [
             slot_name
@@ -120,7 +164,12 @@ class AnalyticsPlanner:
         clarification_question = None
         clarification_target_slots: list[str] = []
         if missing_slots:
-            clarification_question, clarification_target_slots = self._build_clarification(missing_slots)
+            clarification_question, clarification_target_slots = self._build_clarification(
+                missing_slots=missing_slots,
+                current_slots=cleaned_slots,
+            )
+
+        resolved_metric_definition = self.metric_catalog.resolve_metric(cleaned_slots.get("metric"))
 
         return AnalyticsPlan(
             intent="business_analysis",
@@ -130,7 +179,9 @@ class AnalyticsPlanner:
             is_executable=not missing_slots,
             clarification_question=clarification_question,
             clarification_target_slots=clarification_target_slots,
-            data_source=metric_definition.data_source if metric_definition is not None else None,
+            data_source=resolved_metric_definition.data_source if resolved_metric_definition is not None else None,
+            planning_source=planning_source,
+            confidence=confidence,
         )
 
     def _extract_metric(self, query: str):
@@ -160,6 +211,13 @@ class AnalyticsPlanner:
                 "label": "上个月",
                 "start_date": "2024-03-01",
                 "end_date": "2024-03-31",
+            }
+        if "最近这段时间" in query or "近一个月" in query or "最近" in query:
+            return {
+                "type": "relative_30_days",
+                "label": "近一个月",
+                "start_date": "2024-03-02",
+                "end_date": "2024-04-01",
             }
         if "本月" in query or "这个月" in query:
             return {
@@ -219,6 +277,21 @@ class AnalyticsPlanner:
                 return value
         return None
 
+    def _infer_group_by_from_query(self, query: str) -> str | None:
+        """从口语化表达中推断 group_by。
+
+        例如：
+        - 哪些站点最好 -> station
+        - 哪些区域最差 -> region
+        - 趋势 / 走势 -> month
+        """
+
+        if any(keyword in query for keyword in ("哪些站点", "哪些电站", "按站点", "按电站", "站点排名", "电站排名")):
+            return "station"
+        if any(keyword in query for keyword in ("哪些区域", "按区域", "区域排名")):
+            return "region"
+        return None
+
     def _extract_compare_target(self, query: str) -> str | None:
         """识别同比/环比占位。
 
@@ -231,7 +304,103 @@ class AnalyticsPlanner:
                 return value
         return None
 
-    def _build_clarification(self, missing_slots: list[str]) -> tuple[str, list[str]]:
+    def _extract_top_n(self, query: str) -> int | None:
+        """识别 topN / 前 N。"""
+
+        topn_match = re.search(r"top\s*(\d+)", query, flags=re.IGNORECASE)
+        if topn_match:
+            return int(topn_match.group(1))
+
+        chinese_topn_match = re.search(r"前(\d+)", query)
+        if chinese_topn_match:
+            return int(chinese_topn_match.group(1))
+
+        if "前几" in query or "最好" in query or "最差" in query:
+            return 5
+        return None
+
+    def _extract_sort_direction(self, query: str) -> str | None:
+        """识别排序方向。"""
+
+        if "最差" in query or "最低" in query:
+            return "asc"
+        if "最好" in query or "最高" in query or "排名前" in query or "top" in query.lower():
+            return "desc"
+        return None
+
+    def _is_trend_query(self, query: str) -> bool:
+        """判断是否为趋势类分析。"""
+
+        return any(keyword in query for keyword in ("趋势", "走势", "按时间", "按月看"))
+
+    def _is_analytics_like_query(self, query: str) -> bool:
+        """判断是否明显属于经营分析语义。"""
+
+        analytics_keywords = (
+            "分析",
+            "统计",
+            "指标",
+            "情况",
+            "表现",
+            "收入",
+            "成本",
+            "利润",
+            "发电",
+            "同比",
+            "环比",
+            "top",
+            "排名",
+        )
+        return any(keyword in query for keyword in analytics_keywords)
+
+    def _compute_local_confidence(self, *, query: str, slots: dict) -> float:
+        """计算本地规则结果的粗粒度置信度。"""
+
+        confidence = 0.2
+        if self._is_analytics_like_query(query):
+            confidence += 0.2
+        if "metric" in slots:
+            confidence += 0.25
+        if "time_range" in slots:
+            confidence += 0.25
+        if "group_by" in slots or "compare_target" in slots:
+            confidence += 0.1
+        return min(confidence, 0.95)
+
+    def _should_try_llm_fallback(self, *, query: str, confidence: float, slots: dict) -> bool:
+        """判断是否应尝试 LLM fallback。"""
+
+        if not self._is_analytics_like_query(query):
+            return False
+        if self.llm_planner_gateway is None:
+            return False
+        return confidence < 0.75 or "metric" not in slots or "time_range" not in slots
+
+    def _merge_llm_slots(self, current_slots: dict, llm_slots: dict) -> dict:
+        """合并 LLM 补强出的槽位。
+
+        规则：
+        - time_range 继续优先本地规则，除非当前完全没有；
+        - 其他槽位允许 LLM 在当前缺失时补入；
+        - 不允许 LLM 无脑覆盖本地高置信结果。
+        """
+
+        merged_slots = dict(current_slots)
+        for key, value in llm_slots.items():
+            if value in (None, "", {}, []):
+                continue
+            if key == "time_range" and "time_range" in merged_slots:
+                continue
+            if key not in merged_slots:
+                merged_slots[key] = value
+        return merged_slots
+
+    def _build_clarification(
+        self,
+        *,
+        missing_slots: list[str],
+        current_slots: dict,
+    ) -> tuple[str, list[str]]:
         """根据缺失槽位生成追问。
 
         原则：
@@ -241,6 +410,8 @@ class AnalyticsPlanner:
         """
 
         if "metric" in missing_slots:
+            if current_slots.get("org_scope") or current_slots.get("time_range"):
+                return "当前分析范围已经确定，但还缺少指标。你想看发电量、收入、成本、利润还是产量？", ["metric"]
             return "你想看哪个指标？发电量、收入、成本、利润还是产量？", ["metric"]
         if "time_range" in missing_slots:
             return "你想看哪个时间范围？例如上个月、本月、2024年3月。", ["time_range"]

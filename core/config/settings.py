@@ -179,6 +179,35 @@ class Settings(BaseSettings):
         description="检索默认返回条数",
     )
 
+    # 是否允许经营分析 Planner 使用 LLM fallback 做槽位补强。
+    # 默认关闭的原因是：
+    # - 当前阶段优先保证本地规则稳定、可测、可解释；
+    # - 只有在明确需要时，才让 LLM 作为“规则不足时的补强器”，
+    #   而不是成为主要决策来源。
+    analytics_planner_enable_llm_fallback: bool = Field(
+        default=False,
+        description="是否启用经营分析 Planner 的 LLM fallback",
+    )
+
+    # LLM fallback 的默认模型名称。
+    # 当前阶段主要用于记录和调试，不代表已经强绑定某个 SDK。
+    analytics_planner_llm_model: str = Field(
+        default="gpt-4o-mini",
+        description="经营分析 Planner fallback 模型名称",
+    )
+
+    # SQL Gateway 默认超时，单位毫秒。
+    sql_gateway_default_timeout_ms: int = Field(
+        default=3000,
+        description="SQL Gateway 默认超时（毫秒）",
+    )
+
+    # SQL Gateway 默认返回行数上限。
+    sql_gateway_default_row_limit: int = Field(
+        default=500,
+        description="SQL Gateway 默认返回行数上限",
+    )
+
     @property
     def is_database_configured(self) -> bool:
         """判断是否已经提供真实数据库连接配置。

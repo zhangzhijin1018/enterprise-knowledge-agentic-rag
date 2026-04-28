@@ -9,6 +9,10 @@
 
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.clarification_manager import ClarificationManager
+from core.agent.control_plane.llm_analytics_planner import (
+    LLMAnalyticsPlannerGateway,
+    LLMAnalyticsPlannerResult,
+)
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
 from core.agent.control_plane.state_manager import WorkflowStateManager
@@ -16,6 +20,8 @@ from core.agent.control_plane.task_router import TaskRouter
 
 __all__ = [
     "AnalyticsPlanner",
+    "LLMAnalyticsPlannerGateway",
+    "LLMAnalyticsPlannerResult",
     "TaskRouter",
     "WorkflowStateManager",
     "ClarificationManager",

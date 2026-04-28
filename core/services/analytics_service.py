@@ -33,6 +33,7 @@ from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
+from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 from core.tools.sql.sql_gateway import SQLGateway
 
 
@@ -238,6 +239,8 @@ class AnalyticsService:
                 "data_source": (task_run.get("output_snapshot") or {}).get("data_source"),
                 "row_count": (task_run.get("output_snapshot") or {}).get("row_count"),
                 "latency_ms": (task_run.get("output_snapshot") or {}).get("latency_ms"),
+                "compare_target": (task_run.get("output_snapshot") or {}).get("compare_target"),
+                "group_by": (task_run.get("output_snapshot") or {}).get("group_by"),
             },
             "meta": build_response_meta(
                 conversation_id=task_run["conversation_id"],
@@ -348,27 +351,31 @@ class AnalyticsService:
                 sub_status="running_sql",
             )
             execution_result = self.sql_gateway.execute_readonly_query(
-                guard_result.checked_sql,
-                data_source=sql_bundle["data_source"],
-                timeout_ms=3000,
-                row_limit=500,
+                SQLReadQueryRequest(
+                    data_source=sql_bundle["data_source"],
+                    sql=guard_result.checked_sql,
+                    timeout_ms=3000,
+                    row_limit=500,
+                    trace_id=task_run["trace_id"],
+                    run_id=task_run["run_id"],
+                )
             )
 
             self.sql_audit_repository.create_audit(
                 run_id=task_run["run_id"],
                 user_id=user_context.user_id,
-                db_type=execution_result["db_type"],
+                db_type=execution_result.db_type,
                 metric_scope=sql_bundle["metric_scope"],
                 generated_sql=sql_bundle["generated_sql"],
                 checked_sql=guard_result.checked_sql,
                 is_safe=True,
                 blocked_reason=None,
                 execution_status="succeeded",
-                row_count=execution_result["row_count"],
-                latency_ms=execution_result["latency_ms"],
+                row_count=execution_result.row_count,
+                latency_ms=execution_result.latency_ms,
                 metadata={
                     **sql_bundle["builder_metadata"],
-                    "data_source": execution_result["data_source"],
+                    "data_source": execution_result.data_source,
                 },
             )
 
@@ -380,8 +387,8 @@ class AnalyticsService:
             tables = [
                 {
                     "name": "main_result",
-                    "columns": execution_result["columns"],
-                    "rows": [list(row.values()) for row in execution_result["rows"]],
+                    "columns": execution_result.columns,
+                    "rows": [list(row.values()) for row in execution_result.rows],
                 }
             ]
             sql_explain = None
@@ -390,7 +397,8 @@ class AnalyticsService:
                     "当前阶段采用 schema-aware 规则模板 SQL。"
                     f"主指标={plan.slots['metric']}，时间范围={plan.slots['time_range'].get('label')}，"
                     f"group_by={plan.slots.get('group_by') or 'none'}，"
-                    f"data_source={execution_result['data_source']}。"
+                    f"compare_target={plan.slots.get('compare_target') or 'none'}，"
+                    f"data_source={execution_result.data_source}。"
                 )
 
             output_snapshot = {
@@ -403,9 +411,11 @@ class AnalyticsService:
                     "blocked_reason": guard_result.blocked_reason,
                 },
                 "metric_scope": sql_bundle["metric_scope"],
-                "data_source": execution_result["data_source"],
-                "row_count": execution_result["row_count"],
-                "latency_ms": execution_result["latency_ms"],
+                "data_source": execution_result.data_source,
+                "row_count": execution_result.row_count,
+                "latency_ms": execution_result.latency_ms,
+                "compare_target": plan.slots.get("compare_target"),
+                "group_by": plan.slots.get("group_by"),
                 "slots": plan.slots,
             }
             self.task_run_repository.update_task_run(
@@ -452,9 +462,11 @@ class AnalyticsService:
                         "blocked_reason": guard_result.blocked_reason,
                     },
                     "metric_scope": sql_bundle["metric_scope"],
-                    "data_source": execution_result["data_source"],
-                    "row_count": execution_result["row_count"],
-                    "latency_ms": execution_result["latency_ms"],
+                    "data_source": execution_result.data_source,
+                    "row_count": execution_result.row_count,
+                    "latency_ms": execution_result.latency_ms,
+                    "compare_target": plan.slots.get("compare_target"),
+                    "group_by": plan.slots.get("group_by"),
                 },
                 "meta": build_response_meta(
                     conversation_id=conversation_id,
@@ -507,7 +519,7 @@ class AnalyticsService:
         time_label = slots["time_range"].get("label", "目标时间范围")
         org_scope = slots.get("org_scope")
         group_by = slots.get("group_by")
-        rows = execution_result["rows"]
+        rows = execution_result.rows
 
         scope_text = org_scope["value"] if org_scope else "全部范围"
         if not rows:
@@ -516,7 +528,16 @@ class AnalyticsService:
         if group_by in {"region", "station", "month"}:
             return (
                 f"已完成“{metric}”在{time_label}范围内的分组查询，"
-                f"当前返回 {execution_result['row_count']} 行结果，可继续做趋势或对比分析。"
+                f"当前返回 {execution_result.row_count} 行结果，可继续做趋势或对比分析。"
+            )
+
+        if slots.get("compare_target") in {"mom", "yoy"}:
+            current_value = rows[0].get("current_value")
+            compare_value = rows[0].get("compare_value")
+            compare_label = "环比" if slots.get("compare_target") == "mom" else "同比"
+            return (
+                f"{time_label}{scope_text}的{metric}当前值为 {current_value}，"
+                f"{compare_label}对比值为 {compare_value}。"
             )
 
         total_value = rows[0].get("total_value")

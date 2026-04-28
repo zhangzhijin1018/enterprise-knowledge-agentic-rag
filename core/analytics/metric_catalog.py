@@ -45,31 +45,31 @@ class MetricCatalog:
                 name="发电量",
                 metric_code="generation",
                 description="新能源电站发电量指标",
-                aliases=["发电", "发电总量", "发电情况"],
+                aliases=["发电", "发电总量", "发电情况", "发电表现"],
             ),
             "收入": MetricDefinition(
                 name="收入",
                 metric_code="revenue",
                 description="经营收入指标",
-                aliases=["营收", "营业收入", "收入情况"],
+                aliases=["营收", "营业收入", "收入情况", "收入表现"],
             ),
             "成本": MetricDefinition(
                 name="成本",
                 metric_code="cost",
                 description="经营成本指标",
-                aliases=["成本情况", "支出成本"],
+                aliases=["成本情况", "支出成本", "成本表现"],
             ),
             "利润": MetricDefinition(
                 name="利润",
                 metric_code="profit",
                 description="利润指标",
-                aliases=["利润情况", "盈利"],
+                aliases=["利润情况", "盈利", "利润表现"],
             ),
             "产量": MetricDefinition(
                 name="产量",
                 metric_code="output",
                 description="产量指标",
-                aliases=["生产量", "产出量"],
+                aliases=["生产量", "产出量", "产量情况"],
             ),
         }
 

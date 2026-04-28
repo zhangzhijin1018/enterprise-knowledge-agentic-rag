@@ -49,6 +49,8 @@ class AnalyticsQueryResponseData(BaseModel):
     data_source: str | None = Field(default=None, description="执行数据源")
     row_count: int | None = Field(default=None, description="返回行数")
     latency_ms: int | None = Field(default=None, description="执行耗时")
+    compare_target: str | None = Field(default=None, description="对比目标")
+    group_by: str | None = Field(default=None, description="分组维度")
     clarification: AnalyticsClarificationData | None = Field(default=None, description="澄清信息")
 
 
@@ -73,4 +75,6 @@ class AnalyticsRunDetailData(BaseModel):
     data_source: str | None = Field(default=None, description="执行数据源")
     row_count: int | None = Field(default=None, description="返回行数")
     latency_ms: int | None = Field(default=None, description="执行耗时")
+    compare_target: str | None = Field(default=None, description="对比目标")
+    group_by: str | None = Field(default=None, description="分组维度")
     output_snapshot: dict = Field(default_factory=dict, description="结果快照")

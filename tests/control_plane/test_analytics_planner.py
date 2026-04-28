@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
+from core.config.settings import Settings
 
 
 def test_analytics_planner_extracts_minimal_executable_slots() -> None:
@@ -42,3 +44,41 @@ def test_analytics_planner_returns_clarification_when_time_range_missing() -> No
     assert plan.is_executable is False
     assert "time_range" in plan.missing_slots
     assert plan.clarification_target_slots == ["time_range"]
+
+
+def test_analytics_planner_supports_recent_and_topn_query() -> None:
+    """口语化 recent + topN 查询应尽量走本地规则。"""
+
+    planner = AnalyticsPlanner()
+
+    plan = planner.plan("最近发电表现按站点排名前3")
+
+    assert plan.slots["metric"] == "发电量"
+    assert plan.slots["time_range"]["label"] == "近一个月"
+    assert plan.slots["group_by"] == "station"
+    assert plan.slots["top_n"] == 3
+    assert plan.planning_source == "rule"
+
+
+def test_analytics_planner_can_use_llm_fallback_when_rule_confidence_is_low() -> None:
+    """规则低置信时应允许走 LLM fallback 分支。"""
+
+    def mock_planner_callable(*, query: str, current_slots: dict, conversation_memory: dict) -> dict:
+        return {
+            "slots": {"metric": "收入"},
+            "confidence": 0.9,
+            "source": "mock_llm",
+            "should_use": True,
+        }
+
+    planner = AnalyticsPlanner(
+        llm_planner_gateway=LLMAnalyticsPlannerGateway(
+            settings=Settings(analytics_planner_enable_llm_fallback=True),
+            planner_callable=mock_planner_callable,
+        )
+    )
+
+    plan = planner.plan("最近经营表现怎么样")
+
+    assert plan.slots["metric"] == "收入"
+    assert plan.planning_source == "rule+mock_llm"

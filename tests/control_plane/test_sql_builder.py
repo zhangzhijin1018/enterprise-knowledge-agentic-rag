@@ -34,3 +34,54 @@ def test_sql_builder_generates_schema_aware_sql() -> None:
     assert "metric_code = 'generation'" in result["generated_sql"]
     assert "region_name = '新疆区域'" in result["generated_sql"]
     assert "station_name AS station" in result["generated_sql"]
+
+
+def test_sql_builder_generates_compare_sql() -> None:
+    """compare_target = mom 时应生成受控 compare SQL。"""
+
+    builder = SQLBuilder(
+        schema_registry=SchemaRegistry(),
+        metric_catalog=MetricCatalog(),
+    )
+
+    result = builder.build(
+        {
+            "metric": "发电量",
+            "time_range": {
+                "label": "本月",
+                "start_date": "2024-04-01",
+                "end_date": "2024-04-30",
+            },
+            "compare_target": "mom",
+        }
+    )
+
+    assert "CASE" in result["generated_sql"]
+    assert "current_value" in result["generated_sql"]
+    assert "compare_value" in result["generated_sql"]
+
+
+def test_sql_builder_generates_topn_sql() -> None:
+    """topN 场景应生成带排序和 LIMIT 的受控 SQL。"""
+
+    builder = SQLBuilder(
+        schema_registry=SchemaRegistry(),
+        metric_catalog=MetricCatalog(),
+    )
+
+    result = builder.build(
+        {
+            "metric": "发电量",
+            "time_range": {
+                "label": "上个月",
+                "start_date": "2024-03-01",
+                "end_date": "2024-03-31",
+            },
+            "group_by": "station",
+            "top_n": 5,
+            "sort_direction": "asc",
+        }
+    )
+
+    assert "ORDER BY total_value ASC" in result["generated_sql"]
+    assert result["generated_sql"].endswith("LIMIT 5")
