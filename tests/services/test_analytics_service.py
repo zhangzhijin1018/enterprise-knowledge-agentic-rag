@@ -100,7 +100,9 @@ def test_analytics_service_runs_successfully_when_metric_and_time_range_are_pres
     assert result["data"]["group_by"] is None
     assert result["data"]["compare_target"] is None
     assert result["data"]["chart_spec"] is not None
+    assert result["data"]["chart_spec"]["chart_type"] in {"stacked_bar", "pie", "line", "bar", "ranking_bar"}
     assert result["data"]["insight_cards"]
+    assert result["data"]["report_blocks"]
     assert result["data"]["audit_info"] is not None
 
 
@@ -162,6 +164,7 @@ def test_analytics_service_get_run_detail_contains_sql_audit() -> None:
     assert detail_result["data"]["data_source"] == "local_analytics"
     assert detail_result["data"]["chart_spec"] is not None
     assert detail_result["data"]["insight_cards"]
+    assert detail_result["data"]["report_blocks"]
     assert detail_result["data"]["audit_info"] is not None
 
 
@@ -214,6 +217,7 @@ def test_analytics_service_supports_multi_turn_slot_inheritance_and_update() -> 
     assert "month" in first_table["columns"]
     assert second_result["data"]["metric_scope"] == "发电量"
     assert second_result["data"]["group_by"] == "month"
+    assert second_result["data"]["chart_spec"]["chart_type"] == "line"
 
 
 def test_analytics_service_supports_incremental_metric_switch() -> None:
@@ -260,6 +264,7 @@ def test_analytics_service_supports_compare_and_topn_query() -> None:
     assert result["data"]["compare_target"] == "mom"
     assert result["data"]["group_by"] == "station"
     assert result["data"]["sql_preview"] is not None
+    assert result["data"]["chart_spec"]["chart_type"] == "ranking_bar"
 
 
 def test_analytics_service_can_use_llm_fallback_for_low_confidence_query() -> None:

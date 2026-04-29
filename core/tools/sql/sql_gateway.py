@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from core.analytics.schema_registry import SchemaRegistry
 from core.config.settings import Settings, get_settings
 from core.tools.mcp import (
@@ -63,4 +65,4 @@ class SQLGateway:
         """执行最小健康检查。"""
 
         response = self.server.healthcheck(SQLHealthcheckRequest(data_source=data_source))
-        return response.__dict__
+        return asdict(response)

@@ -48,6 +48,9 @@ class AnalyticsPlanner:
         "按月份": "month",
         "按月看": "month",
         "按月度": "month",
+        "按月展开": "month",
+        "按时间展开": "month",
+        "按时间序列": "month",
         "按区域": "region",
         "按区域看": "region",
         "按区域维度": "region",
@@ -101,6 +104,7 @@ class AnalyticsPlanner:
         short_term_memory = memory.get("short_term_memory") or {}
 
         metric_definition = self._extract_metric(normalized_query)
+        metric_candidates = self._extract_metric_candidates(normalized_query)
         inherited_metric = memory.get("last_metric")
         if metric_definition is None and inherited_metric:
             metric_definition = self.metric_catalog.resolve_metric(inherited_metric)
@@ -116,6 +120,7 @@ class AnalyticsPlanner:
             "compare_target": self._extract_compare_target(normalized_query) or inherited_compare_target,
             "top_n": self._extract_top_n(normalized_query),
             "sort_direction": self._extract_sort_direction(normalized_query),
+            "secondary_metrics": [item for item in metric_candidates if item != (metric_definition.name if metric_definition else None)],
         }
 
         if slots["group_by"] is None:
@@ -124,6 +129,12 @@ class AnalyticsPlanner:
             slots["group_by"] = "station"
         if self._is_trend_query(normalized_query) and not slots["group_by"]:
             slots["group_by"] = "month"
+        if self._is_multi_metric_query(normalized_query, metric_candidates):
+            # 当前 V5 仍然坚持“单次受控模板只围绕一个主指标执行”。
+            # 当用户一次提出多个指标时，先把候选指标记下来并触发澄清，
+            # 比静默忽略其中一个指标更安全，也更符合企业分析可解释性要求。
+            slots["metric_candidates"] = metric_candidates
+            slots["metric"] = None
 
         # 清理空字典和空字符串，避免把“无意义占位值”当成已满足槽位。
         cleaned_slots = {
@@ -192,6 +203,29 @@ class AnalyticsPlanner:
         """
 
         return self.metric_catalog.find_metric_in_query(query)
+
+    def _extract_metric_candidates(self, query: str) -> list[str]:
+        """识别问题中出现的多个指标候选。
+
+        典型场景：
+        - “收入和成本一起看看”
+        - “发电量和利润做个对比”
+
+        当前阶段不会直接把多指标表达放开成自由 SQL，
+        但会先把候选指标识别出来，后续可以：
+        1. 引导用户选择当前最关心的主指标；
+        2. 为未来多指标模板或报告型分析预留结构化入口。
+        """
+
+        candidates: list[str] = []
+        for metric_name in self.metric_catalog.list_metric_names():
+            metric_definition = self.metric_catalog.resolve_metric(metric_name)
+            if metric_definition is None:
+                continue
+            keywords = [metric_definition.name, *metric_definition.aliases]
+            if any(keyword in query for keyword in keywords) and metric_definition.name not in candidates:
+                candidates.append(metric_definition.name)
+        return candidates
 
     def _extract_time_range(self, query: str) -> dict | None:
         """解析最小时间范围。
@@ -331,7 +365,14 @@ class AnalyticsPlanner:
     def _is_trend_query(self, query: str) -> bool:
         """判断是否为趋势类分析。"""
 
-        return any(keyword in query for keyword in ("趋势", "走势", "按时间", "按月看"))
+        return any(keyword in query for keyword in ("趋势", "走势", "按时间", "按月看", "按月展开"))
+
+    def _is_multi_metric_query(self, query: str, metric_candidates: list[str]) -> bool:
+        """判断用户是否在一次问题中请求多个指标。"""
+
+        if len(metric_candidates) < 2:
+            return False
+        return any(keyword in query for keyword in ("一起", "同时", "和", "以及"))
 
     def _is_analytics_like_query(self, query: str) -> bool:
         """判断是否明显属于经营分析语义。"""
@@ -350,6 +391,9 @@ class AnalyticsPlanner:
             "环比",
             "top",
             "排名",
+            "最好",
+            "最差",
+            "展开",
         )
         return any(keyword in query for keyword in analytics_keywords)
 
@@ -410,6 +454,12 @@ class AnalyticsPlanner:
         """
 
         if "metric" in missing_slots:
+            if current_slots.get("metric_candidates"):
+                metric_candidates = "、".join(current_slots["metric_candidates"])
+                return (
+                    f"你这次同时提到了多个指标：{metric_candidates}。当前最小版本建议先确定一个主指标，你想先看哪一个？",
+                    ["metric"],
+                )
             if current_slots.get("org_scope") or current_slots.get("time_range"):
                 return "当前分析范围已经确定，但还缺少指标。你想看发电量、收入、成本、利润还是产量？", ["metric"]
             return "你想看哪个指标？发电量、收入、成本、利润还是产量？", ["metric"]

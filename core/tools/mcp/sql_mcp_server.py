@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
+from dataclasses import asdict
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -73,7 +73,7 @@ class SQLMCPServer:
                     data_source=source_definition.key,
                     trace_id=request.trace_id,
                     run_id=request.run_id,
-                ).__dict__,
+                ),
             ) from exc
 
         columns = list(rows[0].keys()) if rows else []
@@ -115,7 +115,7 @@ class SQLMCPServer:
                     data_source=source_definition.key,
                     trace_id=request.trace_id,
                     run_id=request.run_id,
-                ).__dict__,
+                ),
             ) from exc
 
         latency_ms = int((time.perf_counter() - started_at) * 1000)
@@ -139,21 +139,23 @@ class SQLMCPServer:
         data_source: str,
         trace_id: str | None,
         run_id: str | None,
-    ) -> SQLMCPError:
+    ) -> dict:
         """构造统一错误结构。
 
         这里先在 server 侧把错误形状固定下来，
         后续无论 transport 是进程内调用、HTTP 还是标准 MCP，都可以复用同一错误 payload。
         """
 
-        return SQLMCPError(
-            error_code=error_code,
-            message=message,
-            detail={
-                "data_source": data_source,
-                "trace_id": trace_id,
-                "run_id": run_id,
-            },
+        return asdict(
+            SQLMCPError(
+                error_code=error_code,
+                message=message,
+                detail={
+                    "data_source": data_source,
+                    "trace_id": trace_id,
+                    "run_id": run_id,
+                },
+            )
         )
 
     def _get_engine(self, source_definition: DataSourceDefinition) -> Engine:
@@ -164,6 +166,8 @@ class SQLMCPServer:
 
         if source_definition.connection_uri:
             engine = create_engine(source_definition.connection_uri, future=True)
+            if source_definition.db_type == "sqlite":
+                self._bootstrap_local_analytics_source(engine)
         else:
             engine = create_engine(
                 "sqlite://",

@@ -27,7 +27,9 @@ from datetime import datetime, timezone
 from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
+from core.analytics.insight_builder import InsightBuilder
 from core.analytics.metric_catalog import MetricCatalog
+from core.analytics.report_formatter import ReportFormatter
 from core.analytics.schema_registry import SchemaRegistry
 from core.common import error_codes
 from core.common.exceptions import AppException
@@ -54,6 +56,8 @@ class AnalyticsService:
         sql_gateway: SQLGateway,
         schema_registry: SchemaRegistry,
         metric_catalog: MetricCatalog,
+        insight_builder: InsightBuilder | None = None,
+        report_formatter: ReportFormatter | None = None,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -64,6 +68,8 @@ class AnalyticsService:
         self.sql_gateway = sql_gateway
         self.schema_registry = schema_registry
         self.metric_catalog = metric_catalog
+        self.insight_builder = insight_builder or InsightBuilder()
+        self.report_formatter = report_formatter or ReportFormatter()
 
     def submit_query(
         self,
@@ -218,6 +224,7 @@ class AnalyticsService:
                 "group_by": output_snapshot.get("group_by"),
                 "chart_spec": output_snapshot.get("chart_spec"),
                 "insight_cards": output_snapshot.get("insight_cards", []),
+                "report_blocks": output_snapshot.get("report_blocks", []),
                 "audit_info": output_snapshot.get("audit_info"),
             },
             "meta": build_response_meta(
@@ -478,11 +485,18 @@ class AnalyticsService:
                 execution_result=execution_result,
                 metric_name=plan.slots["metric"],
             )
-            insight_cards = self._build_insight_cards(
+            insight_cards = self.insight_builder.build(
                 slots=plan.slots,
-                execution_result=execution_result,
+                rows=execution_result.rows,
+                row_count=execution_result.row_count,
             )
             audit_info = self._build_audit_info(audit_record)
+            report_blocks = self.report_formatter.build(
+                summary=summary,
+                insight_cards=insight_cards,
+                tables=tables,
+                chart_spec=chart_spec,
+            )
 
             output_snapshot = {
                 "summary": summary,
@@ -508,6 +522,7 @@ class AnalyticsService:
                 "group_by": plan.slots.get("group_by"),
                 "chart_spec": chart_spec,
                 "insight_cards": insight_cards,
+                "report_blocks": report_blocks,
                 "audit_info": audit_info,
                 "slots": plan.slots,
                 "planning_source": plan.planning_source,
@@ -563,6 +578,7 @@ class AnalyticsService:
                     "group_by": plan.slots.get("group_by"),
                     "chart_spec": chart_spec,
                     "insight_cards": insight_cards,
+                    "report_blocks": report_blocks,
                     "audit_info": audit_info,
                 },
                 "meta": build_response_meta(
@@ -717,83 +733,42 @@ class AnalyticsService:
         compare_target = slots.get("compare_target")
         if group_by == "month":
             return {
-                "type": "line",
+                "chart_type": "line",
                 "title": f"{metric_name}按月趋势",
                 "x_field": "month",
                 "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
-                "series": ["current_value", "compare_value"] if compare_target in {"mom", "yoy"} else ["total_value"],
+                "series_field": None,
+                "dataset_ref": "main_result",
+                "data_mapping": {
+                    "primary_series": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
+                    "secondary_series": "compare_value" if compare_target in {"mom", "yoy"} else None,
+                },
             }
         if group_by in {"region", "station"}:
             return {
-                "type": "bar",
+                "chart_type": "ranking_bar" if slots.get("top_n") else "bar",
                 "title": f"{metric_name}{'对比' if compare_target else ''}{group_by}分布",
                 "x_field": group_by,
                 "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
-                "series": ["current_value", "compare_value"] if compare_target in {"mom", "yoy"} else ["total_value"],
+                "series_field": None,
+                "dataset_ref": "main_result",
+                "data_mapping": {
+                    "primary_series": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
+                    "secondary_series": "compare_value" if compare_target in {"mom", "yoy"} else None,
+                },
             }
         return {
-            "type": "metric_card",
+            "chart_type": "pie" if execution_result.row_count > 1 else "stacked_bar",
             "title": f"{metric_name}汇总",
             "x_field": None,
             "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
-            "series": ["current_value", "compare_value"] if compare_target in {"mom", "yoy"} else ["total_value"],
+            "series_field": None,
+            "dataset_ref": "main_result",
+            "data_mapping": {
+                "primary_series": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
+                "secondary_series": "compare_value" if compare_target in {"mom", "yoy"} else None,
+            },
         }
-
-    def _build_insight_cards(self, *, slots: dict, execution_result) -> list[dict]:
-        """生成最小洞察卡片。
-
-        当前阶段先用规则模板生成卡片，而不是依赖 LLM 大段总结：
-        - 更稳定、可测；
-        - 适合后续再叠加 LLM explain 或报表生成；
-        - 也便于前端直接渲染卡片组件。
-        """
-
-        rows = execution_result.rows
-        if not rows:
-            return [
-                {
-                    "title": "查询结果",
-                    "value": "无数据",
-                    "description": "当前筛选条件下未命中任何经营数据。",
-                }
-            ]
-
-        metric = slots["metric"]
-        compare_target = slots.get("compare_target")
-        group_by = slots.get("group_by")
-        primary_row = rows[0]
-        primary_value = primary_row.get("current_value")
-        if primary_value is None:
-            primary_value = primary_row.get("total_value")
-        cards = [
-            {
-                "title": f"{metric}主指标",
-                "value": primary_value,
-                "description": "当前结果集中最核心的指标值。",
-            },
-            {
-                "title": "返回行数",
-                "value": execution_result.row_count,
-                "description": "用于前端判断当前结果是汇总、趋势还是分组排行。",
-            },
-        ]
-        if compare_target in {"mom", "yoy"}:
-            cards.append(
-                {
-                    "title": "对比口径",
-                    "value": "环比" if compare_target == "mom" else "同比",
-                    "description": "当前结果已按固定 compare 模板返回当前值与对比值。",
-                }
-            )
-        elif group_by in {"region", "station", "month"}:
-            cards.append(
-                {
-                    "title": "分析维度",
-                    "value": group_by,
-                    "description": "当前结果按该维度完成分组聚合。",
-                }
-            )
-        return cards
 
     def _build_audit_info(self, audit_record: dict | None) -> dict | None:
         """构造前端可展示的最小审计摘要。"""

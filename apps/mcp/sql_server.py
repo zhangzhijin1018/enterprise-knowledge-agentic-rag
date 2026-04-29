@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from fastapi import Body, FastAPI, HTTPException
 
 from core.analytics.schema_registry import SchemaRegistry
@@ -36,7 +38,7 @@ def create_sql_mcp_app() -> FastAPI:
             response = server.execute_readonly_query(request)
             return {
                 "ok": True,
-                "data": response.__dict__,
+                "data": asdict(response),
             }
         except Exception as exc:  # pragma: no cover - API 层兜底保护
             error_detail = getattr(exc, "detail", {"message": str(exc)})
@@ -51,7 +53,7 @@ def create_sql_mcp_app() -> FastAPI:
             response = server.healthcheck(request)
             return {
                 "ok": True,
-                "data": response.__dict__,
+                "data": asdict(response),
             }
         except Exception as exc:  # pragma: no cover - API 层兜底保护
             error_detail = getattr(exc, "detail", {"message": str(exc)})

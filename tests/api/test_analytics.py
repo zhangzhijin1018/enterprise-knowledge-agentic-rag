@@ -69,6 +69,7 @@ def test_analytics_query_returns_summary_and_tables_when_slots_are_complete(clie
     assert "compare_target" in payload["data"]
     assert payload["data"]["chart_spec"] is not None
     assert payload["data"]["insight_cards"]
+    assert payload["data"]["report_blocks"]
     assert payload["data"]["audit_info"] is not None
 
 
@@ -118,4 +119,5 @@ def test_analytics_run_detail_returns_latest_sql_audit(client: TestClient) -> No
     assert payload["data"]["latest_sql_audit"]["execution_status"] == "succeeded"
     assert payload["data"]["chart_spec"] is not None
     assert payload["data"]["insight_cards"]
+    assert payload["data"]["report_blocks"]
     assert payload["data"]["audit_info"] is not None

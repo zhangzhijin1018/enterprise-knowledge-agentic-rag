@@ -82,3 +82,16 @@ def test_analytics_planner_can_use_llm_fallback_when_rule_confidence_is_low() ->
 
     assert plan.slots["metric"] == "收入"
     assert plan.planning_source == "rule+mock_llm"
+
+
+def test_analytics_planner_can_detect_multi_metric_query_and_request_clarification() -> None:
+    """组合指标表达应先识别候选指标并返回澄清。"""
+
+    planner = AnalyticsPlanner()
+
+    plan = planner.plan("最近收入和成本一起看看")
+
+    assert plan.is_executable is False
+    assert "metric" in plan.missing_slots
+    assert plan.slots["metric_candidates"] == ["收入", "成本"]
+    assert "多个指标" in (plan.clarification_question or "")

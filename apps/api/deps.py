@@ -130,30 +130,6 @@ def get_vector_store() -> MilvusStore:
     return MilvusStore(collection_name=settings.milvus_collection_name)
 
 
-def get_analytics_planner() -> AnalyticsPlanner:
-    """提供经营分析 Planner 依赖。"""
-
-    return AnalyticsPlanner(
-        metric_catalog=get_metric_catalog(),
-        llm_planner_gateway=get_llm_analytics_planner_gateway(),
-    )
-
-
-def get_sql_builder() -> SQLBuilder:
-    """提供规则式 SQL Builder 依赖。"""
-
-    return SQLBuilder(
-        schema_registry=get_schema_registry(),
-        metric_catalog=get_metric_catalog(),
-    )
-
-
-def get_sql_guard() -> SQLGuard:
-    """提供 SQL Guard 依赖。"""
-
-    return SQLGuard(allowed_tables=["analytics_metrics_daily"])
-
-
 def get_schema_registry() -> SchemaRegistry:
     """提供经营分析 Schema Registry 依赖。"""
 
@@ -178,7 +154,39 @@ def get_llm_analytics_planner_gateway() -> LLMAnalyticsPlannerGateway:
     return LLMAnalyticsPlannerGateway(settings=get_settings())
 
 
-def get_sql_gateway() -> SQLGateway:
+def get_analytics_planner(
+    metric_catalog: MetricCatalog = Depends(get_metric_catalog),
+    llm_planner_gateway: LLMAnalyticsPlannerGateway = Depends(get_llm_analytics_planner_gateway),
+) -> AnalyticsPlanner:
+    """提供经营分析 Planner 依赖。"""
+
+    return AnalyticsPlanner(
+        metric_catalog=metric_catalog,
+        llm_planner_gateway=llm_planner_gateway,
+    )
+
+
+def get_sql_builder(
+    schema_registry: SchemaRegistry = Depends(get_schema_registry),
+    metric_catalog: MetricCatalog = Depends(get_metric_catalog),
+) -> SQLBuilder:
+    """提供规则式 SQL Builder 依赖。"""
+
+    return SQLBuilder(
+        schema_registry=schema_registry,
+        metric_catalog=metric_catalog,
+    )
+
+
+def get_sql_guard() -> SQLGuard:
+    """提供 SQL Guard 依赖。"""
+
+    return SQLGuard(allowed_tables=["analytics_metrics_daily"])
+
+
+def get_sql_gateway(
+    schema_registry: SchemaRegistry = Depends(get_schema_registry),
+) -> SQLGateway:
     """提供 SQL Gateway 依赖。
 
     当前阶段默认通过“进程内 SQL MCP Server”执行，
@@ -186,7 +194,7 @@ def get_sql_gateway() -> SQLGateway:
     """
 
     return SQLGateway(
-        schema_registry=get_schema_registry(),
+        schema_registry=schema_registry,
         settings=get_settings(),
     )
 
