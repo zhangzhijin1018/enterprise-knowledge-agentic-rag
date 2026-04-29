@@ -35,6 +35,9 @@ class AnalyticsClarificationData(BaseModel):
     clarification_id: str = Field(description="澄清事件 ID")
     question: str = Field(description="澄清问题")
     target_slots: list[str] = Field(default_factory=list, description="目标槽位列表")
+    clarification_type: str | None = Field(default=None, description="澄清类型，例如 missing_required_slot 或 slot_conflict")
+    reason: str | None = Field(default=None, description="触发澄清的规则原因")
+    suggested_options: list[str] = Field(default_factory=list, description="建议补充选项")
 
 
 class AnalyticsQueryResponseData(BaseModel):

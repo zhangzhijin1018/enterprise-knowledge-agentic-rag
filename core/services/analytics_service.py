@@ -255,7 +255,12 @@ class AnalyticsService:
             task_run["run_id"],
             status="awaiting_user_clarification",
             sub_status="awaiting_slot_fill",
-            context_snapshot={"slots": plan.slots, "missing_slots": plan.missing_slots},
+            context_snapshot={
+                "slots": plan.slots,
+                "missing_slots": plan.missing_slots,
+                "conflict_slots": plan.conflict_slots,
+                "clarification_type": plan.clarification_type,
+            },
         )
         self.conversation_repository.add_message(
             conversation_id=conversation_id,
@@ -266,6 +271,9 @@ class AnalyticsService:
             structured_content={
                 "clarification_id": clarification["clarification_id"],
                 "target_slots": clarification["target_slots"],
+                "clarification_type": plan.clarification_type,
+                "reason": plan.clarification_reason,
+                "suggested_options": plan.clarification_suggested_options,
             },
         )
         return {
@@ -274,6 +282,9 @@ class AnalyticsService:
                     "clarification_id": clarification["clarification_id"],
                     "question": clarification["question_text"],
                     "target_slots": clarification["target_slots"],
+                    "clarification_type": plan.clarification_type,
+                    "reason": plan.clarification_reason,
+                    "suggested_options": plan.clarification_suggested_options,
                 }
             },
             "meta": build_response_meta(

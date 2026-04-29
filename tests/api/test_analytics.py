@@ -91,6 +91,9 @@ def test_analytics_query_returns_clarification_when_metric_missing(client: TestC
     assert response.status_code == 200
     assert payload["meta"]["status"] == "awaiting_user_clarification"
     assert payload["data"]["clarification"]["target_slots"] == ["metric"]
+    assert payload["data"]["clarification"]["clarification_type"] == "missing_required_slot"
+    assert payload["data"]["clarification"]["reason"] is not None
+    assert payload["data"]["clarification"]["suggested_options"]
 
 
 def test_analytics_run_detail_returns_latest_sql_audit(client: TestClient) -> None:

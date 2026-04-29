@@ -32,6 +32,8 @@ def test_analytics_planner_returns_clarification_when_metric_missing() -> None:
     assert plan.is_executable is False
     assert "metric" in plan.missing_slots
     assert plan.clarification_target_slots == ["metric"]
+    assert plan.clarification_type == "missing_required_slot"
+    assert plan.clarification_reason is not None
 
 
 def test_analytics_planner_returns_clarification_when_time_range_missing() -> None:
@@ -44,6 +46,7 @@ def test_analytics_planner_returns_clarification_when_time_range_missing() -> No
     assert plan.is_executable is False
     assert "time_range" in plan.missing_slots
     assert plan.clarification_target_slots == ["time_range"]
+    assert plan.clarification_type == "missing_required_slot"
 
 
 def test_analytics_planner_supports_recent_and_topn_query() -> None:
@@ -92,6 +95,31 @@ def test_analytics_planner_can_detect_multi_metric_query_and_request_clarificati
     plan = planner.plan("最近收入和成本一起看看")
 
     assert plan.is_executable is False
-    assert "metric" in plan.missing_slots
+    assert "metric" in plan.conflict_slots
     assert plan.slots["metric_candidates"] == ["收入", "成本"]
+    assert plan.clarification_type == "slot_conflict"
     assert "多个指标" in (plan.clarification_question or "")
+
+
+def test_analytics_planner_llm_fallback_cannot_skip_minimum_execute_condition() -> None:
+    """LLM fallback 只能补强，不能绕过最小可执行条件判断。"""
+
+    def mock_planner_callable(*, query: str, current_slots: dict, conversation_memory: dict) -> dict:
+        return {
+            "slots": {"group_by": "month"},
+            "confidence": 0.95,
+            "source": "mock_llm",
+            "should_use": True,
+        }
+
+    planner = AnalyticsPlanner(
+        llm_planner_gateway=LLMAnalyticsPlannerGateway(
+            settings=Settings(analytics_planner_enable_llm_fallback=True),
+            planner_callable=mock_planner_callable,
+        )
+    )
+
+    plan = planner.plan("最近经营表现怎么样")
+
+    assert plan.is_executable is False
+    assert set(plan.missing_slots) == {"metric"}

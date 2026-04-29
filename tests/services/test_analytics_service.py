@@ -121,6 +121,9 @@ def test_analytics_service_returns_clarification_when_metric_missing() -> None:
 
     assert result["meta"]["status"] == "awaiting_user_clarification"
     assert result["data"]["clarification"]["target_slots"] == ["metric"]
+    assert result["data"]["clarification"]["clarification_type"] == "missing_required_slot"
+    assert result["data"]["clarification"]["reason"] is not None
+    assert result["data"]["clarification"]["suggested_options"]
 
 
 def test_analytics_service_blocks_query_without_time_range() -> None:
@@ -138,6 +141,7 @@ def test_analytics_service_blocks_query_without_time_range() -> None:
 
     assert result["meta"]["status"] == "awaiting_user_clarification"
     assert result["data"]["clarification"]["target_slots"] == ["time_range"]
+    assert result["data"]["clarification"]["clarification_type"] == "missing_required_slot"
 
 
 def test_analytics_service_get_run_detail_contains_sql_audit() -> None:
@@ -245,6 +249,111 @@ def test_analytics_service_supports_incremental_metric_switch() -> None:
 
     assert second_result["meta"]["status"] == "succeeded"
     assert second_result["data"]["metric_scope"] == "收入"
+
+
+def test_analytics_service_supports_compare_inheritance_query() -> None:
+    """“再看一下同比”应尽量继承上一轮上下文直接执行。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1207)
+
+    first_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    second_result = service.submit_query(
+        query="再看一下同比",
+        conversation_id=first_result["meta"]["conversation_id"],
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert second_result["meta"]["status"] == "succeeded"
+    assert second_result["data"]["compare_target"] == "yoy"
+
+
+def test_analytics_service_supports_org_scope_switch_query() -> None:
+    """“新疆换成北疆”应继承主指标与时间范围，只覆盖组织范围。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1208)
+
+    first_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    second_result = service.submit_query(
+        query="新疆换成北疆",
+        conversation_id=first_result["meta"]["conversation_id"],
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert second_result["meta"]["status"] == "succeeded"
+    assert "北疆区域" in second_result["data"]["summary"]
+
+
+def test_analytics_service_supports_station_scope_switch_query() -> None:
+    """“只看哈密电站”应继承上一轮上下文并缩小组织范围。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1209)
+
+    first_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    second_result = service.submit_query(
+        query="只看哈密电站",
+        conversation_id=first_result["meta"]["conversation_id"],
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert second_result["meta"]["status"] == "succeeded"
+    assert "哈密电站" in second_result["data"]["summary"]
+
+
+def test_analytics_service_returns_conflict_clarification_for_multi_metric_follow_up() -> None:
+    """“再把成本也加进来”当前阶段应澄清主指标，而不是直接执行。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1210)
+
+    first_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    second_result = service.submit_query(
+        query="再把成本也加进来",
+        conversation_id=first_result["meta"]["conversation_id"],
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert second_result["meta"]["status"] == "awaiting_user_clarification"
+    assert second_result["data"]["clarification"]["clarification_type"] == "slot_conflict"
+    assert second_result["data"]["clarification"]["suggested_options"] == ["发电量", "成本"]
 
 
 def test_analytics_service_supports_compare_and_topn_query() -> None:
