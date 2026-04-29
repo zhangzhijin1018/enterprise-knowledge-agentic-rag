@@ -28,7 +28,20 @@ class MetricDefinition:
     data_source: str = "local_analytics"
     table_name: str = "analytics_metrics_daily"
     aggregation: str = "SUM"
+    # required_permissions 用于声明“想查这个指标至少需要哪些权限”。
+    # 这里和 data_source 权限是两层不同治理：
+    # 1. metric 权限约束“能不能查这个业务口径”；
+    # 2. data_source 权限约束“能不能访问这个底层库/数仓”。
+    # 经营分析不能把所有指标默认视为等价，因为收入、成本、利润等指标通常更敏感。
     required_permissions: list[str] = field(default_factory=lambda: ["analytics:query"])
+    # allowed_roles 用于预留角色级治理。
+    # 当前阶段不做完整权限中心，但先让结构具备角色约束能力。
+    allowed_roles: list[str] = field(default_factory=list)
+    # allowed_departments 用于预留部门级治理。
+    # 某些指标未来可能只允许经营管理部、财务部等特定部门访问。
+    allowed_departments: list[str] = field(default_factory=list)
+    # sensitivity_level 用于标记指标敏感等级，便于前端展示、审计和后续 Human Review 扩展。
+    sensitivity_level: str = "normal"
 
 
 class MetricCatalog:
@@ -57,6 +70,8 @@ class MetricCatalog:
                 data_source=self.default_data_source,
                 table_name=self.default_table_name,
                 required_permissions=["analytics:query", "analytics:metric:generation"],
+                allowed_roles=["employee", "manager", "analyst", "admin"],
+                sensitivity_level="internal",
             ),
             "收入": MetricDefinition(
                 name="收入",
@@ -66,6 +81,9 @@ class MetricCatalog:
                 data_source=self.default_data_source,
                 table_name=self.default_table_name,
                 required_permissions=["analytics:query", "analytics:metric:revenue"],
+                allowed_roles=["manager", "analyst", "finance", "admin"],
+                allowed_departments=["analytics-center", "finance-center"],
+                sensitivity_level="restricted",
             ),
             "成本": MetricDefinition(
                 name="成本",
@@ -75,6 +93,9 @@ class MetricCatalog:
                 data_source=self.default_data_source,
                 table_name=self.default_table_name,
                 required_permissions=["analytics:query", "analytics:metric:cost"],
+                allowed_roles=["manager", "analyst", "finance", "admin"],
+                allowed_departments=["analytics-center", "finance-center"],
+                sensitivity_level="restricted",
             ),
             "利润": MetricDefinition(
                 name="利润",
@@ -84,6 +105,9 @@ class MetricCatalog:
                 data_source=self.default_data_source,
                 table_name=self.default_table_name,
                 required_permissions=["analytics:query", "analytics:metric:profit"],
+                allowed_roles=["manager", "analyst", "finance", "admin"],
+                allowed_departments=["analytics-center", "finance-center"],
+                sensitivity_level="restricted",
             ),
             "产量": MetricDefinition(
                 name="产量",
@@ -93,6 +117,8 @@ class MetricCatalog:
                 data_source=self.default_data_source,
                 table_name=self.default_table_name,
                 required_permissions=["analytics:query", "analytics:metric:output"],
+                allowed_roles=["employee", "manager", "analyst", "admin"],
+                sensitivity_level="internal",
             ),
         }
 

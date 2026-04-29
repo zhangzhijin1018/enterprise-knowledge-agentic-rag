@@ -58,6 +58,11 @@ class AnalyticsQueryResponseData(BaseModel):
     insight_cards: list[dict] = Field(default_factory=list, description="最小洞察卡片")
     report_blocks: list[dict] = Field(default_factory=list, description="后续报告导出可复用的结构化块")
     audit_info: dict | None = Field(default=None, description="最小 SQL 审计摘要")
+    permission_check_result: dict | None = Field(default=None, description="指标/数据源权限检查结果")
+    data_scope_result: dict | None = Field(default=None, description="数据范围治理结果")
+    masked_fields: list[str] = Field(default_factory=list, description="当前结果中被脱敏的字段")
+    effective_filters: dict = Field(default_factory=dict, description="实际生效的数据过滤条件")
+    governance_decision: dict | None = Field(default=None, description="治理决策摘要")
     clarification: AnalyticsClarificationData | None = Field(default=None, description="澄清信息")
 
 
@@ -88,4 +93,9 @@ class AnalyticsRunDetailData(BaseModel):
     insight_cards: list[dict] = Field(default_factory=list, description="最小洞察卡片")
     report_blocks: list[dict] = Field(default_factory=list, description="后续报告导出可复用的结构化块")
     audit_info: dict | None = Field(default=None, description="最小 SQL 审计摘要")
+    permission_check_result: dict | None = Field(default=None, description="指标/数据源权限检查结果")
+    data_scope_result: dict | None = Field(default=None, description="数据范围治理结果")
+    masked_fields: list[str] = Field(default_factory=list, description="当前结果中被脱敏的字段")
+    effective_filters: dict = Field(default_factory=dict, description="实际生效的数据过滤条件")
+    governance_decision: dict | None = Field(default=None, description="治理决策摘要")
     output_snapshot: dict = Field(default_factory=dict, description="结果快照")

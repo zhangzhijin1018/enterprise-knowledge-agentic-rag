@@ -41,7 +41,7 @@ class SQLBuilder:
         self.schema_registry = schema_registry or SchemaRegistry()
         self.metric_catalog = metric_catalog or MetricCatalog()
 
-    def build(self, slots: dict) -> dict:
+    def build(self, slots: dict, *, department_code: str | None = None) -> dict:
         """根据槽位构造最小 SQL 和解释信息。"""
 
         metric = slots["metric"]
@@ -74,6 +74,12 @@ class SQLBuilder:
                 where_clauses.append(
                     f"{table_definition.dimension_columns['station']} = '{org_scope['value']}'"
                 )
+        if table_definition.department_filter_column:
+            if not department_code:
+                raise ValueError("当前表要求部门范围过滤，但未提供 department_code")
+            where_clauses.append(
+                f"{table_definition.department_filter_column} = '{department_code}'"
+            )
 
         select_fields = []
         group_by_fields = []
@@ -177,7 +183,16 @@ class SQLBuilder:
                     table_name=table_definition.name,
                     data_source=data_source,
                 ),
-                "sql_template_version": "analytics_v4",
+                "effective_filters": {
+                    "metric_code": metric_definition.metric_code,
+                    "time_range": {
+                        "start_date": time_range["start_date"],
+                        "end_date": time_range["end_date"],
+                    },
+                    "org_scope": org_scope,
+                    "department_code": department_code if table_definition.department_filter_column else None,
+                },
+                "sql_template_version": "analytics_v7",
             },
         }
 

@@ -60,7 +60,12 @@ class TableDefinition:
     group_by_rules: dict[str, GroupByRule] = field(default_factory=dict)
     allowed_permissions: list[str] = field(default_factory=list)
     field_whitelist: list[str] = field(default_factory=list)
+    # visible_fields 表示结果层允许直接返回给前端的字段集合。
+    # 它不是数据库层字段白名单的替代，而是“结果可见性治理”的补充边界。
+    visible_fields: list[str] = field(default_factory=list)
     sensitive_fields: list[str] = field(default_factory=list)
+    # masked_fields 表示即使字段可见，也需要在缺少敏感可见权限时进行脱敏的字段。
+    masked_fields: list[str] = field(default_factory=list)
     department_filter_column: str | None = None
 
 
@@ -107,10 +112,24 @@ class SchemaRegistry:
                 "metric_name",
                 "region_name",
                 "station_name",
+                "department_code",
                 "metric_value",
             ],
-            sensitive_fields=[],
-            department_filter_column=None,
+            visible_fields=[
+                "metric_name",
+                "month",
+                "region",
+                "station",
+                "total_value",
+                "current_value",
+                "compare_value",
+            ],
+            # 这里把站点视为当前阶段最小敏感字段样例：
+            # - 对普通经营查询来说，站点级结果可能涉及更细颗粒度经营表现；
+            # - 因此即使允许返回，也要为后续脱敏策略预留明确边界。
+            sensitive_fields=["station"],
+            masked_fields=["station"],
+            department_filter_column="department_code",
             group_by_rules={
                 "month": GroupByRule(
                     key="month",
@@ -252,6 +271,39 @@ class SchemaRegistry:
 
         table = self.get_table_definition(table_name=table_name, data_source=data_source)
         return list(table.field_whitelist)
+
+    def get_table_visible_fields(
+        self,
+        *,
+        table_name: str | None = None,
+        data_source: str | None = None,
+    ) -> list[str]:
+        """获取结果层可见字段集合。"""
+
+        table = self.get_table_definition(table_name=table_name, data_source=data_source)
+        return list(table.visible_fields)
+
+    def get_table_sensitive_fields(
+        self,
+        *,
+        table_name: str | None = None,
+        data_source: str | None = None,
+    ) -> list[str]:
+        """获取结果层敏感字段集合。"""
+
+        table = self.get_table_definition(table_name=table_name, data_source=data_source)
+        return list(table.sensitive_fields)
+
+    def get_table_masked_fields(
+        self,
+        *,
+        table_name: str | None = None,
+        data_source: str | None = None,
+    ) -> list[str]:
+        """获取缺少敏感字段权限时需要脱敏的字段集合。"""
+
+        table = self.get_table_definition(table_name=table_name, data_source=data_source)
+        return list(table.masked_fields)
 
     def _infer_db_type_from_uri(self, uri: str) -> str:
         """根据连接串粗略推断数据库类型。"""

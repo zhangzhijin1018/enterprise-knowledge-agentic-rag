@@ -27,6 +27,7 @@ class SQLGuardResult:
     is_safe: bool
     checked_sql: str | None
     blocked_reason: str | None
+    governance_detail: dict | None = None
 
 
 class SQLGuard:
@@ -67,6 +68,8 @@ class SQLGuard:
         *,
         allowed_tables: list[str] | None = None,
         allowed_fields: list[str] | None = None,
+        required_filter_column: str | None = None,
+        required_filter_value: str | None = None,
     ) -> SQLGuardResult:
         """校验 SQL 并补齐最小安全约束。
 
@@ -82,6 +85,7 @@ class SQLGuard:
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason="SQL 不能为空",
+                governance_detail={"stage": "normalize"},
             )
 
         upper_sql = normalized_sql.upper()
@@ -90,6 +94,7 @@ class SQLGuard:
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason="当前阶段只允许执行 SELECT 只读查询",
+                governance_detail={"stage": "read_only_check"},
             )
 
         if ";" in normalized_sql.rstrip(";"):
@@ -97,6 +102,7 @@ class SQLGuard:
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason="禁止执行多语句 SQL",
+                governance_detail={"stage": "multi_statement_check"},
             )
 
         if "--" in normalized_sql or "/*" in normalized_sql or "*/" in normalized_sql:
@@ -104,6 +110,7 @@ class SQLGuard:
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason="禁止注释型 SQL 输入",
+                governance_detail={"stage": "comment_check"},
             )
 
         for keyword in self.DANGEROUS_KEYWORDS:
@@ -112,6 +119,7 @@ class SQLGuard:
                     is_safe=False,
                     checked_sql=None,
                     blocked_reason=f"检测到危险关键字：{keyword}",
+                    governance_detail={"stage": "dangerous_keyword_check", "keyword": keyword},
                 )
 
         tables = self._extract_table_names(normalized_sql)
@@ -120,6 +128,7 @@ class SQLGuard:
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason="未识别到合法表名",
+                governance_detail={"stage": "table_extract_check"},
             )
 
         effective_allowed_tables = set(allowed_tables or self.allowed_tables)
@@ -129,6 +138,10 @@ class SQLGuard:
                 is_safe=False,
                 checked_sql=None,
                 blocked_reason=f"存在未授权表：{', '.join(disallowed_tables)}",
+                governance_detail={
+                    "stage": "table_whitelist_check",
+                    "disallowed_tables": disallowed_tables,
+                },
             )
 
         effective_allowed_fields = set(allowed_fields or self.allowed_fields)
@@ -144,6 +157,27 @@ class SQLGuard:
                     is_safe=False,
                     checked_sql=None,
                     blocked_reason=f"存在未授权字段：{', '.join(disallowed_fields)}",
+                    governance_detail={
+                        "stage": "field_whitelist_check",
+                        "disallowed_fields": disallowed_fields,
+                    },
+                )
+
+        if required_filter_column and required_filter_value:
+            expected_pattern = re.compile(
+                rf"\b{re.escape(required_filter_column)}\b\s*=\s*'{re.escape(required_filter_value)}'",
+                flags=re.IGNORECASE,
+            )
+            if not expected_pattern.search(normalized_sql):
+                return SQLGuardResult(
+                    is_safe=False,
+                    checked_sql=None,
+                    blocked_reason=f"缺少必需的数据范围过滤：{required_filter_column}",
+                    governance_detail={
+                        "stage": "data_scope_check",
+                        "required_filter_column": required_filter_column,
+                        "required_filter_value": required_filter_value,
+                    },
                 )
 
         checked_sql = normalized_sql
@@ -154,6 +188,11 @@ class SQLGuard:
             is_safe=True,
             checked_sql=checked_sql,
             blocked_reason=None,
+            governance_detail={
+                "stage": "passed",
+                "required_filter_column": required_filter_column,
+                "required_filter_value": required_filter_value,
+            },
         )
 
     def _extract_table_names(self, sql: str) -> list[str]:

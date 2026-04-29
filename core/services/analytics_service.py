@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
+from core.analytics.data_masking import DataMaskingResult, DataMaskingService
 from core.analytics.insight_builder import InsightBuilder
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.report_formatter import ReportFormatter
@@ -56,6 +57,7 @@ class AnalyticsService:
         sql_gateway: SQLGateway,
         schema_registry: SchemaRegistry,
         metric_catalog: MetricCatalog,
+        data_masking_service: DataMaskingService | None = None,
         insight_builder: InsightBuilder | None = None,
         report_formatter: ReportFormatter | None = None,
     ) -> None:
@@ -68,6 +70,7 @@ class AnalyticsService:
         self.sql_gateway = sql_gateway
         self.schema_registry = schema_registry
         self.metric_catalog = metric_catalog
+        self.data_masking_service = data_masking_service or DataMaskingService()
         self.insight_builder = insight_builder or InsightBuilder()
         self.report_formatter = report_formatter or ReportFormatter()
 
@@ -226,6 +229,11 @@ class AnalyticsService:
                 "insight_cards": output_snapshot.get("insight_cards", []),
                 "report_blocks": output_snapshot.get("report_blocks", []),
                 "audit_info": output_snapshot.get("audit_info"),
+                "permission_check_result": output_snapshot.get("permission_check_result"),
+                "data_scope_result": output_snapshot.get("data_scope_result"),
+                "masked_fields": output_snapshot.get("masked_fields", []),
+                "effective_filters": output_snapshot.get("effective_filters", {}),
+                "governance_decision": output_snapshot.get("governance_decision"),
             },
             "meta": build_response_meta(
                 conversation_id=task_run["conversation_id"],
@@ -366,9 +374,17 @@ class AnalyticsService:
         # - 数据源级权限决定“这个人能不能访问这类数据库/数仓”；
         # - 表白名单 / 字段白名单决定“即使生成了 SQL，也只能落到受控物理范围”。
         # 这些校验必须在真正执行 SQL 之前完成，不能等查完再补救。
-        self._assert_metric_permission(metric_definition=metric_definition, user_context=user_context)
-        self._assert_data_source_permission(
+        permission_check_result = self._assert_metric_permission(
+            metric_definition=metric_definition,
+            user_context=user_context,
+        )
+        data_source_permission_result = self._assert_data_source_permission(
             data_source_definition=data_source_definition,
+            user_context=user_context,
+        )
+        permission_check_result["data_source"] = data_source_permission_result
+        data_scope_result = self._build_data_scope_result(
+            table_definition=table_definition,
             user_context=user_context,
         )
 
@@ -382,7 +398,10 @@ class AnalyticsService:
                     "confidence": plan.confidence,
                 },
             )
-            sql_bundle = self.sql_builder.build(plan.slots)
+            sql_bundle = self.sql_builder.build(
+                plan.slots,
+                department_code=user_context.department_code,
+            )
 
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
@@ -391,6 +410,8 @@ class AnalyticsService:
             guard_result = self.sql_guard.validate(
                 sql_bundle["generated_sql"],
                 allowed_tables=self.schema_registry.get_allowed_tables(data_source=sql_bundle["data_source"]),
+                required_filter_column=table_definition.department_filter_column,
+                required_filter_value=user_context.department_code if table_definition.department_filter_column else None,
             )
 
             if not guard_result.is_safe or not guard_result.checked_sql:
@@ -426,6 +447,7 @@ class AnalyticsService:
                     detail={
                         "blocked_reason": guard_result.blocked_reason,
                         "audit_info": self._build_audit_info(blocked_audit),
+                        "governance_detail": guard_result.governance_detail,
                     },
                 )
 
@@ -466,6 +488,8 @@ class AnalyticsService:
                     "data_source": execution_result.data_source,
                     "department_filter_column": table_definition.department_filter_column,
                     "sensitive_fields": table_definition.sensitive_fields,
+                    "permission_check_result": permission_check_result,
+                    "data_scope_result": data_scope_result,
                 },
             )
 
@@ -473,12 +497,29 @@ class AnalyticsService:
                 task_run["run_id"],
                 sub_status="explaining_result",
             )
+            masking_result = self.data_masking_service.apply(
+                rows=execution_result.rows,
+                columns=execution_result.columns,
+                visible_fields=self.schema_registry.get_table_visible_fields(
+                    table_name=table_definition.name,
+                    data_source=execution_result.data_source,
+                ),
+                sensitive_fields=self.schema_registry.get_table_sensitive_fields(
+                    table_name=table_definition.name,
+                    data_source=execution_result.data_source,
+                ),
+                masked_fields=self.schema_registry.get_table_masked_fields(
+                    table_name=table_definition.name,
+                    data_source=execution_result.data_source,
+                ),
+                user_permissions=user_context.permissions,
+            )
             summary = self._build_summary(plan.slots, execution_result)
             tables = [
                 {
                     "name": "main_result",
-                    "columns": execution_result.columns,
-                    "rows": [list(row.values()) for row in execution_result.rows],
+                    "columns": masking_result.columns,
+                    "rows": [list(row.values()) for row in masking_result.rows],
                 }
             ]
             sql_explain = None
@@ -498,10 +539,27 @@ class AnalyticsService:
             )
             insight_cards = self.insight_builder.build(
                 slots=plan.slots,
-                rows=execution_result.rows,
+                rows=masking_result.rows,
                 row_count=execution_result.row_count,
             )
-            audit_info = self._build_audit_info(audit_record)
+            effective_filters = sql_bundle["builder_metadata"].get("effective_filters", {})
+            governance_decision = {
+                "permission_check_result": permission_check_result,
+                "data_scope_result": data_scope_result,
+                "masked_fields": masking_result.masked_fields,
+                "visible_fields": masking_result.visible_fields,
+                "sensitive_fields": masking_result.sensitive_fields,
+                "governance_action": masking_result.governance_decision,
+                "effective_filters": effective_filters,
+            }
+            audit_info = self._build_audit_info(
+                audit_record,
+                permission_check_result=permission_check_result,
+                data_scope_result=data_scope_result,
+                masking_result=masking_result,
+                effective_filters=effective_filters,
+                guard_result=guard_result,
+            )
             report_blocks = self.report_formatter.build(
                 summary=summary,
                 insight_cards=insight_cards,
@@ -524,6 +582,7 @@ class AnalyticsService:
                         table_name=metric_definition.table_name,
                         data_source=sql_bundle["data_source"],
                     ),
+                    "governance_detail": guard_result.governance_detail,
                 },
                 "metric_scope": sql_bundle["metric_scope"],
                 "data_source": execution_result.data_source,
@@ -535,6 +594,11 @@ class AnalyticsService:
                 "insight_cards": insight_cards,
                 "report_blocks": report_blocks,
                 "audit_info": audit_info,
+                "permission_check_result": permission_check_result,
+                "data_scope_result": data_scope_result,
+                "masked_fields": masking_result.masked_fields,
+                "effective_filters": effective_filters,
+                "governance_decision": governance_decision,
                 "slots": plan.slots,
                 "planning_source": plan.planning_source,
             }
@@ -591,6 +655,11 @@ class AnalyticsService:
                     "insight_cards": insight_cards,
                     "report_blocks": report_blocks,
                     "audit_info": audit_info,
+                    "permission_check_result": permission_check_result,
+                    "data_scope_result": data_scope_result,
+                    "masked_fields": masking_result.masked_fields,
+                    "effective_filters": effective_filters,
+                    "governance_decision": governance_decision,
                 },
                 "meta": build_response_meta(
                     conversation_id=conversation_id,
@@ -636,27 +705,71 @@ class AnalyticsService:
                 detail={"reason": str(exc)},
             ) from exc
 
-    def _assert_metric_permission(self, *, metric_definition, user_context: UserContext) -> None:
+    def _assert_metric_permission(self, *, metric_definition, user_context: UserContext) -> dict:
         """执行最小指标级权限校验。
 
         当前阶段先采用“指标定义声明权限 + 用户上下文显式权限集合”的简单模型：
-        - 如果用户拥有指标定义声明的任一权限，则允许继续；
-        - 这样既保留了指标级治理边界，又不会把当前阶段的权限系统做得过重。
+        - required_permissions 决定“查这个指标至少需要哪些权限”；
+        - allowed_roles 决定“哪些角色默认允许访问这个指标”；
+        - allowed_departments 决定“哪些部门允许访问这个指标”。
+
+        经营分析不能默认所有指标都可查：
+        - 发电量、产量通常属于一般经营指标；
+        - 收入、成本、利润往往更敏感；
+        - 因此必须把 metric 级治理做成显式结构，而不是靠前端按钮控制。
         """
 
         required_permissions = metric_definition.required_permissions or ["analytics:query"]
-        if not self._has_any_permission(user_context.permissions, required_permissions):
+        if not self._has_all_permissions(user_context.permissions, required_permissions):
             raise AppException(
-                error_code=error_codes.PERMISSION_DENIED,
+                error_code=error_codes.ANALYTICS_METRIC_PERMISSION_DENIED,
                 message="当前用户无权查询该经营指标",
                 status_code=403,
                 detail={
                     "metric": metric_definition.name,
                     "required_permissions": required_permissions,
+                    "missing_permissions": [
+                        permission
+                        for permission in required_permissions
+                        if permission not in set(user_context.permissions or [])
+                    ],
                 },
             )
 
-    def _assert_data_source_permission(self, *, data_source_definition, user_context: UserContext) -> None:
+        if metric_definition.allowed_roles and not set(user_context.roles or []).intersection(metric_definition.allowed_roles):
+            raise AppException(
+                error_code=error_codes.ANALYTICS_METRIC_PERMISSION_DENIED,
+                message="当前用户无权查询该经营指标",
+                status_code=403,
+                detail={
+                    "metric": metric_definition.name,
+                    "allowed_roles": metric_definition.allowed_roles,
+                    "current_roles": user_context.roles,
+                },
+            )
+
+        if metric_definition.allowed_departments and user_context.department_code not in set(metric_definition.allowed_departments):
+            raise AppException(
+                error_code=error_codes.ANALYTICS_DATA_SCOPE_DENIED,
+                message="当前用户部门范围不允许访问该经营指标",
+                status_code=403,
+                detail={
+                    "metric": metric_definition.name,
+                    "allowed_departments": metric_definition.allowed_departments,
+                    "current_department": user_context.department_code,
+                },
+            )
+
+        return {
+            "metric": metric_definition.name,
+            "allowed": True,
+            "required_permissions": required_permissions,
+            "allowed_roles": metric_definition.allowed_roles,
+            "allowed_departments": metric_definition.allowed_departments,
+            "sensitivity_level": metric_definition.sensitivity_level,
+        }
+
+    def _assert_data_source_permission(self, *, data_source_definition, user_context: UserContext) -> dict:
         """执行最小数据源级权限校验。
 
         为什么经营分析必须做数据源级治理：
@@ -671,7 +784,7 @@ class AnalyticsService:
             required_permissions,
         ):
             raise AppException(
-                error_code=error_codes.PERMISSION_DENIED,
+                error_code=error_codes.ANALYTICS_DATA_SOURCE_PERMISSION_DENIED,
                 message="当前用户无权访问该经营分析数据源",
                 status_code=403,
                 detail={
@@ -679,6 +792,45 @@ class AnalyticsService:
                     "required_permissions": required_permissions,
                 },
             )
+
+        if data_source_definition.allowed_roles and not set(user_context.roles or []).intersection(data_source_definition.allowed_roles):
+            raise AppException(
+                error_code=error_codes.ANALYTICS_DATA_SOURCE_PERMISSION_DENIED,
+                message="当前用户角色无权访问该经营分析数据源",
+                status_code=403,
+                detail={
+                    "data_source": data_source_definition.key,
+                    "allowed_roles": data_source_definition.allowed_roles,
+                    "current_roles": user_context.roles,
+                },
+            )
+
+        return {
+            "data_source": data_source_definition.key,
+            "allowed": True,
+            "required_permissions": required_permissions,
+            "allowed_roles": data_source_definition.allowed_roles,
+        }
+
+    def _build_data_scope_result(self, *, table_definition, user_context: UserContext) -> dict:
+        """构造当前经营分析的数据范围治理结果。"""
+
+        if table_definition.department_filter_column and not user_context.department_code:
+            raise AppException(
+                error_code=error_codes.ANALYTICS_DATA_SCOPE_DENIED,
+                message="当前分析表要求部门范围过滤，但用户上下文缺少部门信息",
+                status_code=403,
+                detail={
+                    "required_filter_column": table_definition.department_filter_column,
+                },
+            )
+
+        return {
+            "scope_type": "single_department" if table_definition.department_filter_column else "global",
+            "department_filter_column": table_definition.department_filter_column,
+            "effective_department": user_context.department_code if table_definition.department_filter_column else None,
+            "enforced": bool(table_definition.department_filter_column),
+        }
 
     def _has_any_permission(self, user_permissions: list[str], required_permissions: list[str]) -> bool:
         """判断用户是否至少满足一项权限。"""
@@ -781,7 +933,16 @@ class AnalyticsService:
             },
         }
 
-    def _build_audit_info(self, audit_record: dict | None) -> dict | None:
+    def _build_audit_info(
+        self,
+        audit_record: dict | None,
+        *,
+        permission_check_result: dict | None = None,
+        data_scope_result: dict | None = None,
+        masking_result: DataMaskingResult | None = None,
+        effective_filters: dict | None = None,
+        guard_result=None,
+    ) -> dict | None:
         """构造前端可展示的最小审计摘要。"""
 
         if audit_record is None:
@@ -793,4 +954,12 @@ class AnalyticsService:
             "latency_ms": audit_record.get("latency_ms"),
             "db_type": audit_record.get("db_type"),
             "blocked_reason": audit_record.get("blocked_reason"),
+            "permission_check_result": permission_check_result,
+            "data_scope_result": data_scope_result,
+            "masked_fields": masking_result.masked_fields if masking_result is not None else [],
+            "effective_filters": effective_filters or {},
+            "governance_decision": {
+                "action": masking_result.governance_decision if masking_result is not None else "no_masking_needed",
+                "guard_stage": getattr(guard_result, "governance_detail", None),
+            },
         }

@@ -33,8 +33,8 @@ def build_auth_headers(user_id: int = 1301, username: str = "analytics_api_user"
         "X-User-Id": str(user_id),
         "X-Username": username,
         "X-Display-Name": username,
-        "X-User-Roles": "employee",
-        "X-User-Permissions": "analytics:query",
+        "X-User-Roles": "employee,analyst",
+        "X-User-Permissions": "analytics:query,analytics:metric:generation,analytics:metric:revenue,analytics:metric:cost,analytics:metric:profit,analytics:metric:output",
         "X-Department-Code": "analytics-center",
     }
 
@@ -71,6 +71,9 @@ def test_analytics_query_returns_summary_and_tables_when_slots_are_complete(clie
     assert payload["data"]["insight_cards"]
     assert payload["data"]["report_blocks"]
     assert payload["data"]["audit_info"] is not None
+    assert payload["data"]["permission_check_result"] is not None
+    assert payload["data"]["data_scope_result"]["enforced"] is True
+    assert payload["data"]["effective_filters"]["department_code"] == "analytics-center"
 
 
 def test_analytics_query_returns_clarification_when_metric_missing(client: TestClient) -> None:
@@ -124,3 +127,4 @@ def test_analytics_run_detail_returns_latest_sql_audit(client: TestClient) -> No
     assert payload["data"]["insight_cards"]
     assert payload["data"]["report_blocks"]
     assert payload["data"]["audit_info"] is not None
+    assert payload["data"]["permission_check_result"] is not None

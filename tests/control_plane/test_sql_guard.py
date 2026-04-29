@@ -11,7 +11,9 @@ def test_sql_guard_allows_select_and_adds_limit() -> None:
     guard = SQLGuard(allowed_tables=["analytics_metrics_daily"], default_limit=100)
 
     result = guard.validate(
-        "SELECT metric_name, SUM(metric_value) AS total_value FROM analytics_metrics_daily"
+        "SELECT metric_name, SUM(metric_value) AS total_value FROM analytics_metrics_daily WHERE department_code = 'analytics-center'",
+        required_filter_column="department_code",
+        required_filter_value="analytics-center",
     )
 
     assert result.is_safe is True
@@ -39,3 +41,18 @@ def test_sql_guard_blocks_table_outside_whitelist() -> None:
 
     assert result.is_safe is False
     assert result.blocked_reason == "存在未授权表：secret_finance_table"
+
+
+def test_sql_guard_blocks_sql_without_required_department_filter() -> None:
+    """声明需要部门范围过滤时，缺少过滤条件必须被拦截。"""
+
+    guard = SQLGuard(allowed_tables=["analytics_metrics_daily"])
+
+    result = guard.validate(
+        "SELECT metric_name, SUM(metric_value) AS total_value FROM analytics_metrics_daily",
+        required_filter_column="department_code",
+        required_filter_value="analytics-center",
+    )
+
+    assert result.is_safe is False
+    assert result.blocked_reason == "缺少必需的数据范围过滤：department_code"

@@ -199,6 +199,7 @@ class SQLMCPServer:
                         metric_name TEXT NOT NULL,
                         region_name TEXT NOT NULL,
                         station_name TEXT NOT NULL,
+                        department_code TEXT NOT NULL,
                         metric_value REAL NOT NULL
                     )
                     """
@@ -210,17 +211,19 @@ class SQLMCPServer:
             if row_count:
                 return
             sample_rows = [
-                ("2024-03-01", "generation", "发电量", "新疆区域", "哈密电站", 1200.0),
-                ("2024-03-02", "generation", "发电量", "新疆区域", "哈密电站", 1350.0),
-                ("2024-03-03", "generation", "发电量", "新疆区域", "吐鲁番电站", 980.0),
-                ("2024-03-04", "generation", "发电量", "北疆区域", "阿勒泰电站", 760.0),
-                ("2024-03-05", "generation", "发电量", "南疆区域", "和田电站", 680.0),
-                ("2024-03-01", "revenue", "收入", "新疆区域", "哈密电站", 320.0),
-                ("2024-03-02", "revenue", "收入", "新疆区域", "吐鲁番电站", 305.0),
-                ("2024-03-03", "cost", "成本", "新疆区域", "哈密电站", 210.0),
-                ("2024-03-04", "profit", "利润", "新疆区域", "哈密电站", 110.0),
-                ("2024-04-01", "generation", "发电量", "新疆区域", "哈密电站", 1400.0),
-                ("2024-04-02", "generation", "发电量", "新疆区域", "吐鲁番电站", 1110.0),
+                ("2024-03-01", "generation", "发电量", "新疆区域", "哈密电站", "analytics-center", 1200.0),
+                ("2024-03-02", "generation", "发电量", "新疆区域", "哈密电站", "analytics-center", 1350.0),
+                ("2024-03-03", "generation", "发电量", "新疆区域", "吐鲁番电站", "analytics-center", 980.0),
+                ("2024-03-04", "generation", "发电量", "北疆区域", "阿勒泰电站", "analytics-center", 760.0),
+                ("2024-03-05", "generation", "发电量", "南疆区域", "和田电站", "analytics-center", 680.0),
+                ("2024-03-01", "revenue", "收入", "新疆区域", "哈密电站", "analytics-center", 320.0),
+                ("2024-03-02", "revenue", "收入", "新疆区域", "吐鲁番电站", "analytics-center", 305.0),
+                ("2024-03-03", "cost", "成本", "新疆区域", "哈密电站", "analytics-center", 210.0),
+                ("2024-03-04", "profit", "利润", "新疆区域", "哈密电站", "analytics-center", 110.0),
+                ("2024-04-01", "generation", "发电量", "新疆区域", "哈密电站", "analytics-center", 1400.0),
+                ("2024-04-02", "generation", "发电量", "新疆区域", "吐鲁番电站", "analytics-center", 1110.0),
+                ("2024-03-01", "generation", "发电量", "北疆区域", "克拉玛依电站", "north-ops", 860.0),
+                ("2024-03-02", "generation", "发电量", "北疆区域", "阿勒泰电站", "north-ops", 920.0),
             ]
             for row in sample_rows:
                 connection.execute(
@@ -232,6 +235,7 @@ class SQLMCPServer:
                             metric_name,
                             region_name,
                             station_name,
+                            department_code,
                             metric_value
                         ) VALUES (
                             :biz_date,
@@ -239,6 +243,7 @@ class SQLMCPServer:
                             :metric_name,
                             :region_name,
                             :station_name,
+                            :department_code,
                             :metric_value
                         )
                         """
@@ -249,7 +254,8 @@ class SQLMCPServer:
                         "metric_name": row[2],
                         "region_name": row[3],
                         "station_name": row[4],
-                        "metric_value": row[5],
+                        "department_code": row[5],
+                        "metric_value": row[6],
                     },
                 )
 

@@ -40,9 +40,16 @@ def build_user_context(user_id: int = 1201) -> UserContext:
         user_id=user_id,
         username=f"user_{user_id}",
         display_name=f"user_{user_id}",
-        roles=["employee"],
+        roles=["employee", "analyst"],
         department_code="analytics-center",
-        permissions=["analytics:query"],
+        permissions=[
+            "analytics:query",
+            "analytics:metric:generation",
+            "analytics:metric:revenue",
+            "analytics:metric:cost",
+            "analytics:metric:profit",
+            "analytics:metric:output",
+        ],
     )
 
 
@@ -104,6 +111,10 @@ def test_analytics_service_runs_successfully_when_metric_and_time_range_are_pres
     assert result["data"]["insight_cards"]
     assert result["data"]["report_blocks"]
     assert result["data"]["audit_info"] is not None
+    assert result["data"]["permission_check_result"] is not None
+    assert result["data"]["data_scope_result"]["enforced"] is True
+    assert result["data"]["effective_filters"]["department_code"] == "analytics-center"
+    assert "governance_decision" in result["data"]
 
 
 def test_analytics_service_returns_clarification_when_metric_missing() -> None:
@@ -412,3 +423,76 @@ def test_analytics_service_can_use_llm_fallback_for_low_confidence_query() -> No
 
     assert result["meta"]["status"] == "succeeded"
     assert result["data"]["metric_scope"] == "利润"
+
+
+def test_analytics_service_rejects_metric_without_permission() -> None:
+    """缺少指标权限时应返回明确的指标权限拒绝。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1211)
+    user_context.permissions = ["analytics:query", "analytics:metric:generation"]
+
+    with pytest.raises(AppException) as exc_info:
+        service.submit_query(
+            query="帮我分析一下上个月新疆区域收入",
+            conversation_id=None,
+            output_mode="summary",
+            need_sql_explain=False,
+            user_context=user_context,
+        )
+
+    assert exc_info.value.error_code == "ANALYTICS_METRIC_PERMISSION_DENIED"
+
+
+def test_analytics_service_rejects_data_source_without_permission() -> None:
+    """缺少数据源权限时应被明确拒绝。"""
+
+    schema_registry = SchemaRegistry()
+    default_source = schema_registry.get_default_data_source()
+    default_source.required_permissions = ["analytics:query", "analytics:source:local_analytics"]
+    metric_catalog = MetricCatalog(
+        default_data_source=default_source.key,
+        default_table_name=default_source.default_table,
+    )
+    service = AnalyticsService(
+        conversation_repository=ConversationRepository(session=None),
+        task_run_repository=TaskRunRepository(session=None),
+        sql_audit_repository=SQLAuditRepository(session=None),
+        analytics_planner=AnalyticsPlanner(metric_catalog=metric_catalog),
+        sql_builder=SQLBuilder(schema_registry=schema_registry, metric_catalog=metric_catalog),
+        sql_guard=SQLGuard(allowed_tables=["analytics_metrics_daily"]),
+        sql_gateway=SQLGateway(schema_registry=schema_registry),
+        schema_registry=schema_registry,
+        metric_catalog=metric_catalog,
+    )
+
+    with pytest.raises(AppException) as exc_info:
+        service.submit_query(
+            query="帮我分析一下上个月新疆区域发电量",
+            conversation_id=None,
+            output_mode="summary",
+            need_sql_explain=False,
+            user_context=build_user_context(user_id=1212),
+        )
+
+    assert exc_info.value.error_code == "ANALYTICS_DATA_SOURCE_PERMISSION_DENIED"
+
+
+def test_analytics_service_masks_sensitive_fields_when_permission_missing() -> None:
+    """命中敏感字段时，结果应按最小规则脱敏。"""
+
+    service = build_service()
+
+    result = service.submit_query(
+        query="最近发电表现按站点排名前3",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=build_user_context(user_id=1213),
+    )
+
+    assert result["meta"]["status"] == "succeeded"
+    assert "station" in result["data"]["masked_fields"]
+    first_table = result["data"]["tables"][0]
+    assert "station" in first_table["columns"]
+    assert any("***" in str(cell) for row in first_table["rows"] for cell in row)

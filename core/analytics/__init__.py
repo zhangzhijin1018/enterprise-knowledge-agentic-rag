@@ -4,11 +4,14 @@
 """
 
 from core.analytics.insight_builder import InsightBuilder
+from core.analytics.data_masking import DataMaskingResult, DataMaskingService
 from core.analytics.metric_catalog import MetricCatalog, MetricDefinition
 from core.analytics.report_formatter import ReportFormatter
 from core.analytics.schema_registry import DataSourceDefinition, GroupByRule, SchemaRegistry, TableDefinition
 
 __all__ = [
+    "DataMaskingResult",
+    "DataMaskingService",
     "InsightBuilder",
     "MetricCatalog",
     "MetricDefinition",
