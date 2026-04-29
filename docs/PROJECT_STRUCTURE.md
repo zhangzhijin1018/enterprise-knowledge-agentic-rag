@@ -310,6 +310,14 @@ sql/analytics/
   - 经营分析重结果仓储；
   - 配合 `task_runs.output_snapshot` 轻快照工作，负责 tables / insight_cards / report_blocks / chart_spec 的独立存取。
 
+- `tests/perf/test_analytics_perf_acceptance.py`
+  - 第18轮性能验收自动化测试；
+  - 用于验证 lite / standard / full 分级、轻快照瘦身、重结果拆分、异步导出和缓存复用是否真正生效。
+
+- `docs/ANALYTICS_PERF_REVIEW_V1.md`
+  - 第18轮性能验收与慢点复盘文档；
+  - 记录验收范围、方法、结果、当前瓶颈和下一轮优化建议。
+
 ## 4.1 `apps/api/main.py`
 
 职责：

@@ -542,6 +542,8 @@ flowchart TD
 > - export 真异步化：POST 只创建任务返回 export_id，后台 AsyncTaskRunner 异步渲染；
 > - insight / report 延迟生成：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
 > - registry / schema / cache 常驻缓存：高频只读对象通过 RegistryCache 进程内缓存。
+>
+> 第18轮性能验收与慢点复盘结果见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
 
 ## 9.1 适用场景
 

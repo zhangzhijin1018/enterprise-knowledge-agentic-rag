@@ -735,6 +735,8 @@ COMMENT ON COLUMN clarification_events.resolved_at IS '解决时间';
 ## 5.14 task_runs
 
 > **V1 性能优化说明**：`output_snapshot` 已轻量化。重内容（tables / insight_cards / report_blocks / chart_spec）不再写入此字段，而是单独存储到 `analytics_results` 表。轻快照仅保留 summary、slots、sql_preview、row_count、latency_ms、compare_target、group_by、governance_decision（简版）、timing_breakdown。目的是减少 task_runs 的大 JSON 写入与读取压力。
+>
+> 这套轻重分离设计的验收结果与慢点复盘见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
 
 ```sql
 CREATE TABLE task_runs (

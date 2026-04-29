@@ -631,6 +631,8 @@ GET /api/v1/contracts/reviews/{run_id}
 4. **insight / report 延迟生成**：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
 5. **registry / schema / cache 常驻缓存**：高频只读对象通过 RegistryCache 进程内缓存。
 
+对应的验收与慢点复盘结果见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
+
 ## 12.1 提交经营分析请求
 
 ```http
