@@ -72,6 +72,17 @@ Agent 层负责：
 - 恢复执行
 - 专家调度
 
+从这一轮开始，Agent 层进一步拆成两层：
+
+- `core/agent/supervisor/`
+  - 宏观调度层；
+  - 负责 Supervisor、委托、结果汇总、A2A-ready 边界；
+
+- `core/agent/workflows/`
+  - 微观执行层；
+  - 负责单个业务专家内部的 workflow；
+  - 第一轮先落地 `analytics/` 样板。
+
 ### 2.5 Tool 层负责执行
 
 Tool / Capability 层负责：
@@ -82,6 +93,19 @@ Tool / Capability 层负责：
 - File MCP
 - Report MCP
 - A2A 调用
+
+当前 A2A 目录进一步拆成：
+
+- `core/tools/a2a/contracts/`
+  - 统一跨专家委托契约；
+- `core/tools/a2a/gateway/`
+  - A2A Gateway 最小实现；
+
+同时新增：
+
+- `core/runtime/events/`
+  - 事件总线抽象；
+  - 当前默认 in-memory，保留 Redis Streams-ready 边界。
 
 ---
 
@@ -185,6 +209,14 @@ enterprise-knowledge-agentic-rag/
 │   │   │   ├── clarification_manager.py
 │   │   │   ├── review_manager.py
 │   │   │   └── result_aggregator.py
+│   │   ├── supervisor/
+│   │   │   ├── supervisor_service.py
+│   │   │   └── delegation_controller.py
+│   │   ├── workflows/
+│   │   │   └── analytics/
+│   │   │       ├── state.py
+│   │   │       ├── nodes.py
+│   │   │       └── graph.py
 │   │   ├── mesh/
 │   │   │   ├── policy_agent.py
 │   │   │   ├── safety_agent.py
@@ -209,12 +241,19 @@ enterprise-knowledge-agentic-rag/
 │   │   │   ├── report_mcp_client.py
 │   │   │   └── api_mcp_client.py
 │   │   ├── a2a/
-│   │   │   ├── a2a_client.py
-│   │   │   └── registry_client.py
+│   │   │   ├── contracts/
+│   │   │   │   └── models.py
+│   │   │   └── gateway/
+│   │   │       └── a2a_gateway.py
 │   │   └── local/
 │   │       ├── parser.py
 │   │       ├── ocr.py
 │   │       └── exporter.py
+│   ├── runtime/
+│   │   └── events/
+│   │       ├── event_bus.py
+│   │       ├── in_memory_bus.py
+│   │       └── redis_stream_bus.py
 │   ├── review/
 │   │   ├── hooks.py
 │   │   ├── interruptor.py
@@ -234,6 +273,7 @@ enterprise-knowledge-agentic-rag/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── ANALYTICS_DATA_SOURCE.md
+│   ├── A2A_LANGGRAPH_MIXED_ARCHITECTURE.md
 │   ├── AGENT_WORKFLOW.md
 │   ├── DB_DESIGN.md
 │   ├── API_DESIGN.md

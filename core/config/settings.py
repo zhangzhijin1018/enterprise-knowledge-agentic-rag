@@ -196,6 +196,16 @@ class Settings(BaseSettings):
         description="经营分析 Planner fallback 模型名称",
     )
 
+    # 是否默认让经营分析主查询链路走 workflow-first 执行路径。
+    # 当前阶段保持这个开关的原因是：
+    # 1. 经营分析已经有一条稳定的 Service 直连实现，不能贸然删除；
+    # 2. 本轮开始要让真实 API 主路径逐步切到 LangGraph workflow；
+    # 3. 一旦某次回归发现问题，仍可快速回退到兼容直连模式。
+    analytics_use_workflow: bool = Field(
+        default=True,
+        description="经营分析是否默认启用 workflow-first 执行路径",
+    )
+
     # SQL Gateway 默认超时，单位毫秒。
     sql_gateway_default_timeout_ms: int = Field(
         default=3000,

@@ -118,7 +118,12 @@ class AnalyticsWorkflowNodes:
             },
             risk_level="medium",
             review_status="not_required",
+            run_id=state.get("run_id"),
+            trace_id=state.get("trace_id"),
+            parent_task_id=state.get("parent_task_id"),
         )
+        state["run_id"] = task_run["run_id"]
+        state["trace_id"] = task_run["trace_id"]
         self.analytics_service.conversation_repository.update_conversation(
             conversation["conversation_id"],
             current_route="analytics",

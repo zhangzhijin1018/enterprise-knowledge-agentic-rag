@@ -119,6 +119,9 @@ class AnalyticsLangGraphWorkflow:
         conversation_id: str | None = None,
         output_mode: str = "lite",
         need_sql_explain: bool = False,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
     ) -> dict:
         """执行经营分析微观工作流。"""
 
@@ -126,6 +129,9 @@ class AnalyticsLangGraphWorkflow:
             "query": query,
             "user_context": user_context,
             "conversation_id": conversation_id,
+            "parent_task_id": parent_task_id,
+            "run_id": run_id,
+            "trace_id": trace_id,
             "output_mode": output_mode,
             "need_sql_explain": need_sql_explain,
         }

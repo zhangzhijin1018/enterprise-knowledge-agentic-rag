@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
@@ -47,6 +48,9 @@ from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
 from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 from core.tools.sql.sql_gateway import SQLGateway
+
+if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
+    from core.agent.workflows.analytics.adapter import AnalyticsWorkflowAdapter
 
 VALID_OUTPUT_MODES = {"lite", "standard", "full"}
 DEFAULT_OUTPUT_MODE = "lite"
@@ -72,6 +76,8 @@ class AnalyticsService:
         report_formatter: ReportFormatter | None = None,
         analytics_result_repository: AnalyticsResultRepository | None = None,
         registry_cache: RegistryCache | None = None,
+        use_workflow: bool = False,
+        workflow_adapter: AnalyticsWorkflowAdapter | None = None,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -88,6 +94,29 @@ class AnalyticsService:
         self.report_formatter = report_formatter or ReportFormatter()
         self.analytics_result_repository = analytics_result_repository or AnalyticsResultRepository()
         self.registry_cache = registry_cache or get_global_cache()
+        # 当前阶段保留“兼容直连模式”，原因是：
+        # 1. 已有 analytics/export/review/测试链路都还依赖现有 Service；
+        # 2. workflow-first 是本轮新主路径，但不能一次性把所有调用方都强制改完；
+        # 3. 因此通过 use_workflow 开关渐进切换，风险最小。
+        self.use_workflow = use_workflow
+        self.workflow_adapter = workflow_adapter
+
+    def bind_workflow_adapter(
+        self,
+        workflow_adapter: AnalyticsWorkflowAdapter,
+        *,
+        use_workflow: bool | None = None,
+    ) -> None:
+        """绑定经营分析 workflow adapter。
+
+        这里使用显式绑定而不是在 `__init__` 里直接 new adapter，
+        是为了避免 Service -> Adapter -> Workflow -> Service 的构造循环，
+        同时让依赖注入层可以决定当前实例是否启用 workflow-first。
+        """
+
+        self.workflow_adapter = workflow_adapter
+        if use_workflow is not None:
+            self.use_workflow = use_workflow
 
     def submit_query(
         self,
@@ -99,6 +128,15 @@ class AnalyticsService:
         user_context: UserContext,
     ) -> dict:
         """提交经营分析请求。"""
+
+        if self.use_workflow and self.workflow_adapter is not None:
+            return self.workflow_adapter.execute_query(
+                query=query,
+                conversation_id=conversation_id,
+                output_mode=output_mode,
+                need_sql_explain=need_sql_explain,
+                user_context=user_context,
+            )
 
         normalized_query = query.strip()
         if not normalized_query:

@@ -115,20 +115,34 @@ class TaskRunRepository:
         input_snapshot: dict,
         risk_level: str = "low",
         review_status: str = "not_required",
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
     ) -> dict:
-        """创建任务运行记录。"""
+        """创建任务运行记录。
+
+        为什么这里要允许外部透传 `run_id / trace_id / parent_task_id`：
+        1. 在传统“Service 直连执行”模式下，任务运行 ID 可以由 Repository 自己生成；
+        2. 但在“Supervisor 宏观调度 -> Workflow 微观执行”模式下，
+           宏观层已经先创建了统一的 `TaskEnvelope`；
+        3. 这时业务工作流必须沿用上游透传的链路标识，才能保证：
+           - Supervisor 事件
+           - Workflow 内部 task_run
+           - SQL Audit / Clarification / Review
+           使用同一条 run/trace 链路。
+        """
 
         if self._use_database():
             conversation = self._get_conversation_model(conversation_id)
             if conversation is None:
                 raise ValueError(f"Conversation not found: {conversation_id}")
             task_run = TaskRun(
-                run_id=_generate_prefixed_id("run"),
+                run_id=run_id or _generate_prefixed_id("run"),
                 task_id=_generate_prefixed_id("task"),
-                parent_task_id=None,
+                parent_task_id=parent_task_id,
                 conversation_id=conversation.id,
                 user_id=user_id,
-                trace_id=_generate_prefixed_id("tr"),
+                trace_id=trace_id or _generate_prefixed_id("tr"),
                 task_type=task_type,
                 route=route,
                 selected_agent="mock_chat_agent",
@@ -155,14 +169,14 @@ class TaskRunRepository:
             )
 
         now = _utcnow()
-        run_id = _generate_prefixed_id("run")
+        resolved_run_id = run_id or _generate_prefixed_id("run")
         record = {
-            "run_id": run_id,
+            "run_id": resolved_run_id,
             "task_id": _generate_prefixed_id("task"),
-            "parent_task_id": None,
+            "parent_task_id": parent_task_id,
             "conversation_id": conversation_id,
             "user_id": user_id,
-            "trace_id": _generate_prefixed_id("tr"),
+            "trace_id": trace_id or _generate_prefixed_id("tr"),
             "task_type": task_type,
             "route": route,
             "selected_agent": "mock_chat_agent",
@@ -182,7 +196,7 @@ class TaskRunRepository:
             "created_at": now,
             "updated_at": now,
         }
-        _TASK_RUNS[run_id] = record
+        _TASK_RUNS[resolved_run_id] = record
         return record
 
     def get_task_run(self, run_id: str) -> dict | None:

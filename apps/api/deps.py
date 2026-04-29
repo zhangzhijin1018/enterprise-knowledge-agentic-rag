@@ -27,6 +27,7 @@ from core.analytics.report_templates import ReportTemplateEngine
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.analytics_review_policy import AnalyticsReviewPolicy
 from core.agent.workflow import ChatWorkflowFacade
+from core.agent.workflows.analytics import AnalyticsWorkflowAdapter
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
@@ -412,7 +413,8 @@ def get_analytics_service(
 ) -> AnalyticsService:
     """提供 AnalyticsService 依赖。"""
 
-    return AnalyticsService(
+    settings = get_settings()
+    analytics_service = AnalyticsService(
         conversation_repository=conversation_repository,
         task_run_repository=task_run_repository,
         sql_audit_repository=sql_audit_repository,
@@ -424,7 +426,13 @@ def get_analytics_service(
         metric_catalog=metric_catalog,
         data_source_registry=data_source_registry,
         analytics_result_repository=analytics_result_repository,
+        use_workflow=settings.analytics_use_workflow,
     )
+    analytics_service.bind_workflow_adapter(
+        AnalyticsWorkflowAdapter(analytics_service=analytics_service),
+        use_workflow=settings.analytics_use_workflow,
+    )
+    return analytics_service
 
 
 def get_analytics_export_service(

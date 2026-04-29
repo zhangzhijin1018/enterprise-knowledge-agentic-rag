@@ -70,11 +70,26 @@ class SupervisorService:
             run_id=envelope.run_id,
         )
 
-        result = self.delegation_controller.dispatch(envelope)
+        try:
+            result = self.delegation_controller.dispatch(envelope)
+        except Exception as exc:
+            self.event_bus.publish(
+                stream="supervisor.tasks",
+                event_type="task_failed",
+                payload={
+                    "task_type": task_type,
+                    "target_agent": target.agent_card.agent_name,
+                    "error": str(exc),
+                },
+                trace_id=envelope.trace_id,
+                run_id=envelope.run_id,
+            )
+            raise
 
+        event_type = "task_failed" if result.status.status == "failed" else "task_finished"
         self.event_bus.publish(
             stream="supervisor.tasks",
-            event_type="task_finished",
+            event_type=event_type,
             payload={
                 "task_type": task_type,
                 "target_agent": result.target_agent,

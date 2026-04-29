@@ -21,6 +21,9 @@ class AnalyticsWorkflowState(TypedDict, total=False):
 
     query: str
     conversation_id: str | None
+    parent_task_id: str | None
+    run_id: str | None
+    trace_id: str | None
     output_mode: str
     need_sql_explain: bool
     user_context: UserContext
@@ -42,6 +45,7 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     audit_record: dict
     masking_result: Any
 
+    summary: str
     analytics_result: AnalyticsResult
     timing: dict[str, float]
     final_response: dict

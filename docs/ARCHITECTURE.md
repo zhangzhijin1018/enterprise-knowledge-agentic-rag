@@ -602,6 +602,7 @@ flowchart TB
 
 - Task Router：任务路由器
 - Workflow Engine：工作流引擎
+- Supervisor Service：宏观调度服务
 - State Store：状态存储
 - Conversation Context Manager：会话上下文管理器
 - Slot Manager：槽位管理器
@@ -611,6 +612,27 @@ flowchart TB
 - Result Aggregator：结果汇总器
 - RiskController：风险控制器
 - HumanReviewInterruptor：审核中断控制器
+
+### 9.2.1 宏观调度与微观执行的边界
+
+从这一轮开始，项目明确采用混合架构：
+
+- **宏观层**：Supervisor / A2A Gateway / Event Bus
+- **微观层**：各业务专家内部 Workflow
+
+当前边界定义为：
+
+- A2A 不替代 LangGraph；
+- LangGraph 不替代 A2A；
+- A2A 管“谁来做”；
+- LangGraph 管“怎么做”。
+
+第一轮只把经营分析专家整理成 LangGraph-ready workflow 样板，
+其他业务专家继续保持现有实现，后续逐步迁移。
+
+详细说明见：
+
+- `docs/A2A_LANGGRAPH_MIXED_ARCHITECTURE.md`
 
 ### 9.3 好理解的说法
 
@@ -1153,6 +1175,27 @@ A2A 用于：
 ### 13.5 好理解的说法
 
 A2A 更像“专家之间派单协作”，不是“拿一个函数来执行”。
+
+### 13.4 当前阶段与 LangGraph 的关系
+
+当前项目不采用“A2A 或 LangGraph 二选一”的架构，而是采用混合模式：
+
+1. **Supervisor / A2A Gateway** 负责跨业务专家的宏观调度；
+2. **业务专家内部 Workflow** 负责微观执行步骤；
+3. 第一轮只把经营分析专家改造成 LangGraph-ready workflow 样板；
+4. 远程 transport 先保留 A2A-ready 边界，不急于一次性做成完整分布式生产版。
+
+### 13.5 Redis Streams 与 PostgreSQL 的职责边界
+
+当前对事件流和权威状态的边界定义如下：
+
+- Redis Streams：事件流总线 / 异步分发通道 / A2A-ready 事件媒介
+- PostgreSQL：权威状态存储 / 审计存储 / 恢复执行依据
+
+因此：
+
+- `task_submitted / task_finished / delegated` 这类轻事件适合进入 Streams；
+- `task_run / review / audit / clarification / analytics_result` 仍以 PostgreSQL 为准。
 
 ---
 
