@@ -378,6 +378,10 @@ class AnalyticsExportTask(TimestampMixin, Base):
     # 导出类型，例如 json、markdown、docx、pdf。
     export_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="导出类型")
 
+    # 导出模板类型。当前阶段支持 weekly_report、monthly_report 或通用模板。
+    # 该字段的意义不是改变底层分析结果，而是决定“如何把既有分析结果组织成更接近交付物的结构”。
+    export_template: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="导出模板类型")
+
     # 导出任务状态，例如 pending、running、succeeded、failed。
     status: Mapped[str] = mapped_column(String(32), nullable=False, comment="导出任务状态")
 
@@ -511,3 +515,64 @@ class AnalyticsReviewTask(TimestampMixin, Base):
 
     # 审核完成时间。
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="审核完成时间")
+
+
+class DataSourceConfig(TimestampMixin, Base):
+    """数据源注册配置表。
+
+    业务作用：
+    - 把经营分析 data source 从“纯代码硬编码”提升为“可配置注册中心”；
+    - 支持启用/停用、描述、连接地址和权限要求等元数据；
+    - 当前阶段即使数据库里没有记录，也可以回退到内置默认数据源，不影响本地开发和测试。
+    """
+
+    __tablename__ = "data_source_configs"
+    __table_args__ = {"comment": "经营分析数据源注册配置表：支持数据源动态注册与启停"}
+
+    # 数据库内部主键。
+    id: Mapped[int] = mapped_column(
+        build_bigint_type(),
+        primary_key=True,
+        autoincrement=True,
+        comment="数据库内部主键",
+    )
+
+    # 数据源唯一标识，例如 local_analytics、enterprise_readonly。
+    key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, comment="数据源唯一标识")
+
+    # 数据源展示名称或简要描述。
+    description: Mapped[str] = mapped_column(String(255), nullable=False, comment="数据源描述")
+
+    # 数据源数据库类型，例如 sqlite、postgresql、mysql。
+    db_type: Mapped[str] = mapped_column(String(64), nullable=False, comment="数据源数据库类型")
+
+    # 数据源连接地址。当前阶段允许为空，表示继续走默认内置样例源。
+    connection_uri: Mapped[str | None] = mapped_column(String(1024), nullable=True, comment="数据源连接地址")
+
+    # 访问该数据源所需权限集合。
+    required_permissions: Mapped[list] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=list,
+        comment="访问该数据源所需权限集合",
+    )
+
+    # 允许访问该数据源的角色集合。
+    allowed_roles: Mapped[list] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=list,
+        comment="允许访问该数据源的角色集合",
+    )
+
+    # 是否启用该数据源。
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True, comment="是否启用该数据源")
+
+    # 扩展元数据，预留表映射、路由标签、脱敏策略等配置。
+    metadata_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="metadata",
+        comment="扩展元数据",
+    )

@@ -2,7 +2,15 @@
 
 from core.database.models.conversation import Conversation, ConversationMemory, ConversationMessage
 from core.database.models.knowledge import Document, DocumentChunk, KnowledgeBase
-from core.database.models.runtime import AnalyticsExportTask, AnalyticsReviewTask, ClarificationEvent, SQLAudit, SlotSnapshot, TaskRun
+from core.database.models.runtime import (
+    AnalyticsExportTask,
+    AnalyticsReviewTask,
+    ClarificationEvent,
+    DataSourceConfig,
+    SQLAudit,
+    SlotSnapshot,
+    TaskRun,
+)
 
 __all__ = [
     "Conversation",
@@ -17,4 +25,5 @@ __all__ = [
     "SQLAudit",
     "AnalyticsExportTask",
     "AnalyticsReviewTask",
+    "DataSourceConfig",
 ]

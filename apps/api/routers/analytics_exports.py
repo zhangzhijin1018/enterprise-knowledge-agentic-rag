@@ -27,6 +27,7 @@ def create_analytics_export(
     result = analytics_export_service.create_export(
         run_id=run_id,
         export_type=payload.export_type,
+        export_template=payload.export_template,
         user_context=user_context,
     )
     return build_success_response(

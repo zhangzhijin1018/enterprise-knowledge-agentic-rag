@@ -24,6 +24,7 @@ def test_report_gateway_healthcheck_and_render(tmp_path: Path) -> None:
             export_id="exp_report_gateway_test",
             run_id="run_report_gateway_test",
             export_type="json",
+            export_template="weekly_report",
             summary="收入总体稳定。",
             insight_cards=[],
             report_blocks=[{"block_type": "overview", "title": "分析概览", "content": "收入总体稳定"}],
@@ -40,5 +41,6 @@ def test_report_gateway_healthcheck_and_render(tmp_path: Path) -> None:
 
     assert health["healthy"] is True
     assert response.export_type == "json"
+    assert response.export_template == "weekly_report"
     assert response.metadata["server_mode"] == "inprocess_report_mcp_server"
     assert Path(response.artifact_path).exists()

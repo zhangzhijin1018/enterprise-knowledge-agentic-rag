@@ -18,6 +18,7 @@ def test_report_mcp_server_renders_markdown_artifact(tmp_path: Path) -> None:
             export_id="exp_report_server_test",
             run_id="run_report_server_test",
             export_type="markdown",
+            export_template="weekly_report",
             summary="上个月新疆区域发电量总体上升。",
             insight_cards=[
                 {
@@ -52,6 +53,7 @@ def test_report_mcp_server_renders_markdown_artifact(tmp_path: Path) -> None:
 
     assert response.export_id == "exp_report_server_test"
     assert response.filename.endswith(".md")
+    assert "weekly_report" in response.filename
     assert response.metadata["server_mode"] == "inprocess_report_mcp_server"
     assert Path(response.artifact_path).exists()
     assert "经营分析报告" in Path(response.artifact_path).read_text(encoding="utf-8")
@@ -67,6 +69,7 @@ def test_report_mcp_server_supports_docx_placeholder_export(tmp_path: Path) -> N
             export_id="exp_docx_placeholder",
             run_id="run_docx_placeholder",
             export_type="docx",
+            export_template="monthly_report",
             summary="测试 docx 占位导出。",
             insight_cards=[],
             report_blocks=[],
@@ -76,5 +79,6 @@ def test_report_mcp_server_supports_docx_placeholder_export(tmp_path: Path) -> N
     )
 
     assert response.filename.endswith(".docx")
+    assert "monthly_report" in response.filename
     assert response.metadata["placeholder_mode"] is True
     assert Path(response.artifact_path).exists()

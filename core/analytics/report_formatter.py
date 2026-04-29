@@ -15,6 +15,18 @@ from __future__ import annotations
 class ReportFormatter:
     """最小经营分析报告格式化器。"""
 
+    STANDARD_BLOCK_TYPES = {
+        "overview",
+        "key_findings",
+        "trend",
+        "ranking",
+        "data_table",
+        "chart",
+        "risk_note",
+        "recommendation",
+        "governance_note",
+    }
+
     def build(
         self,
         *,
@@ -42,6 +54,24 @@ class ReportFormatter:
                     "content": insight_cards,
                 }
             )
+            trend_cards = [card for card in insight_cards if card.get("type") == "trend"]
+            if trend_cards:
+                report_blocks.append(
+                    {
+                        "block_type": "trend",
+                        "title": "趋势分析",
+                        "content": trend_cards,
+                    }
+                )
+            ranking_cards = [card for card in insight_cards if card.get("type") == "ranking"]
+            if ranking_cards:
+                report_blocks.append(
+                    {
+                        "block_type": "ranking",
+                        "title": "排名分析",
+                        "content": ranking_cards,
+                    }
+                )
 
         for table in tables:
             report_blocks.append(
@@ -84,4 +114,4 @@ class ReportFormatter:
                 "content": "如需更深入分析，可继续追问趋势、排名、同比环比或下钻到区域/电站维度。",
             }
         )
-        return report_blocks
+        return [block for block in report_blocks if block["block_type"] in self.STANDARD_BLOCK_TYPES]

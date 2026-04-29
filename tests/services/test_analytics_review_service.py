@@ -23,6 +23,7 @@ from core.repositories.analytics_review_repository import (
     reset_in_memory_analytics_review_store,
 )
 from core.repositories.conversation_repository import ConversationRepository, reset_in_memory_conversation_store
+from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_memory_sql_audit_store
 from core.repositories.task_run_repository import TaskRunRepository, reset_in_memory_task_run_store
 from core.security.auth import UserContext
@@ -42,12 +43,14 @@ def reset_state() -> None:
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
+    reset_in_memory_data_source_store()
     yield
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
+    reset_in_memory_data_source_store()
 
 
 def build_user_context(

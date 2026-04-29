@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from core.repositories.conversation_repository import reset_in_memory_conversation_store
+from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.repositories.sql_audit_repository import reset_in_memory_sql_audit_store
 from core.repositories.task_run_repository import reset_in_memory_task_run_store
 
@@ -18,11 +19,13 @@ def client() -> TestClient:
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
+    reset_in_memory_data_source_store()
     with TestClient(app) as test_client:
         yield test_client
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
+    reset_in_memory_data_source_store()
 
 
 def build_auth_headers(user_id: int = 1301, username: str = "analytics_api_user") -> dict[str, str]:

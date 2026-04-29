@@ -28,6 +28,7 @@ from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsP
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
 from core.analytics.data_masking import DataMaskingResult, DataMaskingService
+from core.analytics.data_source_registry import DataSourceRegistry
 from core.analytics.insight_builder import InsightBuilder
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.report_formatter import ReportFormatter
@@ -57,6 +58,7 @@ class AnalyticsService:
         sql_gateway: SQLGateway,
         schema_registry: SchemaRegistry,
         metric_catalog: MetricCatalog,
+        data_source_registry: DataSourceRegistry | None = None,
         data_masking_service: DataMaskingService | None = None,
         insight_builder: InsightBuilder | None = None,
         report_formatter: ReportFormatter | None = None,
@@ -70,6 +72,7 @@ class AnalyticsService:
         self.sql_gateway = sql_gateway
         self.schema_registry = schema_registry
         self.metric_catalog = metric_catalog
+        self.data_source_registry = data_source_registry
         self.data_masking_service = data_masking_service or DataMaskingService()
         self.insight_builder = insight_builder or InsightBuilder()
         self.report_formatter = report_formatter or ReportFormatter()
@@ -363,7 +366,11 @@ class AnalyticsService:
                 detail={"metric": plan.slots.get("metric")},
             )
 
-        data_source_definition = self.schema_registry.get_data_source(plan.data_source)
+        data_source_definition = (
+            self.data_source_registry.get_data_source(plan.data_source)
+            if self.data_source_registry is not None
+            else self.schema_registry.get_data_source(plan.data_source)
+        )
         table_definition = self.schema_registry.get_table_definition(
             table_name=metric_definition.table_name,
             data_source=data_source_definition.key,

@@ -24,6 +24,7 @@ class ReportRenderRequest:
     report_blocks: list[dict]
     chart_spec: dict | None
     tables: list[dict]
+    export_template: str | None = None
     trace_id: str | None = None
     metadata: dict = field(default_factory=dict)
 
@@ -39,6 +40,7 @@ class ReportRenderResponse:
     artifact_path: str
     file_uri: str
     content_preview: str | None
+    export_template: str | None = None
     metadata: dict = field(default_factory=dict)
 
 

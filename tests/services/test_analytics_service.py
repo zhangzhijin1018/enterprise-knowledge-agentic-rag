@@ -6,6 +6,7 @@ import pytest
 
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
+from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.sql_builder import SQLBuilder
@@ -27,10 +28,12 @@ def reset_state() -> None:
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
+    reset_in_memory_data_source_store()
     yield
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
+    reset_in_memory_data_source_store()
 
 
 def build_user_context(user_id: int = 1201) -> UserContext:

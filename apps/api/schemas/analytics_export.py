@@ -15,6 +15,10 @@ class AnalyticsExportRequest(BaseModel):
     # - docx/pdf：先走占位导出链路，为后续复杂排版预留边界。
     export_type: str = Field(description="导出类型，例如 json、markdown、docx、pdf")
 
+    # 导出模板类型。当前阶段支持 weekly_report、monthly_report；
+    # 不传时表示继续使用通用导出结构。
+    export_template: str | None = Field(default=None, description="导出模板类型，例如 weekly_report、monthly_report")
+
 
 class AnalyticsExportData(BaseModel):
     """经营分析导出结果。"""
@@ -27,6 +31,9 @@ class AnalyticsExportData(BaseModel):
 
     # 当前导出类型，例如 json、markdown、docx、pdf。
     export_type: str = Field(description="导出类型")
+
+    # 当前导出模板类型。为空时表示使用通用导出结构。
+    export_template: str | None = Field(default=None, description="导出模板类型")
 
     # 当前导出任务状态。虽然本轮用同步实现，但仍保留异步任务状态语义。
     status: str = Field(description="导出任务状态")
@@ -72,3 +79,6 @@ class AnalyticsExportData(BaseModel):
 
     # 导出附加元数据，用于记录 server_mode、placeholder_mode 等运行信息。
     metadata: dict = Field(default_factory=dict, description="导出任务附加元数据")
+
+    # 当前导出关联的治理决策摘要。
+    governance_decision: dict = Field(default_factory=dict, description="导出治理决策摘要")

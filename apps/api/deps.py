@@ -19,7 +19,10 @@ from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from core.analytics.metric_catalog import MetricCatalog
+from core.analytics.data_source_registry import DataSourceRegistry
 from core.analytics.schema_registry import SchemaRegistry
+from core.analytics.report_formatter import ReportFormatter
+from core.analytics.report_templates import ReportTemplateEngine
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.analytics_review_policy import AnalyticsReviewPolicy
 from core.agent.workflow import ChatWorkflowFacade
@@ -34,6 +37,7 @@ from core.repositories.analytics_export_repository import AnalyticsExportReposit
 from core.repositories.analytics_review_repository import AnalyticsReviewRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
+from core.repositories.data_source_repository import DataSourceRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
@@ -139,6 +143,14 @@ def get_document_chunk_repository(
     return DocumentChunkRepository(session=session)
 
 
+def get_data_source_repository(
+    session: Session | None = Depends(get_session),
+) -> DataSourceRepository:
+    """提供经营分析数据源注册 Repository 依赖。"""
+
+    return DataSourceRepository(session=session)
+
+
 def get_embedding_gateway() -> EmbeddingGateway:
     """提供 Embedding Gateway 依赖。"""
 
@@ -158,12 +170,24 @@ def get_schema_registry() -> SchemaRegistry:
     return SchemaRegistry(settings=get_settings())
 
 
-def get_metric_catalog(
+def get_data_source_registry(
     schema_registry: SchemaRegistry = Depends(get_schema_registry),
+    data_source_repository: DataSourceRepository = Depends(get_data_source_repository),
+) -> DataSourceRegistry:
+    """提供经营分析数据源注册中心依赖。"""
+
+    return DataSourceRegistry(
+        schema_registry=schema_registry,
+        data_source_repository=data_source_repository,
+    )
+
+
+def get_metric_catalog(
+    data_source_registry: DataSourceRegistry = Depends(get_data_source_registry),
 ) -> MetricCatalog:
     """提供经营分析 Metric Catalog 依赖。"""
 
-    default_data_source = schema_registry.get_default_data_source()
+    default_data_source = data_source_registry.get_default_data_source()
     return MetricCatalog(
         default_data_source=default_data_source.key,
         default_table_name=default_data_source.default_table,
@@ -230,6 +254,18 @@ def get_report_gateway() -> ReportGateway:
     """
 
     return ReportGateway(settings=get_settings())
+
+
+def get_report_formatter() -> ReportFormatter:
+    """提供经营分析报告块格式化器依赖。"""
+
+    return ReportFormatter()
+
+
+def get_report_template_engine() -> ReportTemplateEngine:
+    """提供经营分析周报/月报模板引擎依赖。"""
+
+    return ReportTemplateEngine()
 
 
 def get_analytics_review_policy() -> AnalyticsReviewPolicy:
@@ -340,6 +376,7 @@ def get_analytics_service(
     sql_gateway: SQLGateway = Depends(get_sql_gateway),
     schema_registry: SchemaRegistry = Depends(get_schema_registry),
     metric_catalog: MetricCatalog = Depends(get_metric_catalog),
+    data_source_registry: DataSourceRegistry = Depends(get_data_source_registry),
 ) -> AnalyticsService:
     """提供 AnalyticsService 依赖。"""
 
@@ -353,6 +390,7 @@ def get_analytics_service(
         sql_gateway=sql_gateway,
         schema_registry=schema_registry,
         metric_catalog=metric_catalog,
+        data_source_registry=data_source_registry,
     )
 
 
@@ -363,6 +401,9 @@ def get_analytics_export_service(
     analytics_review_repository: AnalyticsReviewRepository = Depends(get_analytics_review_repository),
     report_gateway: ReportGateway = Depends(get_report_gateway),
     review_policy: AnalyticsReviewPolicy = Depends(get_analytics_review_policy),
+    data_source_registry: DataSourceRegistry = Depends(get_data_source_registry),
+    report_template_engine: ReportTemplateEngine = Depends(get_report_template_engine),
+    report_formatter: ReportFormatter = Depends(get_report_formatter),
 ) -> AnalyticsExportService:
     """提供经营分析导出 Service 依赖。"""
 
@@ -373,6 +414,9 @@ def get_analytics_export_service(
         analytics_review_repository=analytics_review_repository,
         report_gateway=report_gateway,
         review_policy=review_policy,
+        data_source_registry=data_source_registry,
+        report_template_engine=report_template_engine,
+        report_formatter=report_formatter,
     )
 
 

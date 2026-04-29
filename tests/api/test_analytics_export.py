@@ -9,6 +9,7 @@ from apps.api.main import app
 from core.repositories.analytics_export_repository import reset_in_memory_analytics_export_store
 from core.repositories.analytics_review_repository import reset_in_memory_analytics_review_store
 from core.repositories.conversation_repository import reset_in_memory_conversation_store
+from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.repositories.sql_audit_repository import reset_in_memory_sql_audit_store
 from core.repositories.task_run_repository import reset_in_memory_task_run_store
 
@@ -22,6 +23,7 @@ def client() -> TestClient:
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
+    reset_in_memory_data_source_store()
     with TestClient(app) as test_client:
         yield test_client
     reset_in_memory_conversation_store()
@@ -29,6 +31,7 @@ def client() -> TestClient:
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
+    reset_in_memory_data_source_store()
 
 
 def build_auth_headers(user_id: int = 1501, username: str = "analytics_export_user") -> dict[str, str]:
@@ -63,7 +66,7 @@ def test_analytics_export_can_be_created_and_read(client: TestClient) -> None:
     export_response = client.post(
         f"/api/v1/analytics/runs/{run_id}/export",
         headers=build_auth_headers(),
-        json={"export_type": "markdown"},
+        json={"export_type": "markdown", "export_template": "monthly_report"},
     )
     export_payload = export_response.json()
     export_id = export_payload["data"]["export_id"]
@@ -77,7 +80,10 @@ def test_analytics_export_can_be_created_and_read(client: TestClient) -> None:
     assert export_response.status_code == 200
     assert export_payload["meta"]["status"] == "succeeded"
     assert export_payload["data"]["run_id"] == run_id
+    assert export_payload["data"]["export_template"] == "monthly_report"
     assert export_payload["data"]["filename"].endswith(".md")
+    assert export_payload["data"]["governance_decision"]["effective_filters"]["department_code"] == "analytics-center"
     assert detail_response.status_code == 200
     assert detail_payload["data"]["export_id"] == export_id
     assert detail_payload["data"]["status"] == "succeeded"
+    assert detail_payload["data"]["export_template"] == "monthly_report"

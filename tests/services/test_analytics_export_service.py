@@ -23,6 +23,7 @@ from core.repositories.analytics_review_repository import (
     reset_in_memory_analytics_review_store,
 )
 from core.repositories.conversation_repository import ConversationRepository, reset_in_memory_conversation_store
+from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_memory_sql_audit_store
 from core.repositories.task_run_repository import TaskRunRepository, reset_in_memory_task_run_store
 from core.security.auth import UserContext
@@ -41,12 +42,14 @@ def reset_state() -> None:
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
+    reset_in_memory_data_source_store()
     yield
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
+    reset_in_memory_data_source_store()
 
 
 def build_user_context(user_id: int = 1501) -> UserContext:
@@ -166,3 +169,29 @@ def test_analytics_export_service_can_read_export_detail(tmp_path: Path) -> None
     assert detail["data"]["export_id"] == export_result["data"]["export_id"]
     assert detail["data"]["status"] == "succeeded"
     assert detail["data"]["metadata"]["server_mode"] == "inprocess_report_mcp_server"
+
+
+def test_analytics_export_service_supports_weekly_report_template(tmp_path: Path) -> None:
+    """导出服务应支持 weekly_report 模板，并返回增强字段。"""
+
+    analytics_service, export_service = build_services(tmp_path)
+    user_context = build_user_context(user_id=1503)
+    analytics_result = analytics_service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    export_result = export_service.create_export(
+        run_id=analytics_result["meta"]["run_id"],
+        export_type="markdown",
+        export_template="weekly_report",
+        user_context=user_context,
+    )
+
+    assert export_result["data"]["export_template"] == "weekly_report"
+    assert export_result["data"]["status"] == "succeeded"
+    assert export_result["data"]["governance_decision"]["effective_filters"]["department_code"] == "analytics-center"
+    assert export_result["data"]["metadata"]["export_template"] == "weekly_report"

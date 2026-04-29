@@ -5,17 +5,21 @@
 
 from core.analytics.insight_builder import InsightBuilder
 from core.analytics.data_masking import DataMaskingResult, DataMaskingService
+from core.analytics.data_source_registry import DataSourceRegistry
 from core.analytics.metric_catalog import MetricCatalog, MetricDefinition
 from core.analytics.report_formatter import ReportFormatter
+from core.analytics.report_templates import ReportTemplateEngine
 from core.analytics.schema_registry import DataSourceDefinition, GroupByRule, SchemaRegistry, TableDefinition
 
 __all__ = [
     "DataMaskingResult",
     "DataMaskingService",
+    "DataSourceRegistry",
     "InsightBuilder",
     "MetricCatalog",
     "MetricDefinition",
     "ReportFormatter",
+    "ReportTemplateEngine",
     "SchemaRegistry",
     "GroupByRule",
     "TableDefinition",

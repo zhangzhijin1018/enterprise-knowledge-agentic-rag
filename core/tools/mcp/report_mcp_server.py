@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import datetime
 
 from core.config.settings import Settings, get_settings
 from core.tools.mcp.report_mcp_contracts import (
@@ -39,7 +40,7 @@ class ReportMCPServer:
         export_dir = self._resolve_export_dir()
         export_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = self._build_filename(request.export_id, request.export_type)
+        filename = self._build_filename(request.export_id, request.export_type, request.export_template)
         artifact_path = export_dir / filename
 
         content_preview = None
@@ -69,6 +70,7 @@ class ReportMCPServer:
             export_id=request.export_id,
             run_id=request.run_id,
             export_type=request.export_type,
+            export_template=request.export_template,
             filename=filename,
             artifact_path=str(artifact_path.resolve()),
             file_uri=str(artifact_path.resolve()),
@@ -76,6 +78,8 @@ class ReportMCPServer:
             metadata={
                 "server_mode": "inprocess_report_mcp_server",
                 "placeholder_mode": placeholder_mode,
+                "export_template": request.export_template,
+                "artifact_size_bytes": artifact_path.stat().st_size if artifact_path.exists() else 0,
             },
         )
 
@@ -98,7 +102,7 @@ class ReportMCPServer:
             return export_dir
         return Path.cwd() / export_dir
 
-    def _build_filename(self, export_id: str, export_type: str) -> str:
+    def _build_filename(self, export_id: str, export_type: str, export_template: str | None = None) -> str:
         """构造导出文件名。"""
 
         extension_map = {
@@ -107,13 +111,16 @@ class ReportMCPServer:
             "docx": "docx",
             "pdf": "pdf",
         }
-        return f"{export_id}.{extension_map[export_type]}"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        template_suffix = f"_{export_template}" if export_template else ""
+        return f"{export_id}{template_suffix}_{timestamp}.{extension_map[export_type]}"
 
     def _build_json_payload(self, request: ReportRenderRequest) -> dict:
         """构造 JSON 导出载荷。"""
 
         return {
             "run_id": request.run_id,
+            "export_template": request.export_template,
             "summary": request.summary,
             "insight_cards": request.insight_cards,
             "report_blocks": request.report_blocks,
@@ -133,6 +140,7 @@ class ReportMCPServer:
             "",
             f"- run_id: `{request.run_id}`",
             f"- export_type: `{request.export_type}`",
+            f"- export_template: `{request.export_template or 'default'}`",
             "",
         ]
         if request.summary:
@@ -170,6 +178,7 @@ class ReportMCPServer:
 
         return (
             f"Placeholder {request.export_type.upper()} export for run {request.run_id}\n\n"
+            f"Template: {request.export_template or 'default'}\n\n"
             f"Summary:\n{request.summary or 'N/A'}\n\n"
             f"Insight count: {len(request.insight_cards)}\n"
             f"Table count: {len(request.tables)}\n"

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from core.analytics.data_source_registry import DataSourceRegistry
+from core.analytics.report_formatter import ReportFormatter
+from core.analytics.report_templates import ReportTemplateEngine
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
@@ -42,6 +45,9 @@ class AnalyticsExportService:
         analytics_review_repository: AnalyticsReviewRepository,
         report_gateway: ReportGateway,
         review_policy: AnalyticsReviewPolicy,
+        data_source_registry: DataSourceRegistry | None = None,
+        report_template_engine: ReportTemplateEngine | None = None,
+        report_formatter: ReportFormatter | None = None,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -49,12 +55,16 @@ class AnalyticsExportService:
         self.analytics_review_repository = analytics_review_repository
         self.report_gateway = report_gateway
         self.review_policy = review_policy
+        self.data_source_registry = data_source_registry
+        self.report_template_engine = report_template_engine or ReportTemplateEngine()
+        self.report_formatter = report_formatter or ReportFormatter()
 
     def create_export(
         self,
         *,
         run_id: str,
         export_type: str,
+        export_template: str | None = None,
         user_context: UserContext,
     ) -> dict:
         """创建经营分析导出任务并同步生成最小导出产物。"""
@@ -111,6 +121,7 @@ class AnalyticsExportService:
             run_id=run_id,
             user_id=user_context.user_id,
             export_type=normalized_export_type,
+            export_template=export_template,
             status="pending",
             review_required=review_decision.review_required,
             review_status="pending" if review_decision.review_required else "not_required",
@@ -119,6 +130,8 @@ class AnalyticsExportService:
             metadata={
                 "trigger_mode": "manual",
                 "source": "analytics_run",
+                "export_template": export_template,
+                "governance_decision": output_snapshot.get("governance_decision") or {},
             },
         )
 
@@ -134,6 +147,7 @@ class AnalyticsExportService:
                 metadata={
                     "reason_details": review_decision.reason_details,
                     "export_type": normalized_export_type,
+                    "export_template": export_template,
                 },
             )
             export_task = self.analytics_export_repository.update_export_task(
@@ -197,6 +211,28 @@ class AnalyticsExportService:
         run_id = export_task["run_id"]
         export_type = export_task["export_type"]
         output_snapshot = task_run.get("output_snapshot") or {}
+        normalized_export_template = export_task.get("export_template")
+        governance_decision = output_snapshot.get("governance_decision") or {}
+        normalized_report_blocks = self.report_formatter.build(
+            summary=output_snapshot.get("summary") or "",
+            insight_cards=output_snapshot.get("insight_cards", []),
+            tables=output_snapshot.get("tables", []),
+            chart_spec=output_snapshot.get("chart_spec"),
+            governance_note=governance_decision,
+        )
+        export_report_blocks = (
+            self.report_template_engine.build(
+                export_template=normalized_export_template,
+                summary=output_snapshot.get("summary") or "",
+                insight_cards=output_snapshot.get("insight_cards", []),
+                report_blocks=normalized_report_blocks,
+                chart_spec=output_snapshot.get("chart_spec"),
+                tables=output_snapshot.get("tables", []),
+                governance_note=governance_decision,
+            )
+            if normalized_export_template
+            else normalized_report_blocks
+        )
         export_task = self.analytics_export_repository.update_export_task(
             export_task["export_id"],
             status="running",
@@ -208,9 +244,10 @@ class AnalyticsExportService:
                     export_id=export_task["export_id"],
                     run_id=run_id,
                     export_type=export_type,
+                    export_template=normalized_export_template,
                     summary=output_snapshot.get("summary"),
                     insight_cards=output_snapshot.get("insight_cards", []),
-                    report_blocks=output_snapshot.get("report_blocks", []),
+                    report_blocks=export_report_blocks,
                     chart_spec=output_snapshot.get("chart_spec"),
                     tables=output_snapshot.get("tables", []),
                     trace_id=task_run.get("trace_id"),
@@ -218,6 +255,7 @@ class AnalyticsExportService:
                         "sql_preview": output_snapshot.get("sql_preview"),
                         "audit_info": output_snapshot.get("audit_info"),
                         "governance_decision": output_snapshot.get("governance_decision"),
+                        "report_blocks_source": "template" if normalized_export_template else "default_formatter",
                     },
                 )
             )
@@ -230,6 +268,8 @@ class AnalyticsExportService:
                 content_preview=render_response.content_preview,
                 metadata={
                     **(export_task.get("metadata") or {}),
+                    "export_template": normalized_export_template,
+                    "governance_decision": governance_decision,
                     **render_response.metadata,
                 },
                 finished_at=datetime.now(timezone.utc),
@@ -368,6 +408,7 @@ class AnalyticsExportService:
             "export_id": export_task["export_id"],
             "run_id": export_task["run_id"],
             "export_type": export_task["export_type"],
+            "export_template": export_task.get("export_template"),
             "status": export_task["status"],
             "review_required": export_task.get("review_required", False),
             "review_id": export_task.get("review_id"),
@@ -383,6 +424,7 @@ class AnalyticsExportService:
             "reviewed_at": export_task.get("reviewed_at").isoformat() if export_task.get("reviewed_at") else None,
             "finished_at": export_task.get("finished_at").isoformat() if export_task.get("finished_at") else None,
             "metadata": export_task.get("metadata") or {},
+            "governance_decision": (export_task.get("metadata") or {}).get("governance_decision") or {},
         }
 
     def _resolve_metric_definition(self, *, metric_name: str | None):
@@ -402,6 +444,9 @@ class AnalyticsExportService:
 
     def _resolve_data_source_definition(self, *, output_snapshot: dict):
         """从 analytics 输出快照解析数据源定义。"""
+
+        if self.data_source_registry is not None:
+            return self.data_source_registry.get_data_source(output_snapshot.get("data_source"))
 
         from core.analytics.schema_registry import SchemaRegistry
 
