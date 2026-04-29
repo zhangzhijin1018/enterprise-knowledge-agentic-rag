@@ -57,6 +57,158 @@
 
 ---
 
+## 2.4 经营分析真实数据源一期定型结论
+
+经营分析数据源这一层，本轮明确统一以下结论：
+
+1. 平台元数据库继续使用 PostgreSQL；
+2. 企业经营分析真实数据源如果已经存在现成只读 PostgreSQL、MySQL 或数仓视图，系统应支持接入；
+3. 但本项目一期默认优先以 PostgreSQL 作为真实经营分析数据源参考实现；
+4. `local_analytics` 继续保留为 demo / fallback 数据源；
+5. `enterprise_readonly` 继续作为真实经营分析只读数据源的默认 key。
+
+### 为什么一期优先 PostgreSQL
+
+PostgreSQL 适合作为一期经营分析真实数据源，原因主要有：
+
+- 与平台元数据库技术栈一致，降低 DBA、运维、驱动和 ORM 复杂度；
+- 支持成熟的分区、索引、只读账号、视图、物化视图和 JSONB 扩展能力；
+- 对“日粒度事实表 + 维表 + 只读聚合查询”这一类经营分析负载足够稳健；
+- 便于本项目当前 `SQL Gateway / SQL MCP-compatible` 执行层快速落地；
+- 便于后续从本地 demo 库平滑迁移到企业只读 PostgreSQL。
+
+### 为什么仍保留 local_analytics
+
+保留 `local_analytics` 不是架构妥协，而是工程策略：
+
+- 本地开发、单元测试、接口联调不能强依赖真实企业库；
+- Demo / fallback 数据源能保证 `analytics/query -> export -> review` 全链路持续可运行；
+- 当数据库配置、网络白名单或只读账号尚未准备好时，研发不被阻塞；
+- 与 `enterprise_readonly` 并存，正好对应“本地联调”和“企业接入”两种阶段。
+
+---
+
+## 2.5 经营分析真实数据源核心表设计
+
+本项目一期默认把真实经营分析参考数据源收口到三张核心表：
+
+1. `analytics_metrics_daily`
+   - 经营分析日粒度事实表；
+   - 主要承接发电量、收入、成本、利润、产量等日粒度指标；
+   - 是当前 `SchemaRegistry / SQL Builder / SQL Guard` 的核心事实表。
+
+2. `analytics_metric_definitions`
+   - 指标维表；
+   - 主要承接指标编码、展示名称、单位、聚合方式、业务域和敏感级别；
+   - 与当前代码中的 `MetricCatalog` 方向一致。
+
+3. `analytics_org_dimensions`
+   - 组织维表；
+   - 主要承接组织、区域、电站、部门映射；
+   - 用于部门范围过滤、区域/电站下钻和组织口径治理。
+
+这三张表共同构成一期经营分析真实数据源的最小可实施模型。
+
+---
+
+## 2.6 经营分析真实数据源设计与代码映射关系
+
+当前代码层与数据库设计的映射关系如下：
+
+- `core/analytics/schema_registry.py`
+  - 当前仍保留默认事实表结构定义；
+  - 其字段命名必须与 `analytics_metrics_daily` 对齐；
+  - 当前阶段仍在代码层保留默认定义，原因是要兼顾本地 demo/fallback。
+
+- `core/analytics/metric_catalog.py`
+  - 当前仍保留默认指标目录；
+  - 其结构方向已向 `analytics_metric_definitions` 对齐；
+  - 后续可逐步把指标目录从代码迁移到数据库配置层。
+
+- `core/analytics/data_source_registry.py`
+  - 当前负责“内置默认数据源 + repository override”的统一读取；
+  - 后续可逐步演进为真正的数据源注册中心管理层。
+
+- `core/repositories/data_source_repository.py`
+  - 当前提供数据源配置的数据库优先 / 内存回退能力；
+  - 未来可以承接更多数据源启停、权限和描述信息。
+
+---
+
+## 2.7 经营分析真实数据源 SQL 脚本目录
+
+本项目当前把经营分析真实数据源的可实施级 SQL 设计统一放在：
+
+```text
+sql/analytics/
+├── 001_analytics_metric_definitions.sql
+├── 002_analytics_org_dimensions.sql
+├── 003_analytics_metrics_daily.sql
+├── 004_analytics_metrics_daily_partitions.sql
+└── 005_analytics_metrics_daily_indexes.sql
+```
+
+这些文件当前定位是：
+
+- 设计稿 + 实施稿；
+- 可直接给 DBA / 后端开发参考；
+- 未来 Alembic 或正式 DBA 落库时的基础输入。
+
+---
+
+## 2.8 analytics_metrics_daily 分区与索引策略
+
+### 为什么按月分区
+
+`analytics_metrics_daily` 一期按月分区，原因如下：
+
+- 经营分析最常见的查询是月度趋势、近一个月、近几个月、月报；
+- 月度粒度天然适合运维、归档和历史数据管理；
+- PostgreSQL 分区裁剪在 `biz_date` 过滤场景下收益明显；
+- 与当前 `trend / month group by / monthly_report` 场景天然匹配。
+
+### 为什么 department_code 索引很重要
+
+`department_code` 在经营分析里不仅是展示字段，更是治理字段：
+
+- 当前系统已经支持部门范围过滤；
+- 经营分析必须先治理再执行；
+- 因此 `department_code` 索引直接关系到数据范围裁剪、权限治理和审计查询性能。
+
+### 一期核心索引服务场景
+
+- `(biz_date, metric_code)`
+  - 服务趋势分析、月度趋势、单指标时间过滤。
+
+- `(biz_date, metric_code, region_code)`
+  - 服务区域汇总、区域排名、区域过滤。
+
+- `(biz_date, metric_code, station_code)`
+  - 服务电站汇总、电站排名、电站过滤。
+
+- `(biz_date, department_code)`
+  - 服务部门范围过滤和治理裁剪。
+
+- `(metric_code, department_code, biz_date)`
+  - 服务指标权限、部门范围治理、审计与二次验证。
+
+### 唯一索引建议
+
+为避免重复导入相同业务口径数据，一期建议基于：
+
+- `biz_date`
+- `metric_code`
+- `region_code`
+- `station_code`
+- `department_code`
+- `data_version`
+
+构造唯一业务键索引。
+
+这能避免相同日期、相同指标、相同组织口径、相同版本的数据被重复导入。
+
+---
+
 ## 3. 命名与字段规范
 
 ### 3.1 表命名

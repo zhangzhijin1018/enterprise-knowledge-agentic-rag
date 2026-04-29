@@ -56,6 +56,8 @@ class TableDefinition:
     metric_code_column: str
     metric_name_column: str
     metric_value_column: str
+    business_domain_column: str | None = None
+    data_version_column: str | None = None
     dimension_columns: dict[str, str] = field(default_factory=dict)
     group_by_rules: dict[str, GroupByRule] = field(default_factory=dict)
     allowed_permissions: list[str] = field(default_factory=list)
@@ -101,18 +103,31 @@ class SchemaRegistry:
             metric_code_column="metric_code",
             metric_name_column="metric_name",
             metric_value_column="metric_value",
+            business_domain_column="business_domain",
+            data_version_column="data_version",
             dimension_columns={
+                "region_code": "region_code",
                 "region": "region_name",
+                "station_code": "station_code",
                 "station": "station_name",
+                "department_code": "department_code",
+                "department_name": "department_name",
             },
             allowed_permissions=["analytics:query"],
             field_whitelist=[
                 "biz_date",
                 "metric_code",
                 "metric_name",
+                "region_code",
                 "region_name",
+                "station_code",
                 "station_name",
                 "department_code",
+                "department_name",
+                "business_domain",
+                "data_version",
+                "created_at",
+                "updated_at",
                 "metric_value",
             ],
             visible_fields=[
@@ -160,11 +175,30 @@ class SchemaRegistry:
         data_sources = {
             "local_analytics": DataSourceDefinition(
                 key="local_analytics",
-                description="本地开发用经营分析样例数据源，后续可替换为真实 SQL MCP / PostgreSQL 只读库",
+                description="本地开发用经营分析样例数据源，作为 demo/fallback 保留，保证本地无真实库时仍可完整联调",
                 db_type="sqlite",
                 connection_uri=None,
                 default_table=analytics_table.name,
                 required_permissions=["analytics:query"],
+                supports_mcp_server=True,
+                tables={
+                    analytics_table.name: analytics_table,
+                },
+            ),
+            "enterprise_readonly": DataSourceDefinition(
+                key="enterprise_readonly",
+                description="一期真实经营分析只读数据源参考实现，默认优先按 PostgreSQL 接入企业经营事实表或数仓视图",
+                db_type="postgresql",
+                connection_uri=self.settings.analytics_real_data_source_url,
+                default_table=analytics_table.name,
+                required_permissions=[
+                    permission
+                    for permission in [
+                        "analytics:query",
+                        self.settings.analytics_real_data_source_required_permission,
+                    ]
+                    if permission
+                ],
                 supports_mcp_server=True,
                 tables={
                     analytics_table.name: analytics_table,
@@ -186,7 +220,7 @@ class SchemaRegistry:
             db_type = self._infer_db_type_from_uri(self.settings.analytics_real_data_source_url)
             data_sources[real_data_source_key] = DataSourceDefinition(
                 key=real_data_source_key,
-                description="通过环境变量注册的真实只读经营分析数据源",
+                description="通过环境变量注册的真实只读经营分析数据源；一期默认优先推荐 PostgreSQL，兼容企业现成只读库/数仓视图",
                 db_type=db_type,
                 connection_uri=self.settings.analytics_real_data_source_url,
                 default_table=analytics_table.name,

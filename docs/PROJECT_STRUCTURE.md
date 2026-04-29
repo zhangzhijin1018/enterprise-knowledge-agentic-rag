@@ -229,10 +229,19 @@ enterprise-knowledge-agentic-rag/
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── ANALYTICS_DATA_SOURCE.md
 │   ├── AGENT_WORKFLOW.md
 │   ├── DB_DESIGN.md
 │   ├── API_DESIGN.md
 │   └── PROJECT_STRUCTURE.md
+│
+├── sql/
+│   └── analytics/
+│       ├── 001_analytics_metric_definitions.sql
+│       ├── 002_analytics_org_dimensions.sql
+│       ├── 003_analytics_metrics_daily.sql
+│       ├── 004_analytics_metrics_daily_partitions.sql
+│       └── 005_analytics_metrics_daily_indexes.sql
 │
 ├── pyproject.toml
 ├── README.md
@@ -242,6 +251,44 @@ enterprise-knowledge-agentic-rag/
 ---
 
 ## 4. FastAPI 路由骨架建议
+
+---
+
+## 3.1 经营分析 SQL 脚本目录说明
+
+当前项目已将经营分析真实数据源的一期 SQL 设计统一收敛到：
+
+```text
+sql/analytics/
+```
+
+这些 SQL 文件的职责不是替代未来 Alembic，而是：
+
+- 先把 DBA 可实施级设计定型；
+- 保证数据库设计、代码定义、文档描述三者一致；
+- 为后续 Alembic、正式落库或企业 DBA 评审提供稳定输入。
+
+各文件职责如下：
+
+- `001_analytics_metric_definitions.sql`
+  - 指标维表；
+  - 对应代码中的 `MetricCatalog` 结构方向。
+
+- `002_analytics_org_dimensions.sql`
+  - 组织维表；
+  - 服务部门范围过滤、区域/电站下钻和组织映射。
+
+- `003_analytics_metrics_daily.sql`
+  - 经营分析日粒度事实表；
+  - 是当前 `SchemaRegistry / SQL Builder / SQL Guard` 的核心事实表。
+
+- `004_analytics_metrics_daily_partitions.sql`
+  - 月分区与默认分区示例；
+  - 服务趋势分析、月报和后续归档管理。
+
+- `005_analytics_metrics_daily_indexes.sql`
+  - 一期核心索引与唯一索引建议；
+  - 服务趋势查询、区域汇总、站点排名、部门过滤和治理校验。
 
 ## 4.1 `apps/api/main.py`
 

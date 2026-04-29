@@ -232,6 +232,46 @@ RAG、Agent、SQL、合同审查、MCP 调用、A2A 委托、Human Review 触发
 8. 监督与保障层（Governance Plane）
 9. 运行支撑层（Runtime & Infra Layer）
 
+---
+
+## 4.1 经营分析真实数据源一期定位
+
+经营分析模块当前已经进入“可交付分析能力”阶段，因此数据源层不再只是 demo 实现，而需要明确一期定位：
+
+- `local_analytics`
+  - 本地 demo / fallback 数据源；
+  - 用于本地开发、测试、联调和无真实库环境下的完整链路验证。
+
+- `enterprise_readonly`
+  - 真实经营分析只读数据源默认 key；
+  - 一期默认优先按 PostgreSQL 接入；
+  - 如果企业已有现成只读 PostgreSQL、MySQL 或数仓视图，架构上允许接入，但参考实现仍优先 PostgreSQL。
+
+### 为什么一期真实经营分析数据源优先 PostgreSQL
+
+一期优先 PostgreSQL 的原因不是排斥其他库，而是为了工程稳定性：
+
+- 与平台元数据库一致，降低接入和运维复杂度；
+- PostgreSQL 自带成熟的分区、索引、只读账号、视图与 JSONB 能力；
+- 对日粒度事实表、维表和规则式经营分析查询足够稳健；
+- 与当前 `SQL Gateway / SQL MCP-compatible` 执行层更容易对齐。
+
+### Data Source Registry Center 的职责
+
+当前系统已经引入 `Data Source Registry Center`，它的职责是：
+
+- 管理默认内置数据源；
+- 管理 `enterprise_readonly` 等真实数据源定义；
+- 支持 repository override；
+- 支持数据源启用/停用、描述、权限要求等元数据；
+- 作为 `SchemaRegistry / SQL Builder / SQL Gateway / AnalyticsService` 的统一数据源入口。
+
+这意味着：
+
+- 当前不是只有代码里“写死一个 local_analytics”；
+- 也不是一上来就强依赖复杂配置中心；
+- 而是在“内置默认定义 + repository 覆盖”的方式下，先把一期真实数据源接入边界做稳。
+
 ### 4.1 为什么这样命名
 
 这样命名的原因是：
