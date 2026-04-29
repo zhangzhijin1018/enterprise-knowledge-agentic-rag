@@ -17,6 +17,7 @@ from apps.api.middlewares import attach_request_context
 from apps.api.routers import (
     analytics_router,
     analytics_exports_router,
+    analytics_reviews_router,
     chat_router,
     clarifications_router,
     conversations_router,
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(analytics_router, prefix=settings.api_prefix)
     app.include_router(analytics_exports_router, prefix=settings.api_prefix)
+    app.include_router(analytics_reviews_router, prefix=settings.api_prefix)
     app.include_router(chat_router, prefix=settings.api_prefix)
     app.include_router(conversations_router, prefix=settings.api_prefix)
     app.include_router(clarifications_router, prefix=settings.api_prefix)

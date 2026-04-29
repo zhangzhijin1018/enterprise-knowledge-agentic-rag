@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
+from core.agent.control_plane.analytics_review_policy import AnalyticsReviewPolicy
 from core.agent.workflow import ChatWorkflowFacade
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
@@ -30,6 +31,7 @@ from core.database.session import get_db_session
 from core.embedding.gateway import EmbeddingGateway
 from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.analytics_export_repository import AnalyticsExportRepository
+from core.repositories.analytics_review_repository import AnalyticsReviewRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
@@ -37,6 +39,7 @@ from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
 from core.security.auth import resolve_user_context_from_request
 from core.services.analytics_export_service import AnalyticsExportService
+from core.services.analytics_review_service import AnalyticsReviewService
 from core.services.analytics_service import AnalyticsService
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
@@ -110,6 +113,14 @@ def get_analytics_export_repository(
     """提供经营分析导出任务 Repository 依赖。"""
 
     return AnalyticsExportRepository(session=session)
+
+
+def get_analytics_review_repository(
+    session: Session | None = Depends(get_session),
+) -> AnalyticsReviewRepository:
+    """提供经营分析审核任务 Repository 依赖。"""
+
+    return AnalyticsReviewRepository(session=session)
 
 
 def get_document_repository(
@@ -219,6 +230,12 @@ def get_report_gateway() -> ReportGateway:
     """
 
     return ReportGateway(settings=get_settings())
+
+
+def get_analytics_review_policy() -> AnalyticsReviewPolicy:
+    """提供经营分析 Human Review 策略依赖。"""
+
+    return AnalyticsReviewPolicy()
 
 
 def get_chat_service(
@@ -343,7 +360,9 @@ def get_analytics_export_service(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
     analytics_export_repository: AnalyticsExportRepository = Depends(get_analytics_export_repository),
+    analytics_review_repository: AnalyticsReviewRepository = Depends(get_analytics_review_repository),
     report_gateway: ReportGateway = Depends(get_report_gateway),
+    review_policy: AnalyticsReviewPolicy = Depends(get_analytics_review_policy),
 ) -> AnalyticsExportService:
     """提供经营分析导出 Service 依赖。"""
 
@@ -351,5 +370,25 @@ def get_analytics_export_service(
         conversation_repository=conversation_repository,
         task_run_repository=task_run_repository,
         analytics_export_repository=analytics_export_repository,
+        analytics_review_repository=analytics_review_repository,
         report_gateway=report_gateway,
+        review_policy=review_policy,
+    )
+
+
+def get_analytics_review_service(
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
+    task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
+    analytics_export_repository: AnalyticsExportRepository = Depends(get_analytics_export_repository),
+    analytics_review_repository: AnalyticsReviewRepository = Depends(get_analytics_review_repository),
+    analytics_export_service: AnalyticsExportService = Depends(get_analytics_export_service),
+) -> AnalyticsReviewService:
+    """提供经营分析 Human Review Service 依赖。"""
+
+    return AnalyticsReviewService(
+        conversation_repository=conversation_repository,
+        task_run_repository=task_run_repository,
+        analytics_export_repository=analytics_export_repository,
+        analytics_review_repository=analytics_review_repository,
+        analytics_export_service=analytics_export_service,
     )

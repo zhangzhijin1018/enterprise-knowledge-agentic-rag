@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from core.repositories.analytics_export_repository import reset_in_memory_analytics_export_store
+from core.repositories.analytics_review_repository import reset_in_memory_analytics_review_store
 from core.repositories.conversation_repository import reset_in_memory_conversation_store
 from core.repositories.sql_audit_repository import reset_in_memory_sql_audit_store
 from core.repositories.task_run_repository import reset_in_memory_task_run_store
@@ -20,12 +21,14 @@ def client() -> TestClient:
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
+    reset_in_memory_analytics_review_store()
     with TestClient(app) as test_client:
         yield test_client
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_analytics_export_store()
+    reset_in_memory_analytics_review_store()
 
 
 def build_auth_headers(user_id: int = 1501, username: str = "analytics_export_user") -> dict[str, str]:

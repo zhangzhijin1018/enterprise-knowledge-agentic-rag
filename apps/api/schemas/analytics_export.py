@@ -31,6 +31,24 @@ class AnalyticsExportData(BaseModel):
     # 当前导出任务状态。虽然本轮用同步实现，但仍保留异步任务状态语义。
     status: str = Field(description="导出任务状态")
 
+    # 是否需要人工审核。
+    review_required: bool = Field(default=False, description="是否需要人工审核")
+
+    # 关联审核任务 ID。
+    review_id: str | None = Field(default=None, description="审核任务 ID")
+
+    # 当前审核状态。
+    review_status: str = Field(default="not_required", description="审核状态")
+
+    # 当前审核级别。
+    review_level: str | None = Field(default=None, description="审核级别")
+
+    # 当前审核原因。
+    review_reason: str | None = Field(default=None, description="审核原因")
+
+    # 审核人显示名。
+    reviewer: str | None = Field(default=None, description="审核人显示名")
+
     # 生成后的文件名。
     filename: str | None = Field(default=None, description="导出文件名")
 
@@ -48,6 +66,9 @@ class AnalyticsExportData(BaseModel):
 
     # 完成时间。导出失败或未完成时允许为空。
     finished_at: str | None = Field(default=None, description="导出任务完成时间")
+
+    # 审核完成时间。
+    reviewed_at: str | None = Field(default=None, description="审核完成时间")
 
     # 导出附加元数据，用于记录 server_mode、placeholder_mode 等运行信息。
     metadata: dict = Field(default_factory=dict, description="导出任务附加元数据")

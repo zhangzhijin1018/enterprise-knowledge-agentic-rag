@@ -1,4 +1,4 @@
-"""AnalyticsExportService 测试。"""
+"""AnalyticsReviewService 测试。"""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_
 from core.repositories.task_run_repository import TaskRunRepository, reset_in_memory_task_run_store
 from core.security.auth import UserContext
 from core.services.analytics_export_service import AnalyticsExportService
+from core.services.analytics_review_service import AnalyticsReviewService
 from core.services.analytics_service import AnalyticsService
 from core.tools.report.report_gateway import ReportGateway
 from core.tools.sql.sql_gateway import SQLGateway
@@ -49,16 +50,22 @@ def reset_state() -> None:
     reset_in_memory_analytics_review_store()
 
 
-def build_user_context(user_id: int = 1501) -> UserContext:
+def build_user_context(
+    user_id: int = 1601,
+    *,
+    permissions: list[str] | None = None,
+    roles: list[str] | None = None,
+) -> UserContext:
     """构造最小测试用户上下文。"""
 
     return UserContext(
         user_id=user_id,
         username=f"user_{user_id}",
         display_name=f"user_{user_id}",
-        roles=["employee", "analyst"],
+        roles=roles or ["employee", "analyst"],
         department_code="analytics-center",
-        permissions=[
+        permissions=permissions
+        or [
             "analytics:query",
             "analytics:metric:generation",
             "analytics:metric:revenue",
@@ -69,8 +76,8 @@ def build_user_context(user_id: int = 1501) -> UserContext:
     )
 
 
-def build_services(tmp_path: Path) -> tuple[AnalyticsService, AnalyticsExportService]:
-    """构造共享仓储的 analytics/export service。"""
+def build_services(tmp_path: Path) -> tuple[AnalyticsService, AnalyticsExportService, AnalyticsReviewService]:
+    """构造共享仓储的 analytics/export/review service。"""
 
     settings = Settings(
         local_export_dir=str(tmp_path),
@@ -85,6 +92,7 @@ def build_services(tmp_path: Path) -> tuple[AnalyticsService, AnalyticsExportSer
     task_run_repository = TaskRunRepository(session=None)
     export_repository = AnalyticsExportRepository(session=None)
     review_repository = AnalyticsReviewRepository(session=None)
+    review_policy = AnalyticsReviewPolicy(high_row_count_threshold=100)
 
     analytics_service = AnalyticsService(
         conversation_repository=conversation_repository,
@@ -109,21 +117,28 @@ def build_services(tmp_path: Path) -> tuple[AnalyticsService, AnalyticsExportSer
         analytics_export_repository=export_repository,
         analytics_review_repository=review_repository,
         report_gateway=ReportGateway(settings=settings),
-        review_policy=AnalyticsReviewPolicy(),
+        review_policy=review_policy,
     )
-    return analytics_service, export_service
+    review_service = AnalyticsReviewService(
+        conversation_repository=conversation_repository,
+        task_run_repository=task_run_repository,
+        analytics_export_repository=export_repository,
+        analytics_review_repository=review_repository,
+        analytics_export_service=export_service,
+    )
+    return analytics_service, export_service, review_service
 
 
-def test_analytics_export_service_creates_export_from_existing_run(tmp_path: Path) -> None:
-    """基于已完成的 analytics run 应能成功创建导出任务。"""
+def test_normal_export_does_not_trigger_review(tmp_path: Path) -> None:
+    """普通 markdown 导出应直接成功，不触发 review。"""
 
-    analytics_service, export_service = build_services(tmp_path)
+    analytics_service, export_service, _review_service = build_services(tmp_path)
     user_context = build_user_context()
     analytics_result = analytics_service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
         output_mode="summary",
-        need_sql_explain=True,
+        need_sql_explain=False,
         user_context=user_context,
     )
 
@@ -134,35 +149,94 @@ def test_analytics_export_service_creates_export_from_existing_run(tmp_path: Pat
     )
 
     assert export_result["meta"]["status"] == "succeeded"
-    assert export_result["data"]["run_id"] == analytics_result["meta"]["run_id"]
-    assert export_result["data"]["export_type"] == "markdown"
-    assert export_result["data"]["filename"].endswith(".md")
-    assert Path(export_result["data"]["artifact_path"]).exists()
+    assert export_result["data"]["review_required"] is False
+    assert export_result["data"]["review_status"] == "not_required"
 
 
-def test_analytics_export_service_can_read_export_detail(tmp_path: Path) -> None:
-    """导出任务创建后，应能通过 export_id 读取详情。"""
+def test_high_risk_export_triggers_review_then_can_be_approved(tmp_path: Path) -> None:
+    """高风险导出应先进入 awaiting_human_review，审批通过后继续导出。"""
 
-    analytics_service, export_service = build_services(tmp_path)
-    user_context = build_user_context(user_id=1502)
+    analytics_service, export_service, review_service = build_services(tmp_path)
+    owner_context = build_user_context(user_id=1602)
+    reviewer_context = build_user_context(
+        user_id=2602,
+        permissions=[
+            "analytics:query",
+            "analytics:review",
+            "analytics:metric:generation",
+            "analytics:metric:revenue",
+            "analytics:metric:cost",
+            "analytics:metric:profit",
+            "analytics:metric:output",
+        ],
+        roles=["manager", "analyst"],
+    )
     analytics_result = analytics_service.submit_query(
-        query="帮我分析一下上个月新疆区域发电量",
+        query="帮我分析一下上个月新疆区域收入",
         conversation_id=None,
         output_mode="summary",
         need_sql_explain=False,
-        user_context=user_context,
+        user_context=owner_context,
+    )
+
+    export_result = export_service.create_export(
+        run_id=analytics_result["meta"]["run_id"],
+        export_type="pdf",
+        user_context=owner_context,
+    )
+
+    assert export_result["meta"]["status"] == "awaiting_human_review"
+    assert export_result["data"]["review_required"] is True
+    assert export_result["data"]["review_status"] == "pending"
+
+    approved_result = review_service.approve_review(
+        review_id=export_result["data"]["review_id"],
+        comment="审批通过，可以生成正式版本。",
+        reviewer_context=reviewer_context,
+    )
+
+    assert approved_result["data"]["review"]["review_status"] == "approved"
+    assert approved_result["data"]["export"]["status"] == "succeeded"
+    assert approved_result["data"]["export"]["review_status"] == "approved"
+
+
+def test_high_risk_export_can_be_rejected(tmp_path: Path) -> None:
+    """高风险导出被驳回后应终止。"""
+
+    analytics_service, export_service, review_service = build_services(tmp_path)
+    owner_context = build_user_context(user_id=1603)
+    reviewer_context = build_user_context(
+        user_id=2603,
+        permissions=[
+            "analytics:query",
+            "analytics:review",
+            "analytics:metric:generation",
+            "analytics:metric:revenue",
+            "analytics:metric:cost",
+            "analytics:metric:profit",
+            "analytics:metric:output",
+        ],
+        roles=["manager", "analyst"],
+    )
+    analytics_result = analytics_service.submit_query(
+        query="帮我分析一下上个月新疆区域收入",
+        conversation_id=None,
+        output_mode="summary",
+        need_sql_explain=False,
+        user_context=owner_context,
     )
     export_result = export_service.create_export(
         run_id=analytics_result["meta"]["run_id"],
-        export_type="json",
-        user_context=user_context,
+        export_type="docx",
+        user_context=owner_context,
     )
 
-    detail = export_service.get_export_detail(
-        export_id=export_result["data"]["export_id"],
-        user_context=user_context,
+    rejected_result = review_service.reject_review(
+        review_id=export_result["data"]["review_id"],
+        comment="当前正式导出结论需要进一步复核，先驳回。",
+        reviewer_context=reviewer_context,
     )
 
-    assert detail["data"]["export_id"] == export_result["data"]["export_id"]
-    assert detail["data"]["status"] == "succeeded"
-    assert detail["data"]["metadata"]["server_mode"] == "inprocess_report_mcp_server"
+    assert rejected_result["data"]["review"]["review_status"] == "rejected"
+    assert rejected_result["data"]["export"]["status"] == "failed"
+    assert rejected_result["data"]["export"]["review_status"] == "rejected"

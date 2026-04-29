@@ -8,6 +8,7 @@
 """
 
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
+from core.agent.control_plane.analytics_review_policy import AnalyticsReviewDecision, AnalyticsReviewPolicy
 from core.agent.control_plane.clarification_generator import ClarificationGenerator
 from core.agent.control_plane.clarification_manager import ClarificationManager
 from core.agent.control_plane.llm_analytics_planner import (
@@ -23,6 +24,8 @@ from core.agent.control_plane.task_router import TaskRouter
 
 __all__ = [
     "AnalyticsPlanner",
+    "AnalyticsReviewPolicy",
+    "AnalyticsReviewDecision",
     "SemanticResolver",
     "SlotValidator",
     "ClarificationGenerator",

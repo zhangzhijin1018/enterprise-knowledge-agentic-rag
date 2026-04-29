@@ -381,6 +381,21 @@ class AnalyticsExportTask(TimestampMixin, Base):
     # 导出任务状态，例如 pending、running、succeeded、failed。
     status: Mapped[str] = mapped_column(String(32), nullable=False, comment="导出任务状态")
 
+    # 是否需要人工审核。
+    review_required: Mapped[bool] = mapped_column(nullable=False, default=False, comment="是否需要人工审核")
+
+    # 审核状态，例如 not_required、pending、approved、rejected。
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_required", comment="审核状态")
+
+    # 审核级别，例如 low、medium、high。
+    review_level: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="审核级别")
+
+    # 审核原因摘要。用于解释为什么命中 Human Review 策略。
+    review_reason: Mapped[str | None] = mapped_column(Text, nullable=True, comment="审核原因摘要")
+
+    # 关联审核任务 ID。
+    review_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="关联审核任务 ID")
+
     # 导出文件名。
     filename: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="导出文件名")
 
@@ -402,5 +417,97 @@ class AnalyticsExportTask(TimestampMixin, Base):
         comment="导出扩展元数据",
     )
 
+    # 审核人用户 ID。
+    reviewer_id: Mapped[int | None] = mapped_column(
+        build_bigint_type(),
+        nullable=True,
+        comment="审核人用户 ID",
+    )
+
+    # 审核人显示名。
+    reviewer_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="审核人显示名")
+
+    # 审核完成时间。
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="审核完成时间")
+
     # 任务完成时间。
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="任务完成时间")
+
+
+class AnalyticsReviewTask(TimestampMixin, Base):
+    """经营分析审核任务表。
+
+    业务作用：
+    - 保存高风险经营分析导出对应的 Human Review 主对象；
+    - 让“导出任务状态”和“审核任务状态”分离建模，避免把审批过程全部塞进 export metadata；
+    - 为后续审批列表、审核超时、审批事件流水和异步恢复执行预留稳定主对象。
+    """
+
+    __tablename__ = "analytics_review_tasks"
+    __table_args__ = {"comment": "经营分析审核任务表：存储导出前人工审核状态与审计信息"}
+
+    # 数据库内部主键。
+    id: Mapped[int] = mapped_column(
+        build_bigint_type(),
+        primary_key=True,
+        autoincrement=True,
+        comment="数据库内部主键",
+    )
+
+    # 对外稳定审核任务 ID。
+    review_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, comment="审核任务唯一 ID")
+
+    # 审核主题类型。当前阶段固定为 analytics_export。
+    subject_type: Mapped[str] = mapped_column(String(64), nullable=False, comment="审核主题类型")
+
+    # 审核主题对象 ID。当前阶段主要对应 export_id。
+    subject_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="审核主题对象 ID")
+
+    # 关联经营分析运行 ID。
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("task_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+        comment="关联经营分析运行 ID",
+    )
+
+    # 提交导出的原始请求用户 ID。
+    requester_user_id: Mapped[int | None] = mapped_column(
+        build_bigint_type(),
+        nullable=True,
+        comment="提交导出的原始请求用户 ID",
+    )
+
+    # 当前审核状态。
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", comment="审核状态")
+
+    # 审核级别。
+    review_level: Mapped[str] = mapped_column(String(32), nullable=False, comment="审核级别")
+
+    # 审核原因。
+    review_reason: Mapped[str] = mapped_column(Text, nullable=False, comment="审核原因")
+
+    # 审核人用户 ID。
+    reviewer_id: Mapped[int | None] = mapped_column(
+        build_bigint_type(),
+        nullable=True,
+        comment="审核人用户 ID",
+    )
+
+    # 审核人显示名。
+    reviewer_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="审核人显示名")
+
+    # 审核意见。
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True, comment="审核意见")
+
+    # 扩展元数据，例如策略命中细节、治理摘要、导出类型等。
+    metadata_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="metadata",
+        comment="审核扩展元数据",
+    )
+
+    # 审核完成时间。
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="审核完成时间")

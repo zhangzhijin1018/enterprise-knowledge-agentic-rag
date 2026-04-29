@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
+from core.repositories.analytics_review_repository import AnalyticsReviewRepository
 from core.repositories.analytics_export_repository import AnalyticsExportRepository
 from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
+from core.agent.control_plane.analytics_review_policy import AnalyticsReviewPolicy
 from core.tools.mcp import ReportGatewayExecutionError, ReportRenderRequest
 from core.tools.report.report_gateway import ReportGateway
 
@@ -37,12 +39,16 @@ class AnalyticsExportService:
         conversation_repository: ConversationRepository,
         task_run_repository: TaskRunRepository,
         analytics_export_repository: AnalyticsExportRepository,
+        analytics_review_repository: AnalyticsReviewRepository,
         report_gateway: ReportGateway,
+        review_policy: AnalyticsReviewPolicy,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
         self.analytics_export_repository = analytics_export_repository
+        self.analytics_review_repository = analytics_review_repository
         self.report_gateway = report_gateway
+        self.review_policy = review_policy
 
     def create_export(
         self,
@@ -90,16 +96,107 @@ class AnalyticsExportService:
                 detail={"run_id": run_id},
             )
 
+        slots = output_snapshot.get("slots") or {}
+        metric_definition = self._resolve_metric_definition(metric_name=slots.get("metric"))
+        data_source_definition = self._resolve_data_source_definition(output_snapshot=output_snapshot)
+
+        review_decision = self.review_policy.evaluate_export(
+            export_type=normalized_export_type,
+            output_snapshot=output_snapshot,
+            metric_definition=metric_definition,
+            data_source_definition=data_source_definition,
+        )
+
         export_task = self.analytics_export_repository.create_export_task(
             run_id=run_id,
             user_id=user_context.user_id,
             export_type=normalized_export_type,
             status="pending",
+            review_required=review_decision.review_required,
+            review_status="pending" if review_decision.review_required else "not_required",
+            review_level=review_decision.review_level if review_decision.review_required else None,
+            review_reason=review_decision.review_reason,
             metadata={
                 "trigger_mode": "manual",
                 "source": "analytics_run",
             },
         )
+
+        if review_decision.review_required:
+            review_task = self.analytics_review_repository.create_review_task(
+                subject_type="analytics_export",
+                subject_id=export_task["export_id"],
+                run_id=run_id,
+                requester_user_id=user_context.user_id,
+                review_status="pending",
+                review_level=review_decision.review_level,
+                review_reason=review_decision.review_reason or "高风险经营分析导出需要人工审核",
+                metadata={
+                    "reason_details": review_decision.reason_details,
+                    "export_type": normalized_export_type,
+                },
+            )
+            export_task = self.analytics_export_repository.update_export_task(
+                export_task["export_id"],
+                status="awaiting_human_review",
+                review_id=review_task["review_id"],
+            ) or export_task
+            return {
+                "data": self._serialize_export_task(export_task),
+                "meta": build_response_meta(
+                    run_id=run_id,
+                    review_id=review_task["review_id"],
+                    status="awaiting_human_review",
+                    is_async=False,
+                    need_human_review=True,
+                ),
+            }
+
+        return self._render_export_task(export_task=export_task, task_run=task_run)
+ 
+    def resume_export_after_review(self, *, export_id: str) -> dict:
+        """审核通过后恢复导出任务执行。"""
+
+        export_task = self.analytics_export_repository.get_export_task(export_id)
+        if export_task is None:
+            raise AppException(
+                error_code=error_codes.ANALYTICS_EXPORT_NOT_FOUND,
+                message="指定经营分析导出任务不存在",
+                status_code=404,
+                detail={"export_id": export_id},
+            )
+        if export_task.get("review_status") != "approved":
+            raise AppException(
+                error_code=error_codes.ANALYTICS_REVIEW_INVALID_STATUS,
+                message="当前导出任务尚未通过审核，不能继续执行",
+                status_code=400,
+                detail={
+                    "export_id": export_id,
+                    "review_status": export_task.get("review_status"),
+                },
+            )
+        task_run = self.task_run_repository.get_task_run(export_task["run_id"])
+        if task_run is None or task_run["task_type"] != "analytics":
+            raise AppException(
+                error_code=error_codes.ANALYTICS_RUN_NOT_FOUND,
+                message="导出任务关联的经营分析运行不存在",
+                status_code=404,
+                detail={"run_id": export_task["run_id"]},
+            )
+        return self._render_export_task(export_task=export_task, task_run=task_run)
+
+    def _render_export_task(self, *, export_task: dict, task_run: dict) -> dict:
+        """真正执行导出渲染链路。
+
+        这个方法被拆出来的原因是：
+        - 普通导出可直接调用；
+        - 命中 Human Review 的导出可在审核通过后复用同一条渲染链路；
+        - 避免在 approve review 时复制一套导出逻辑。
+        """
+
+        run_id = export_task["run_id"]
+        export_type = export_task["export_type"]
+        output_snapshot = task_run.get("output_snapshot") or {}
         export_task = self.analytics_export_repository.update_export_task(
             export_task["export_id"],
             status="running",
@@ -110,7 +207,7 @@ class AnalyticsExportService:
                 ReportRenderRequest(
                     export_id=export_task["export_id"],
                     run_id=run_id,
-                    export_type=normalized_export_type,
+                    export_type=export_type,
                     summary=output_snapshot.get("summary"),
                     insight_cards=output_snapshot.get("insight_cards", []),
                     report_blocks=output_snapshot.get("report_blocks", []),
@@ -154,7 +251,7 @@ class AnalyticsExportService:
                 status_code=500,
                 detail={
                     "run_id": run_id,
-                    "export_type": normalized_export_type,
+                    "export_type": export_type,
                     "reason": str(exc),
                     "gateway_error_code": exc.error_code,
                     "gateway_detail": exc.detail,
@@ -177,7 +274,7 @@ class AnalyticsExportService:
                 status_code=500,
                 detail={
                     "run_id": run_id,
-                    "export_type": normalized_export_type,
+                    "export_type": export_type,
                     "reason": str(exc),
                 },
             ) from exc
@@ -188,6 +285,7 @@ class AnalyticsExportService:
                 run_id=run_id,
                 status=export_task["status"],
                 is_async=False,
+                need_human_review=export_task.get("review_status") == "pending",
             ),
         }
 
@@ -218,6 +316,7 @@ class AnalyticsExportService:
                 run_id=export_task["run_id"],
                 status=export_task["status"],
                 is_async=False,
+                need_human_review=export_task.get("review_status") == "pending",
             ),
         }
 
@@ -270,11 +369,41 @@ class AnalyticsExportService:
             "run_id": export_task["run_id"],
             "export_type": export_task["export_type"],
             "status": export_task["status"],
+            "review_required": export_task.get("review_required", False),
+            "review_id": export_task.get("review_id"),
+            "review_status": export_task.get("review_status", "not_required"),
+            "review_level": export_task.get("review_level"),
+            "review_reason": export_task.get("review_reason"),
+            "reviewer": export_task.get("reviewer_name"),
             "filename": export_task.get("filename"),
             "content_preview": export_task.get("content_preview"),
             "artifact_path": export_task.get("artifact_path"),
             "file_uri": export_task.get("file_uri"),
             "created_at": export_task["created_at"].isoformat(),
+            "reviewed_at": export_task.get("reviewed_at").isoformat() if export_task.get("reviewed_at") else None,
             "finished_at": export_task.get("finished_at").isoformat() if export_task.get("finished_at") else None,
             "metadata": export_task.get("metadata") or {},
         }
+
+    def _resolve_metric_definition(self, *, metric_name: str | None):
+        """从 task_run 输出快照解析指标定义。"""
+
+        # 当前阶段导出 review policy 优先基于既有 analytics 结果工作，
+        # 因此这里不重新做 Planner，只复用 output_snapshot 中已经落下来的 metric 名称。
+        from core.analytics.metric_catalog import MetricCatalog
+
+        metric_catalog = MetricCatalog()
+        metric_definition = metric_catalog.resolve_metric(metric_name)
+        if metric_definition is None:
+            metric_definition = metric_catalog.find_metric_in_query(metric_name or "") or metric_catalog.resolve_metric("发电量")
+        if metric_definition is None:
+            metric_definition = metric_catalog._build_default_metrics()["发电量"]
+        return metric_definition
+
+    def _resolve_data_source_definition(self, *, output_snapshot: dict):
+        """从 analytics 输出快照解析数据源定义。"""
+
+        from core.analytics.schema_registry import SchemaRegistry
+
+        schema_registry = SchemaRegistry()
+        return schema_registry.get_data_source(output_snapshot.get("data_source"))
