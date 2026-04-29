@@ -22,6 +22,7 @@ class ReportFormatter:
         insight_cards: list[dict],
         tables: list[dict],
         chart_spec: dict | None,
+        governance_note: dict | None = None,
     ) -> list[dict]:
         """构造最小 report_blocks。"""
 
@@ -57,6 +58,15 @@ class ReportFormatter:
                     "block_type": "chart",
                     "title": chart_spec.get("title", "图表"),
                     "content": chart_spec,
+                }
+            )
+
+        if governance_note is not None:
+            report_blocks.append(
+                {
+                    "block_type": "governance_note",
+                    "title": "治理说明",
+                    "content": governance_note,
                 }
             )
 

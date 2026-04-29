@@ -36,6 +36,10 @@ def test_report_formatter_generates_minimal_report_blocks() -> None:
             "dataset_ref": "main_result",
             "data_mapping": {"primary_series": "total_value"},
         },
+        governance_note={
+            "audit_info": {"execution_status": "succeeded"},
+            "masked_fields": [],
+        },
     )
 
     block_types = [block["block_type"] for block in blocks]
@@ -43,4 +47,5 @@ def test_report_formatter_generates_minimal_report_blocks() -> None:
     assert "key_findings" in block_types
     assert "data_table" in block_types
     assert "chart" in block_types
+    assert "governance_note" in block_types
     assert "recommendation" in block_types

@@ -29,12 +29,14 @@ from core.config import get_settings
 from core.database.session import get_db_session
 from core.embedding.gateway import EmbeddingGateway
 from core.repositories.conversation_repository import ConversationRepository
+from core.repositories.analytics_export_repository import AnalyticsExportRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
 from core.security.auth import resolve_user_context_from_request
+from core.services.analytics_export_service import AnalyticsExportService
 from core.services.analytics_service import AnalyticsService
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
@@ -43,6 +45,7 @@ from core.services.document_ingestion_service import DocumentIngestionService
 from core.services.document_parse_service import DocumentParseService
 from core.services.document_service import DocumentService
 from core.services.retrieval_service import RetrievalService
+from core.tools.report.report_gateway import ReportGateway
 from core.tools.sql.sql_gateway import SQLGateway
 from core.vectorstore import MilvusStore
 
@@ -99,6 +102,14 @@ def get_sql_audit_repository(
     """提供 SQL 审计 Repository 依赖。"""
 
     return SQLAuditRepository(session=session)
+
+
+def get_analytics_export_repository(
+    session: Session | None = Depends(get_session),
+) -> AnalyticsExportRepository:
+    """提供经营分析导出任务 Repository 依赖。"""
+
+    return AnalyticsExportRepository(session=session)
 
 
 def get_document_repository(
@@ -197,6 +208,17 @@ def get_sql_gateway(
         schema_registry=schema_registry,
         settings=get_settings(),
     )
+
+
+def get_report_gateway() -> ReportGateway:
+    """提供 Report Gateway 依赖。
+
+    当前阶段默认走“进程内 Report MCP Server”：
+    - 这样可以先把导出 contract、状态流转和本地 artifact 管理做通；
+    - 后续切远端 Report MCP 服务或对象存储时，优先替换网关内部实现。
+    """
+
+    return ReportGateway(settings=get_settings())
 
 
 def get_chat_service(
@@ -314,4 +336,20 @@ def get_analytics_service(
         sql_gateway=sql_gateway,
         schema_registry=schema_registry,
         metric_catalog=metric_catalog,
+    )
+
+
+def get_analytics_export_service(
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
+    task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
+    analytics_export_repository: AnalyticsExportRepository = Depends(get_analytics_export_repository),
+    report_gateway: ReportGateway = Depends(get_report_gateway),
+) -> AnalyticsExportService:
+    """提供经营分析导出 Service 依赖。"""
+
+    return AnalyticsExportService(
+        conversation_repository=conversation_repository,
+        task_run_repository=task_run_repository,
+        analytics_export_repository=analytics_export_repository,
+        report_gateway=report_gateway,
     )

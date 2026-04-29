@@ -240,6 +240,23 @@ class Settings(BaseSettings):
         description="经营分析 SQL Gateway transport 模式",
     )
 
+    # 本地导出产物目录。
+    # 当前阶段经营分析导出先落到 `storage/exports/`，
+    # 目的是尽快把“可交付分析产物”链路跑通。
+    # 后续若切对象存储，只需要替换 Report MCP Server 内部落盘实现。
+    local_export_dir: str = Field(
+        default="storage/exports",
+        description="本地导出产物目录",
+    )
+
+    # Report Gateway 当前采用的 transport 模式。
+    # 与 SQL Gateway 一样，先通过“进程内 MCP server”把接口契约收口，
+    # 后续再平滑切到真正远端 Report MCP 服务。
+    analytics_report_gateway_transport_mode: str = Field(
+        default="inprocess_report_mcp_server",
+        description="经营分析 Report Gateway transport 模式",
+    )
+
     @property
     def is_database_configured(self) -> bool:
         """判断是否已经提供真实数据库连接配置。

@@ -5,12 +5,14 @@
 """
 
 from core.repositories.conversation_repository import ConversationRepository
+from core.repositories.analytics_export_repository import AnalyticsExportRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 
 __all__ = [
+    "AnalyticsExportRepository",
     "ConversationRepository",
     "DocumentChunkRepository",
     "DocumentRepository",

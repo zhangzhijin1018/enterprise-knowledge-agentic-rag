@@ -565,6 +565,14 @@ class AnalyticsService:
                 insight_cards=insight_cards,
                 tables=tables,
                 chart_spec=chart_spec,
+                governance_note={
+                    "audit_info": audit_info,
+                    "permission_check_result": permission_check_result,
+                    "data_scope_result": data_scope_result,
+                    "masked_fields": masking_result.masked_fields,
+                    "effective_filters": effective_filters,
+                    "governance_action": masking_result.governance_decision,
+                },
             )
 
             output_snapshot = {

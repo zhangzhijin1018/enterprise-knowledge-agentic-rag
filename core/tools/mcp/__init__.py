@@ -8,9 +8,21 @@ from core.tools.mcp.sql_mcp_contracts import (
     SQLReadQueryRequest,
     SQLReadQueryResponse,
 )
+from core.tools.mcp.report_mcp_contracts import (
+    ReportGatewayExecutionError,
+    ReportHealthcheckResponse,
+    ReportRenderRequest,
+    ReportRenderResponse,
+)
+from core.tools.mcp.report_mcp_server import ReportMCPServer
 from core.tools.mcp.sql_mcp_server import SQLMCPServer
 
 __all__ = [
+    "ReportRenderRequest",
+    "ReportRenderResponse",
+    "ReportHealthcheckResponse",
+    "ReportGatewayExecutionError",
+    "ReportMCPServer",
     "SQLReadQueryRequest",
     "SQLReadQueryResponse",
     "SQLHealthcheckRequest",

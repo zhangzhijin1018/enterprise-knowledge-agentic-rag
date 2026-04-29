@@ -335,3 +335,72 @@ class SQLAudit(Base):
         server_default=func.now(),
         comment="创建时间",
     )
+
+
+class AnalyticsExportTask(TimestampMixin, Base):
+    """经营分析导出任务表。
+
+    业务作用：
+    - 保存一次经营分析导出任务的状态流转；
+    - 串联 analytics run 与最终导出产物；
+    - 为后续 Celery 异步任务、对象存储和 Report MCP 远端化预留稳定主对象。
+    """
+
+    __tablename__ = "analytics_export_tasks"
+    __table_args__ = {"comment": "经营分析导出任务表：存储导出状态、产物路径与导出元数据"}
+
+    # 数据库内部主键。
+    id: Mapped[int] = mapped_column(
+        build_bigint_type(),
+        primary_key=True,
+        autoincrement=True,
+        comment="数据库内部主键",
+    )
+
+    # 对外稳定导出任务 ID。
+    export_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, comment="导出任务唯一 ID")
+
+    # 关联经营分析运行 ID。
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("task_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+        comment="关联经营分析运行 ID",
+    )
+
+    # 发起导出的用户 ID。
+    user_id: Mapped[int | None] = mapped_column(
+        build_bigint_type(),
+        nullable=True,
+        comment="发起导出的用户 ID",
+    )
+
+    # 导出类型，例如 json、markdown、docx、pdf。
+    export_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="导出类型")
+
+    # 导出任务状态，例如 pending、running、succeeded、failed。
+    status: Mapped[str] = mapped_column(String(32), nullable=False, comment="导出任务状态")
+
+    # 导出文件名。
+    filename: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="导出文件名")
+
+    # 本地文件路径或未来对象存储 URI。
+    artifact_path: Mapped[str | None] = mapped_column(String(512), nullable=True, comment="导出产物路径")
+
+    # 对前端展示友好的产物 URI。当前阶段可与 artifact_path 相同。
+    file_uri: Mapped[str | None] = mapped_column(String(512), nullable=True, comment="导出产物访问 URI")
+
+    # 适合列表和详情页快速展示的内容预览。
+    content_preview: Mapped[str | None] = mapped_column(Text, nullable=True, comment="导出内容预览")
+
+    # 扩展元数据，例如 placeholder 标记、transport 模式、导出来源。
+    metadata_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="metadata",
+        comment="导出扩展元数据",
+    )
+
+    # 任务完成时间。
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="任务完成时间")
