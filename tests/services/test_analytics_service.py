@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from core.common.cache import reset_global_cache
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
+from core.repositories.analytics_result_repository import (
+    reset_in_memory_analytics_result_store,
+)
 from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
@@ -29,11 +33,15 @@ def reset_state() -> None:
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_data_source_store()
+    reset_in_memory_analytics_result_store()
+    reset_global_cache()
     yield
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_data_source_store()
+    reset_in_memory_analytics_result_store()
+    reset_global_cache()
 
 
 def build_user_context(user_id: int = 1201) -> UserContext:
@@ -94,7 +102,7 @@ def test_analytics_service_runs_successfully_when_metric_and_time_range_are_pres
     result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=build_user_context(),
     )
@@ -128,7 +136,7 @@ def test_analytics_service_returns_clarification_when_metric_missing() -> None:
     result = service.submit_query(
         query="帮我分析一下上个月的情况",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=build_user_context(),
     )
@@ -148,7 +156,7 @@ def test_analytics_service_blocks_query_without_time_range() -> None:
     result = service.submit_query(
         query="帮我分析一下新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=build_user_context(),
     )
@@ -166,7 +174,7 @@ def test_analytics_service_get_run_detail_contains_sql_audit() -> None:
     submit_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=True,
         user_context=build_user_context(),
     )
@@ -174,6 +182,7 @@ def test_analytics_service_get_run_detail_contains_sql_audit() -> None:
 
     detail_result = service.get_run_detail(
         run_id=run_id,
+        output_mode="full",
         user_context=build_user_context(),
     )
 
@@ -194,7 +203,7 @@ def test_analytics_service_raises_for_unauthorized_run_detail() -> None:
     submit_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=build_user_context(user_id=1201),
     )
@@ -215,7 +224,7 @@ def test_analytics_service_supports_multi_turn_slot_inheritance_and_update() -> 
     first_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -224,7 +233,7 @@ def test_analytics_service_supports_multi_turn_slot_inheritance_and_update() -> 
     second_result = service.submit_query(
         query="再按月看",
         conversation_id=conversation_id,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -247,7 +256,7 @@ def test_analytics_service_supports_incremental_metric_switch() -> None:
     first_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -256,7 +265,7 @@ def test_analytics_service_supports_incremental_metric_switch() -> None:
     second_result = service.submit_query(
         query="换成收入",
         conversation_id=conversation_id,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -274,7 +283,7 @@ def test_analytics_service_supports_compare_inheritance_query() -> None:
     first_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -282,7 +291,7 @@ def test_analytics_service_supports_compare_inheritance_query() -> None:
     second_result = service.submit_query(
         query="再看一下同比",
         conversation_id=first_result["meta"]["conversation_id"],
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -300,7 +309,7 @@ def test_analytics_service_supports_org_scope_switch_query() -> None:
     first_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -308,7 +317,7 @@ def test_analytics_service_supports_org_scope_switch_query() -> None:
     second_result = service.submit_query(
         query="新疆换成北疆",
         conversation_id=first_result["meta"]["conversation_id"],
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -326,7 +335,7 @@ def test_analytics_service_supports_station_scope_switch_query() -> None:
     first_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -334,7 +343,7 @@ def test_analytics_service_supports_station_scope_switch_query() -> None:
     second_result = service.submit_query(
         query="只看哈密电站",
         conversation_id=first_result["meta"]["conversation_id"],
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -352,7 +361,7 @@ def test_analytics_service_returns_conflict_clarification_for_multi_metric_follo
     first_result = service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -360,7 +369,7 @@ def test_analytics_service_returns_conflict_clarification_for_multi_metric_follo
     second_result = service.submit_query(
         query="再把成本也加进来",
         conversation_id=first_result["meta"]["conversation_id"],
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -378,7 +387,7 @@ def test_analytics_service_supports_compare_and_topn_query() -> None:
     result = service.submit_query(
         query="最近发电表现按站点排名前3做环比",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=True,
         user_context=build_user_context(user_id=1205),
     )
@@ -419,7 +428,7 @@ def test_analytics_service_can_use_llm_fallback_for_low_confidence_query() -> No
     result = service.submit_query(
         query="最近经营表现怎么样",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="standard",
         need_sql_explain=False,
         user_context=build_user_context(user_id=1206),
     )
@@ -439,7 +448,7 @@ def test_analytics_service_rejects_metric_without_permission() -> None:
         service.submit_query(
             query="帮我分析一下上个月新疆区域收入",
             conversation_id=None,
-            output_mode="summary",
+            output_mode="standard",
             need_sql_explain=False,
             user_context=user_context,
         )
@@ -473,7 +482,7 @@ def test_analytics_service_rejects_data_source_without_permission() -> None:
         service.submit_query(
             query="帮我分析一下上个月新疆区域发电量",
             conversation_id=None,
-            output_mode="summary",
+            output_mode="standard",
             need_sql_explain=False,
             user_context=build_user_context(user_id=1212),
         )
@@ -489,7 +498,7 @@ def test_analytics_service_masks_sensitive_fields_when_permission_missing() -> N
     result = service.submit_query(
         query="最近发电表现按站点排名前3",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=build_user_context(user_id=1213),
     )
@@ -499,3 +508,104 @@ def test_analytics_service_masks_sensitive_fields_when_permission_missing() -> N
     first_table = result["data"]["tables"][0]
     assert "station" in first_table["columns"]
     assert any("***" in str(cell) for row in first_table["rows"] for cell in row)
+
+
+def test_analytics_service_supports_tiered_output_modes() -> None:
+    """lite / standard / full 应返回不同粒度的数据。"""
+
+    service = build_service()
+    user_context = build_user_context(user_id=1214)
+
+    lite_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="lite",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+    standard_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="standard",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+    full_result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="full",
+        need_sql_explain=False,
+        user_context=user_context,
+    )
+
+    assert lite_result["meta"]["status"] == "succeeded"
+    assert "summary" in lite_result["data"]
+    assert "chart_spec" not in lite_result["data"]
+    assert "tables" not in lite_result["data"]
+
+    assert standard_result["meta"]["status"] == "succeeded"
+    assert standard_result["data"]["chart_spec"] is not None
+    assert standard_result["data"]["insight_cards"]
+    assert "tables" not in standard_result["data"]
+    assert "report_blocks" not in standard_result["data"]
+
+    assert full_result["meta"]["status"] == "succeeded"
+    assert full_result["data"]["chart_spec"] is not None
+    assert full_result["data"]["insight_cards"]
+    assert full_result["data"]["tables"]
+    assert full_result["data"]["report_blocks"]
+
+
+def test_analytics_service_compacts_output_snapshot_and_splits_heavy_result() -> None:
+    """output_snapshot 应只保留轻快照，重结果单独写入结果仓储。"""
+
+    service = build_service()
+    result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="full",
+        need_sql_explain=False,
+        user_context=build_user_context(user_id=1215),
+    )
+    run_id = result["meta"]["run_id"]
+    task_run = service.task_run_repository.get_task_run(run_id)
+    heavy_result = service.analytics_result_repository.get_heavy_result(run_id)
+
+    assert task_run is not None
+    assert heavy_result is not None
+
+    output_snapshot = task_run["output_snapshot"]
+    assert output_snapshot["summary"]
+    assert output_snapshot["sql_preview"]
+    assert output_snapshot["has_heavy_result"] is True
+    assert "tables" not in output_snapshot
+    assert "insight_cards" not in output_snapshot
+    assert "report_blocks" not in output_snapshot
+    assert "chart_spec" not in output_snapshot
+    assert output_snapshot["timing_breakdown"]["sql_execute_ms"] >= 0
+
+    assert heavy_result["tables"]
+    assert heavy_result["insight_cards"]
+    assert heavy_result["report_blocks"]
+    assert heavy_result["chart_spec"] is not None
+
+
+def test_analytics_service_records_timing_breakdown() -> None:
+    """关键阶段耗时应写入 timing_breakdown，便于后续性能排查。"""
+
+    service = build_service()
+    result = service.submit_query(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="full",
+        need_sql_explain=False,
+        user_context=build_user_context(user_id=1216),
+    )
+
+    timing = result["data"]["timing_breakdown"]
+    assert timing["sql_build_ms"] >= 0
+    assert timing["sql_guard_ms"] >= 0
+    assert timing["sql_execute_ms"] >= 0
+    assert timing["masking_ms"] >= 0
+    assert timing["insight_ms"] >= 0
+    assert timing["report_ms"] >= 0

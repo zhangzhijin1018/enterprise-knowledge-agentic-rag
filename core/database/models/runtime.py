@@ -90,12 +90,23 @@ class TaskRun(TimestampMixin, Base):
         comment="输入快照",
     )
 
-    # 输出快照，用于结果回放和问题排查。
+    # 输出轻快照，用于结果回放和问题排查。
+    # V1 性能优化后，这里只保留轻量信息：
+    # - summary
+    # - slots
+    # - sql_preview
+    # - row_count / latency_ms
+    # - compare_target / group_by
+    # - governance_decision（简版）
+    # - timing_breakdown
+    #
+    # tables / insight_cards / report_blocks / chart_spec 等重内容
+    # 不再继续膨胀到 task_runs.output_snapshot 中，而是拆到 analytics_results 表。
     output_snapshot: Mapped[dict] = mapped_column(
         build_json_type(),
         nullable=False,
         default=dict,
-        comment="输出快照",
+        comment="输出轻快照",
     )
 
     # 上下文快照，用于记录本轮工作流继承了哪些上下文。
@@ -334,6 +345,96 @@ class SQLAudit(Base):
         nullable=False,
         server_default=func.now(),
         comment="创建时间",
+    )
+
+
+class AnalyticsResultRecord(TimestampMixin, Base):
+    """经营分析重结果表。
+
+    业务作用：
+    - 把 tables / insight_cards / report_blocks / chart_spec 等大 JSON
+      从 task_runs.output_snapshot 中拆出来；
+    - 降低 task_runs 的大 JSON 写入和读取压力；
+    - 为 run detail、export、后续缓存和异步导出提供稳定的重结果读取入口。
+
+    设计原则：
+    - task_runs.output_snapshot 只保留轻快照；
+    - analytics_results 负责重内容持久化；
+    - 当前阶段仍然保持“数据库优先 + 内存回退”双模式，便于本地开发和真实库并行。
+    """
+
+    __tablename__ = "analytics_results"
+    __table_args__ = {"comment": "经营分析重结果表：存储 tables、insight_cards、report_blocks、chart_spec 等大 JSON"}
+
+    # 数据库内部主键。
+    id: Mapped[int] = mapped_column(
+        build_bigint_type(),
+        primary_key=True,
+        autoincrement=True,
+        comment="数据库内部主键",
+    )
+
+    # 关联经营分析运行 ID，一次 run 只保留一份当前重结果。
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("task_runs.run_id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        comment="关联 task_runs.run_id",
+    )
+
+    # 查询结果表数据。
+    tables_json: Mapped[list] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=list,
+        name="tables",
+        comment="结果表数据",
+    )
+
+    # 洞察卡片。
+    insight_cards_json: Mapped[list] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=list,
+        name="insight_cards",
+        comment="洞察卡片",
+    )
+
+    # 报告块。
+    report_blocks_json: Mapped[list] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=list,
+        name="report_blocks",
+        comment="报告块",
+    )
+
+    # 图表描述结构。
+    chart_spec_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="chart_spec",
+        comment="图表描述",
+    )
+
+    # 脱敏与结果可见性治理相关的重信息。
+    masking_result_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="masking_result",
+        comment="脱敏与字段可见性结果",
+    )
+
+    # 其他扩展重信息，例如 sql_explain、audit_info、timing_breakdown。
+    metadata_json: Mapped[dict] = mapped_column(
+        build_json_type(),
+        nullable=False,
+        default=dict,
+        name="metadata",
+        comment="重结果扩展元数据",
     )
 
 

@@ -134,7 +134,9 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── exceptions.py
 │   │   ├── ids.py
 │   │   ├── pagination.py
-│   │   └── response.py
+│   │   ├── response.py
+│   │   ├── cache.py
+│   │   └── async_task_runner.py
 │   ├── config/
 │   │   ├── settings.py
 │   │   └── logging.py
@@ -159,6 +161,7 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── conversation_repository.py
 │   │   ├── document_repository.py
 │   │   ├── task_run_repository.py
+│   │   ├── analytics_result_repository.py
 │   │   ├── review_repository.py
 │   │   ├── trace_repository.py
 │   │   └── audit_repository.py
@@ -169,6 +172,7 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── document_service.py
 │   │   ├── contract_review_service.py
 │   │   ├── analytics_service.py
+│   │   ├── analytics_export_service.py
 │   │   ├── report_service.py
 │   │   ├── review_service.py
 │   │   ├── trace_service.py
@@ -290,6 +294,22 @@ sql/analytics/
   - 一期核心索引与唯一索引建议；
   - 服务趋势查询、区域汇总、站点排名、部门过滤和治理校验。
 
+## 3.2 经营分析性能优化支撑目录说明
+
+本轮性能优化增加了几类“只为主链减重服务”的基础模块：
+
+- `core/common/cache.py`
+  - 进程内只读缓存；
+  - 用于 metric definitions、data source definitions、group_by rules、visible_fields 等高频只读对象。
+
+- `core/common/async_task_runner.py`
+  - 最小本地异步任务执行器；
+  - 当前用于 analytics export 真异步化，后续可平滑替换为 Celery worker。
+
+- `core/repositories/analytics_result_repository.py`
+  - 经营分析重结果仓储；
+  - 配合 `task_runs.output_snapshot` 轻快照工作，负责 tables / insight_cards / report_blocks / chart_spec 的独立存取。
+
 ## 4.1 `apps/api/main.py`
 
 职责：
@@ -340,8 +360,14 @@ sql/analytics/
 ### `routers/analytics.py`
 负责：
 
-- `POST /api/v1/analytics/query`
-- `GET /api/v1/analytics/runs/{run_id}`
+- `POST /api/v1/analytics/query`（支持 output_mode=lite/standard/full）
+- `GET /api/v1/analytics/runs/{run_id}`（支持 output_mode 参数）
+
+### `routers/analytics_exports.py`
+负责：
+
+- `POST /api/v1/analytics/runs/{run_id}/export`（V1 真异步化，只创建任务返回 export_id）
+- `GET /api/v1/analytics/exports/{export_id}`（轮询读取导出状态）
 
 ### `routers/reviews.py`
 负责：

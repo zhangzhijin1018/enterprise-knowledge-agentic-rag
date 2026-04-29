@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.deps import get_analytics_service, get_current_user_context
 from apps.api.schemas.analytics import AnalyticsQueryRequest
@@ -41,6 +41,7 @@ def submit_analytics_query(
 def get_analytics_run_detail(
     request: Request,
     run_id: str,
+    output_mode: str = Query(default="full", description="输出模式：lite / standard / full"),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
     user_context: UserContext = Depends(get_current_user_context),
 ) -> dict:
@@ -48,6 +49,7 @@ def get_analytics_run_detail(
 
     result = analytics_service.get_run_detail(
         run_id=run_id,
+        output_mode=output_mode,
         user_context=user_context,
     )
     return build_success_response(

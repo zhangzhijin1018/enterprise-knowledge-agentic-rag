@@ -6,6 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from core.common.async_task_runner import reset_async_task_runner
+from core.common.cache import reset_global_cache
+from core.repositories.analytics_result_repository import reset_in_memory_analytics_result_store
 from core.repositories.conversation_repository import reset_in_memory_conversation_store
 from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.repositories.sql_audit_repository import reset_in_memory_sql_audit_store
@@ -20,12 +23,18 @@ def client() -> TestClient:
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_data_source_store()
+    reset_in_memory_analytics_result_store()
+    reset_async_task_runner()
+    reset_global_cache()
     with TestClient(app) as test_client:
         yield test_client
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
     reset_in_memory_sql_audit_store()
     reset_in_memory_data_source_store()
+    reset_in_memory_analytics_result_store()
+    reset_async_task_runner()
+    reset_global_cache()
 
 
 def build_auth_headers(user_id: int = 1301, username: str = "analytics_api_user") -> dict[str, str]:
@@ -43,7 +52,7 @@ def build_auth_headers(user_id: int = 1301, username: str = "analytics_api_user"
 
 
 def test_analytics_query_returns_summary_and_tables_when_slots_are_complete(client: TestClient) -> None:
-    """槽位齐全时应直接执行并返回 summary + tables。"""
+    """槽位齐全时 full 模式应直接执行并返回完整结果。"""
 
     response = client.post(
         "/api/v1/analytics/query",
@@ -51,7 +60,7 @@ def test_analytics_query_returns_summary_and_tables_when_slots_are_complete(clie
         json={
             "query": "帮我分析一下上个月新疆区域发电量",
             "conversation_id": None,
-            "output_mode": "summary",
+            "output_mode": "full",
             "need_sql_explain": True,
         },
     )
@@ -88,7 +97,7 @@ def test_analytics_query_returns_clarification_when_metric_missing(client: TestC
         json={
             "query": "帮我分析一下上个月的情况",
             "conversation_id": None,
-            "output_mode": "summary",
+            "output_mode": "standard",
             "need_sql_explain": False,
         },
     )
@@ -111,14 +120,14 @@ def test_analytics_run_detail_returns_latest_sql_audit(client: TestClient) -> No
         json={
             "query": "帮我分析一下上个月新疆区域发电量",
             "conversation_id": None,
-            "output_mode": "summary",
+            "output_mode": "full",
             "need_sql_explain": False,
         },
     )
     run_id = submit_response.json()["meta"]["run_id"]
 
     detail_response = client.get(
-        f"/api/v1/analytics/runs/{run_id}",
+        f"/api/v1/analytics/runs/{run_id}?output_mode=full",
         headers=build_auth_headers(user_id=1303, username="analytics_run_user"),
     )
     payload = detail_response.json()
@@ -131,3 +140,58 @@ def test_analytics_run_detail_returns_latest_sql_audit(client: TestClient) -> No
     assert payload["data"]["report_blocks"]
     assert payload["data"]["audit_info"] is not None
     assert payload["data"]["permission_check_result"] is not None
+
+
+def test_analytics_query_supports_tiered_output_modes(client: TestClient) -> None:
+    """lite / standard / full 应返回不同重量级的数据结构。"""
+
+    lite_response = client.post(
+        "/api/v1/analytics/query",
+        headers=build_auth_headers(user_id=1304, username="analytics_lite_user"),
+        json={
+            "query": "帮我分析一下上个月新疆区域发电量",
+            "conversation_id": None,
+            "output_mode": "lite",
+            "need_sql_explain": False,
+        },
+    )
+    standard_response = client.post(
+        "/api/v1/analytics/query",
+        headers=build_auth_headers(user_id=1305, username="analytics_standard_user"),
+        json={
+            "query": "帮我分析一下上个月新疆区域发电量",
+            "conversation_id": None,
+            "output_mode": "standard",
+            "need_sql_explain": False,
+        },
+    )
+    full_response = client.post(
+        "/api/v1/analytics/query",
+        headers=build_auth_headers(user_id=1306, username="analytics_full_user"),
+        json={
+            "query": "帮我分析一下上个月新疆区域发电量",
+            "conversation_id": None,
+            "output_mode": "full",
+            "need_sql_explain": False,
+        },
+    )
+
+    lite_payload = lite_response.json()
+    standard_payload = standard_response.json()
+    full_payload = full_response.json()
+
+    assert lite_response.status_code == 200
+    assert "summary" in lite_payload["data"]
+    assert "chart_spec" not in lite_payload["data"]
+    assert "tables" not in lite_payload["data"]
+
+    assert standard_response.status_code == 200
+    assert standard_payload["data"]["chart_spec"] is not None
+    assert standard_payload["data"]["insight_cards"]
+    assert "tables" not in standard_payload["data"]
+    assert "report_blocks" not in standard_payload["data"]
+
+    assert full_response.status_code == 200
+    assert full_payload["data"]["chart_spec"] is not None
+    assert full_payload["data"]["tables"]
+    assert full_payload["data"]["report_blocks"]

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
 
+from core.common.async_task_runner import reset_async_task_runner
+from core.common.cache import reset_global_cache
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
@@ -22,6 +25,7 @@ from core.repositories.analytics_review_repository import (
     AnalyticsReviewRepository,
     reset_in_memory_analytics_review_store,
 )
+from core.repositories.analytics_result_repository import reset_in_memory_analytics_result_store
 from core.repositories.conversation_repository import ConversationRepository, reset_in_memory_conversation_store
 from core.repositories.data_source_repository import reset_in_memory_data_source_store
 from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_memory_sql_audit_store
@@ -44,6 +48,9 @@ def reset_state() -> None:
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
     reset_in_memory_data_source_store()
+    reset_in_memory_analytics_result_store()
+    reset_async_task_runner()
+    reset_global_cache()
     yield
     reset_in_memory_conversation_store()
     reset_in_memory_task_run_store()
@@ -51,6 +58,9 @@ def reset_state() -> None:
     reset_in_memory_analytics_export_store()
     reset_in_memory_analytics_review_store()
     reset_in_memory_data_source_store()
+    reset_in_memory_analytics_result_store()
+    reset_async_task_runner()
+    reset_global_cache()
 
 
 def build_user_context(
@@ -132,6 +142,29 @@ def build_services(tmp_path: Path) -> tuple[AnalyticsService, AnalyticsExportSer
     return analytics_service, export_service, review_service
 
 
+def wait_for_export_status(
+    export_service: AnalyticsExportService,
+    *,
+    export_id: str,
+    user_context: UserContext,
+    timeout_seconds: float = 2.0,
+) -> dict:
+    """轮询等待导出任务到达终态。"""
+
+    deadline = time.time() + timeout_seconds
+    last_detail: dict | None = None
+    while time.time() < deadline:
+        last_detail = export_service.get_export_detail(
+            export_id=export_id,
+            user_context=user_context,
+        )
+        if last_detail["data"]["status"] in {"succeeded", "failed"}:
+            return last_detail
+        time.sleep(0.05)
+    assert last_detail is not None
+    return last_detail
+
+
 def test_normal_export_does_not_trigger_review(tmp_path: Path) -> None:
     """普通 markdown 导出应直接成功，不触发 review。"""
 
@@ -140,7 +173,7 @@ def test_normal_export_does_not_trigger_review(tmp_path: Path) -> None:
     analytics_result = analytics_service.submit_query(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=user_context,
     )
@@ -151,9 +184,15 @@ def test_normal_export_does_not_trigger_review(tmp_path: Path) -> None:
         user_context=user_context,
     )
 
-    assert export_result["meta"]["status"] == "succeeded"
+    assert export_result["meta"]["status"] == "pending"
     assert export_result["data"]["review_required"] is False
     assert export_result["data"]["review_status"] == "not_required"
+    detail = wait_for_export_status(
+        export_service,
+        export_id=export_result["data"]["export_id"],
+        user_context=user_context,
+    )
+    assert detail["data"]["status"] == "succeeded"
 
 
 def test_high_risk_export_triggers_review_then_can_be_approved(tmp_path: Path) -> None:
@@ -177,7 +216,7 @@ def test_high_risk_export_triggers_review_then_can_be_approved(tmp_path: Path) -
     analytics_result = analytics_service.submit_query(
         query="帮我分析一下上个月新疆区域收入",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=owner_context,
     )
@@ -199,8 +238,14 @@ def test_high_risk_export_triggers_review_then_can_be_approved(tmp_path: Path) -
     )
 
     assert approved_result["data"]["review"]["review_status"] == "approved"
-    assert approved_result["data"]["export"]["status"] == "succeeded"
+    assert approved_result["data"]["export"]["status"] in {"pending", "running"}
     assert approved_result["data"]["export"]["review_status"] == "approved"
+    detail = wait_for_export_status(
+        export_service,
+        export_id=export_result["data"]["export_id"],
+        user_context=owner_context,
+    )
+    assert detail["data"]["status"] == "succeeded"
 
 
 def test_high_risk_export_can_be_rejected(tmp_path: Path) -> None:
@@ -224,7 +269,7 @@ def test_high_risk_export_can_be_rejected(tmp_path: Path) -> None:
     analytics_result = analytics_service.submit_query(
         query="帮我分析一下上个月新疆区域收入",
         conversation_id=None,
-        output_mode="summary",
+        output_mode="full",
         need_sql_explain=False,
         user_context=owner_context,
     )

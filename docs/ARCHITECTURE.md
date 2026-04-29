@@ -1406,6 +1406,14 @@ sequenceDiagram
 
 ### 17.3 经营分析流程（MCP SQL）
 
+> **V1 性能优化说明**：经营分析主链路已完成性能优化，核心变更包括：
+> - output_snapshot 轻量化：重内容单独存储到 analytics_result_repository，轻快照保留在 task_run.output_snapshot；
+> - analytics_results 持久化：重结果优先落 PostgreSQL `analytics_results` 表，本地无库时回退到内存仓储；
+> - query 响应分级：支持 lite / standard / full 三级输出，默认 lite；
+> - export 真异步化：POST 只创建任务返回 export_id，后台 AsyncTaskRunner 异步渲染；
+> - insight / report 延迟生成：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
+> - registry / schema / cache 常驻缓存：高频只读对象通过 RegistryCache 进程内缓存。
+
 ```mermaid
 sequenceDiagram
     participant User as 用户
@@ -1417,8 +1425,9 @@ sequenceDiagram
     participant MCP as SQL MCP 服务
     participant DB as 业务数据库
     participant Trace as 审计服务
+    participant ResultRepo as 结果仓储
 
-    User->>API: 输入经营分析问题
+    User->>API: 输入经营分析问题(output_mode=lite)
     API->>APP: 调用 AnalyticsService
     APP->>Control: 创建分析任务
     Control->>Analytics: 路由到经营分析专家
@@ -1428,9 +1437,11 @@ sequenceDiagram
     DB-->>MCP: 返回查询结果
     MCP-->>Fabric: 返回标准化结果
     Fabric-->>Analytics: 返回数据与口径信息
-    Analytics-->>Control: 生成分析结论与报告草稿
-    Control->>Trace: 记录 SQL Audit / MCP Trace
-    Control-->>APP: 返回分析结果
+    Analytics->>Analytics: 按 output_mode 延迟生成 insight/report
+    Analytics->>ResultRepo: 重内容写入 analytics_result_repository / analytics_results
+    Analytics->>Control: 轻快照写入 output_snapshot
+    Control->>Trace: 记录 SQL Audit / MCP Trace / timing_breakdown
+    Control-->>APP: 按 output_mode 返回分级视图
     APP-->>API: 返回响应
 ```
 
@@ -1928,8 +1939,10 @@ GET /api/v1/contracts/reviews/{review_id}
 ### 20.7 经营分析
 
 ```http
-POST /api/v1/analytics/query
-POST /api/v1/analytics/explain-sql
+POST /api/v1/analytics/query?output_mode=lite|standard|full
+GET  /api/v1/analytics/runs/{run_id}?output_mode=full
+POST /api/v1/analytics/runs/{run_id}/export
+GET  /api/v1/analytics/exports/{export_id}
 ```
 
 ### 20.8 报告生成

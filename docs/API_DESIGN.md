@@ -621,6 +621,16 @@ GET /api/v1/contracts/reviews/{run_id}
 
 ## 12. 经营分析接口
 
+### 12.0 V1 性能优化说明
+
+经营分析接口已完成 V1 性能优化，核心变更：
+
+1. **output_snapshot 轻量化**：重内容（tables / insight_cards / report_blocks / chart_spec）不再写入 task_run.output_snapshot，单独存储到 analytics_result_repository；
+2. **query 响应分级**：正式支持 output_mode = lite / standard / full，默认 lite；
+3. **export 真异步化**：POST export 只创建任务并返回 export_id，后台异步处理，GET 轮询读取状态；
+4. **insight / report 延迟生成**：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
+5. **registry / schema / cache 常驻缓存**：高频只读对象通过 RegistryCache 进程内缓存。
+
 ## 12.1 提交经营分析请求
 
 ```http
@@ -633,12 +643,25 @@ POST /api/v1/analytics/query
 {
   "query": "帮我分析一下上个月新疆区域发电量",
   "conversation_id": null,
-  "output_mode": "summary",
+  "output_mode": "lite",
   "need_sql_explain": false
 }
 ```
 
-### 响应：直接返回结果
+### output_mode 说明
+
+| output_mode | 返回内容 | 适用场景 |
+|---|---|---|
+| lite | summary、row_count、latency_ms、run_id、trace_id、metric_scope、data_source、compare_target、group_by | 主查询默认返回，减少 payload |
+| standard | 在 lite 基础上增加 sql_preview、chart_spec、insight_cards、masked_fields、effective_filters、governance_decision | 前端需要图表和洞察卡片 |
+| full | 在 standard 基础上增加 tables、report_blocks、sql_explain、safety_check_result、permission_check_result、data_scope_result、audit_info、timing_breakdown | 详情页、导出等需要完整数据 |
+
+兼容性说明：
+
+- 旧参数 `summary` / `default` 仍然保留为向后兼容别名，服务端内部会按 `standard` 处理；
+- 新接入方应优先使用正式枚举值：`lite / standard / full`。
+
+### 响应：lite 模式
 
 ```json
 {
@@ -646,23 +669,20 @@ POST /api/v1/analytics/query
   "trace_id": "tr_050",
   "request_id": "req_050",
   "data": {
+    "run_id": "run_200",
+    "trace_id": "tr_050",
     "summary": "上个月新疆区域发电量环比增长 8.2%",
-    "tables": [
-      {
-        "name": "main_result",
-        "columns": ["区域", "发电量", "环比"],
-        "rows": [
-          ["新疆区域", 123456, "8.2%"]
-        ]
-      }
-    ],
-    "sql_explain": null
+    "row_count": 1,
+    "latency_ms": 120,
+    "metric_scope": "发电量",
+    "data_source": "local_analytics",
+    "compare_target": null,
+    "group_by": null
   },
   "meta": {
     "conversation_id": "conv_200",
     "run_id": "run_200",
     "status": "succeeded",
-    "sub_status": "running_sql",
     "is_async": false
   }
 }
@@ -695,7 +715,134 @@ POST /api/v1/analytics/query
 ## 12.2 查询经营分析任务详情
 
 ```http
-GET /api/v1/analytics/runs/{run_id}
+GET /api/v1/analytics/runs/{run_id}?output_mode=full
+```
+
+### output_mode 参数
+
+与 query 接口一致，默认 full（向后兼容）。
+
+## 12.3 创建经营分析导出任务
+
+```http
+POST /api/v1/analytics/runs/{run_id}/export
+```
+
+### 请求体
+
+```json
+{
+  "export_type": "markdown",
+  "export_template": "weekly_report"
+}
+```
+
+### 响应：异步任务已创建
+
+```json
+{
+  "success": true,
+  "trace_id": "tr_055",
+  "request_id": "req_055",
+  "data": {
+    "export_id": "exp_abc123",
+    "run_id": "run_200",
+    "export_type": "markdown",
+    "export_template": "weekly_report",
+    "status": "pending",
+    "review_required": false,
+    "review_status": "not_required",
+    "filename": null,
+    "artifact_path": null,
+    "created_at": "2026-04-29T10:00:00+08:00",
+    "finished_at": null,
+    "metadata": {},
+    "governance_decision": {}
+  },
+  "meta": {
+    "run_id": "run_200",
+    "status": "pending",
+    "is_async": true,
+    "need_human_review": false
+  }
+}
+```
+
+### 响应：需要人工审核
+
+```json
+{
+  "success": true,
+  "data": {
+    "export_id": "exp_def456",
+    "status": "awaiting_human_review",
+    "review_required": true,
+    "review_status": "pending"
+  },
+  "meta": {
+    "run_id": "run_200",
+    "review_id": "rev_001",
+    "status": "awaiting_human_review",
+    "is_async": true,
+    "need_human_review": true
+  }
+}
+```
+
+## 12.4 查询导出任务详情
+
+```http
+GET /api/v1/analytics/exports/{export_id}
+```
+
+说明：
+
+- `POST /api/v1/analytics/runs/{run_id}/export` 只负责创建导出任务；
+- 真正的渲染在后台 `AsyncTaskRunner` 中执行；
+- 前端或调用方应通过 `GET /api/v1/analytics/exports/{export_id}` 轮询状态，直到进入 `succeeded / failed` 终态。
+
+### 响应：导出进行中
+
+```json
+{
+  "success": true,
+  "data": {
+    "export_id": "exp_abc123",
+    "status": "running",
+    "filename": null,
+    "finished_at": null
+  },
+  "meta": {
+    "run_id": "run_200",
+    "status": "running",
+    "is_async": true
+  }
+}
+```
+
+### 响应：导出完成
+
+```json
+{
+  "success": true,
+  "data": {
+    "export_id": "exp_abc123",
+    "status": "succeeded",
+    "filename": "analytics_run_200_weekly_report.md",
+    "artifact_path": "/storage/exports/exp_abc123.md",
+    "content_preview": "# 经营分析周报\n\n...",
+    "finished_at": "2026-04-29T10:00:05+08:00",
+    "metadata": {
+      "export_render_ms": 3200.5,
+      "server_mode": "inprocess_report_mcp_server"
+    }
+  },
+  "meta": {
+    "run_id": "run_200",
+    "status": "succeeded",
+    "is_async": true
+  }
+}
 ```
 
 ---

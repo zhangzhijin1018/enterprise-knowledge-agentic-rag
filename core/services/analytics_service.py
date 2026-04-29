@@ -9,24 +9,27 @@
 -> 满足最小条件后构造 schema-aware SQL
 -> SQL Guard 做安全检查与治理
 -> 通过 SQL Gateway / SQL MCP-compatible server 执行只读查询
--> 生成最小业务解释、图表描述、洞察卡片
+-> 按 output_mode 分级生成结果（lite / standard / full）
 -> 记录 SQL Audit
 
-关键设计原则：
-1. router 只收参与返回，业务编排都在这里；
-2. 不能跳过槽位化直接自由生成 SQL；
-3. 不能跳过 SQL Guard；
-4. 不能只执行不审计；
-5. 权限、数据源治理、表白名单等基础治理必须在这里显式落点。
+V1 性能优化要点：
+1. output_snapshot 轻量化：重内容拆到 analytics_result_repository，轻快照只保留摘要；
+2. query 响应分级：lite / standard / full 三种输出模式，默认 lite；
+3. insight / report 延迟生成：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
+4. 统一结果对象：AnalyticsResult 作为唯一结果载体，减少重复拷贝；
+5. 可观测性增强：记录关键阶段耗时到 timing_breakdown；
+6. registry/schema 缓存：高频只读对象通过 RegistryCache 常驻缓存。
 """
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
+from core.analytics.analytics_result_model import AnalyticsResult
 from core.analytics.data_masking import DataMaskingResult, DataMaskingService
 from core.analytics.data_source_registry import DataSourceRegistry
 from core.analytics.insight_builder import InsightBuilder
@@ -34,14 +37,19 @@ from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.report_formatter import ReportFormatter
 from core.analytics.schema_registry import SchemaRegistry
 from core.common import error_codes
+from core.common.cache import RegistryCache, get_global_cache
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
+from core.repositories.analytics_result_repository import AnalyticsResultRepository
 from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
 from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 from core.tools.sql.sql_gateway import SQLGateway
+
+VALID_OUTPUT_MODES = {"lite", "standard", "full"}
+DEFAULT_OUTPUT_MODE = "lite"
 
 
 class AnalyticsService:
@@ -62,6 +70,8 @@ class AnalyticsService:
         data_masking_service: DataMaskingService | None = None,
         insight_builder: InsightBuilder | None = None,
         report_formatter: ReportFormatter | None = None,
+        analytics_result_repository: AnalyticsResultRepository | None = None,
+        registry_cache: RegistryCache | None = None,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -76,6 +86,8 @@ class AnalyticsService:
         self.data_masking_service = data_masking_service or DataMaskingService()
         self.insight_builder = insight_builder or InsightBuilder()
         self.report_formatter = report_formatter or ReportFormatter()
+        self.analytics_result_repository = analytics_result_repository or AnalyticsResultRepository()
+        self.registry_cache = registry_cache or get_global_cache()
 
     def submit_query(
         self,
@@ -97,6 +109,8 @@ class AnalyticsService:
                 detail={},
             )
 
+        normalized_output_mode = self._normalize_output_mode(output_mode)
+
         conversation = self._get_or_create_conversation(
             conversation_id=conversation_id,
             query=normalized_query,
@@ -110,7 +124,7 @@ class AnalyticsService:
             message_type="analytics_query",
             content=normalized_query,
             related_run_id=None,
-            structured_content={"output_mode": output_mode},
+            structured_content={"output_mode": normalized_output_mode},
         )
 
         plan = self.analytics_planner.plan(
@@ -127,7 +141,7 @@ class AnalyticsService:
             sub_status="planning_query",
             input_snapshot={
                 "query": normalized_query,
-                "output_mode": output_mode,
+                "output_mode": normalized_output_mode,
                 "need_sql_explain": need_sql_explain,
                 "planner_slots": plan.slots,
                 "planning_source": plan.planning_source,
@@ -165,12 +179,19 @@ class AnalyticsService:
             conversation_id=conversation["conversation_id"],
             task_run=task_run,
             plan=plan,
+            output_mode=normalized_output_mode,
             need_sql_explain=need_sql_explain,
             user_context=user_context,
         )
 
-    def get_run_detail(self, *, run_id: str, user_context: UserContext) -> dict:
-        """读取经营分析运行详情。"""
+    def get_run_detail(self, *, run_id: str, output_mode: str = "full", user_context: UserContext) -> dict:
+        """读取经营分析运行详情。
+
+        支持 output_mode 分级返回：
+        - lite：summary、row_count、latency_ms、run_id、trace_id
+        - standard：在 lite 基础上增加 chart_spec、insight_cards
+        - full：在 standard 基础上增加 tables、report_blocks、完整治理信息
+        """
 
         task_run = self.task_run_repository.get_task_run(run_id)
         if task_run is None or task_run["task_type"] != "analytics":
@@ -202,42 +223,65 @@ class AnalyticsService:
                 },
             )
 
-        slot_snapshot = self.task_run_repository.get_slot_snapshot(run_id) or {}
-        latest_sql_audit = self.sql_audit_repository.get_latest_by_run_id(run_id)
+        normalized_output_mode = self._normalize_output_mode(output_mode)
         output_snapshot = task_run.get("output_snapshot") or {}
-        return {
-            "data": {
-                "run_id": task_run["run_id"],
-                "conversation_id": task_run["conversation_id"],
-                "task_type": task_run["task_type"],
-                "route": task_run["route"],
-                "status": task_run["status"],
-                "sub_status": task_run["sub_status"],
-                "trace_id": task_run["trace_id"],
+        heavy_result = self.analytics_result_repository.get_heavy_result(run_id)
+
+        base_data = {
+            "run_id": task_run["run_id"],
+            "conversation_id": task_run["conversation_id"],
+            "task_type": task_run["task_type"],
+            "route": task_run["route"],
+            "status": task_run["status"],
+            "sub_status": task_run["sub_status"],
+            "trace_id": task_run["trace_id"],
+            "summary": output_snapshot.get("summary"),
+            "row_count": output_snapshot.get("row_count"),
+            "latency_ms": output_snapshot.get("latency_ms"),
+            "metric_scope": output_snapshot.get("metric_scope"),
+            "data_source": output_snapshot.get("data_source"),
+            "compare_target": output_snapshot.get("compare_target"),
+            "group_by": output_snapshot.get("group_by"),
+        }
+
+        if normalized_output_mode == "lite":
+            data = base_data
+        elif normalized_output_mode == "standard":
+            base_data.update({
+                "sql_preview": output_snapshot.get("sql_preview"),
+                "chart_spec": heavy_result.get("chart_spec") if heavy_result else None,
+                "insight_cards": heavy_result.get("insight_cards", []) if heavy_result else [],
+                "masked_fields": heavy_result.get("masked_fields", []) if heavy_result else [],
+                "effective_filters": heavy_result.get("effective_filters", {}) if heavy_result else {},
+                "governance_decision": output_snapshot.get("governance_decision"),
+            })
+            data = base_data
+        else:
+            slot_snapshot = self.task_run_repository.get_slot_snapshot(run_id) or {}
+            latest_sql_audit = self.sql_audit_repository.get_latest_by_run_id(run_id)
+            base_data.update({
                 "slots": slot_snapshot.get("collected_slots", {}),
                 "latest_sql_audit": latest_sql_audit,
                 "output_snapshot": output_snapshot,
-                "summary": output_snapshot.get("summary"),
-                "tables": output_snapshot.get("tables", []),
-                "sql_explain": output_snapshot.get("sql_explain"),
                 "sql_preview": output_snapshot.get("sql_preview"),
-                "safety_check_result": output_snapshot.get("safety_check_result"),
-                "metric_scope": output_snapshot.get("metric_scope"),
-                "data_source": output_snapshot.get("data_source"),
-                "row_count": output_snapshot.get("row_count"),
-                "latency_ms": output_snapshot.get("latency_ms"),
-                "compare_target": output_snapshot.get("compare_target"),
-                "group_by": output_snapshot.get("group_by"),
-                "chart_spec": output_snapshot.get("chart_spec"),
-                "insight_cards": output_snapshot.get("insight_cards", []),
-                "report_blocks": output_snapshot.get("report_blocks", []),
-                "audit_info": output_snapshot.get("audit_info"),
-                "permission_check_result": output_snapshot.get("permission_check_result"),
-                "data_scope_result": output_snapshot.get("data_scope_result"),
-                "masked_fields": output_snapshot.get("masked_fields", []),
-                "effective_filters": output_snapshot.get("effective_filters", {}),
+                "sql_explain": heavy_result.get("sql_explain") if heavy_result else None,
+                "safety_check_result": heavy_result.get("safety_check_result") if heavy_result else None,
+                "chart_spec": heavy_result.get("chart_spec") if heavy_result else None,
+                "insight_cards": heavy_result.get("insight_cards", []) if heavy_result else [],
+                "report_blocks": heavy_result.get("report_blocks", []) if heavy_result else [],
+                "tables": heavy_result.get("tables", []) if heavy_result else [],
+                "audit_info": heavy_result.get("audit_info") if heavy_result else None,
+                "permission_check_result": heavy_result.get("permission_check_result") if heavy_result else None,
+                "data_scope_result": heavy_result.get("data_scope_result") if heavy_result else None,
+                "masked_fields": heavy_result.get("masked_fields", []) if heavy_result else [],
+                "effective_filters": heavy_result.get("effective_filters", {}) if heavy_result else {},
                 "governance_decision": output_snapshot.get("governance_decision"),
-            },
+                "timing_breakdown": heavy_result.get("timing_breakdown", {}) if heavy_result else {},
+            })
+            data = base_data
+
+        return {
+            "data": data,
             "meta": build_response_meta(
                 conversation_id=task_run["conversation_id"],
                 run_id=task_run["run_id"],
@@ -246,6 +290,16 @@ class AnalyticsService:
                 is_async=False,
             ),
         }
+
+    def _normalize_output_mode(self, output_mode: str) -> str:
+        """标准化 output_mode，向后兼容。"""
+
+        normalized = (output_mode or "").strip().lower()
+        if normalized in VALID_OUTPUT_MODES:
+            return normalized
+        if normalized in {"summary", "default"}:
+            return "standard"
+        return DEFAULT_OUTPUT_MODE
 
     def _build_clarification_response(
         self,
@@ -352,12 +406,21 @@ class AnalyticsService:
         conversation_id: str,
         task_run: dict,
         plan: AnalyticsPlan,
+        output_mode: str,
         need_sql_explain: bool,
         user_context: UserContext,
     ) -> dict:
-        """执行经营分析主链路。"""
+        """执行经营分析主链路。
 
-        metric_definition = self.metric_catalog.resolve_metric(plan.slots.get("metric"))
+        V1 性能优化：
+        1. 按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
+        2. 轻快照写入 output_snapshot，重内容写入 analytics_result_repository；
+        3. 记录关键阶段耗时到 timing_breakdown。
+        """
+
+        timing: dict[str, float] = {}
+
+        metric_definition = self._get_cached_metric(plan.slots.get("metric"))
         if metric_definition is None:
             raise AppException(
                 error_code=error_codes.ANALYTICS_QUERY_FAILED,
@@ -376,11 +439,6 @@ class AnalyticsService:
             data_source=data_source_definition.key,
         )
 
-        # 治理前置说明：
-        # - 指标级权限决定“这个人能不能看这个业务指标”；
-        # - 数据源级权限决定“这个人能不能访问这类数据库/数仓”；
-        # - 表白名单 / 字段白名单决定“即使生成了 SQL，也只能落到受控物理范围”。
-        # 这些校验必须在真正执行 SQL 之前完成，不能等查完再补救。
         permission_check_result = self._assert_metric_permission(
             metric_definition=metric_definition,
             user_context=user_context,
@@ -396,6 +454,8 @@ class AnalyticsService:
         )
 
         try:
+            t0 = time.monotonic()
+
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 sub_status="building_sql",
@@ -409,17 +469,20 @@ class AnalyticsService:
                 plan.slots,
                 department_code=user_context.department_code,
             )
+            timing["sql_build_ms"] = round((time.monotonic() - t0) * 1000, 1)
 
+            t1 = time.monotonic()
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 sub_status="checking_sql",
             )
             guard_result = self.sql_guard.validate(
                 sql_bundle["generated_sql"],
-                allowed_tables=self.schema_registry.get_allowed_tables(data_source=sql_bundle["data_source"]),
+                allowed_tables=self._get_cached_allowed_tables(sql_bundle["data_source"]),
                 required_filter_column=table_definition.department_filter_column,
                 required_filter_value=user_context.department_code if table_definition.department_filter_column else None,
             )
+            timing["sql_guard_ms"] = round((time.monotonic() - t1) * 1000, 1)
 
             if not guard_result.is_safe or not guard_result.checked_sql:
                 blocked_audit = self.sql_audit_repository.create_audit(
@@ -458,6 +521,7 @@ class AnalyticsService:
                     },
                 )
 
+            t2 = time.monotonic()
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 status="executing",
@@ -477,6 +541,7 @@ class AnalyticsService:
                     },
                 )
             )
+            timing["sql_execute_ms"] = round((time.monotonic() - t2) * 1000, 1)
 
             audit_record = self.sql_audit_repository.create_audit(
                 run_id=task_run["run_id"],
@@ -500,6 +565,7 @@ class AnalyticsService:
                 },
             )
 
+            t3 = time.monotonic()
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 sub_status="explaining_result",
@@ -507,28 +573,24 @@ class AnalyticsService:
             masking_result = self.data_masking_service.apply(
                 rows=execution_result.rows,
                 columns=execution_result.columns,
-                visible_fields=self.schema_registry.get_table_visible_fields(
+                visible_fields=self._get_cached_visible_fields(
                     table_name=table_definition.name,
                     data_source=execution_result.data_source,
                 ),
-                sensitive_fields=self.schema_registry.get_table_sensitive_fields(
+                sensitive_fields=self._get_cached_sensitive_fields(
                     table_name=table_definition.name,
                     data_source=execution_result.data_source,
                 ),
-                masked_fields=self.schema_registry.get_table_masked_fields(
+                masked_fields=self._get_cached_masked_fields(
                     table_name=table_definition.name,
                     data_source=execution_result.data_source,
                 ),
                 user_permissions=user_context.permissions,
             )
+            timing["masking_ms"] = round((time.monotonic() - t3) * 1000, 1)
+
             summary = self._build_summary(plan.slots, execution_result)
-            tables = [
-                {
-                    "name": "main_result",
-                    "columns": masking_result.columns,
-                    "rows": [list(row.values()) for row in masking_result.rows],
-                }
-            ]
+
             sql_explain = None
             if need_sql_explain:
                 sql_explain = (
@@ -539,16 +601,6 @@ class AnalyticsService:
                     f"data_source={execution_result.data_source}。"
                 )
 
-            chart_spec = self._build_chart_spec(
-                slots=plan.slots,
-                execution_result=execution_result,
-                metric_name=plan.slots["metric"],
-            )
-            insight_cards = self.insight_builder.build(
-                slots=plan.slots,
-                rows=masking_result.rows,
-                row_count=execution_result.row_count,
-            )
             effective_filters = sql_bundle["builder_metadata"].get("effective_filters", {})
             governance_decision = {
                 "permission_check_result": permission_check_result,
@@ -567,62 +619,108 @@ class AnalyticsService:
                 effective_filters=effective_filters,
                 guard_result=guard_result,
             )
-            report_blocks = self.report_formatter.build(
-                summary=summary,
-                insight_cards=insight_cards,
-                tables=tables,
-                chart_spec=chart_spec,
-                governance_note={
-                    "audit_info": audit_info,
-                    "permission_check_result": permission_check_result,
-                    "data_scope_result": data_scope_result,
-                    "masked_fields": masking_result.masked_fields,
-                    "effective_filters": effective_filters,
-                    "governance_action": masking_result.governance_decision,
-                },
-            )
 
-            output_snapshot = {
-                "summary": summary,
-                "tables": tables,
-                "sql_explain": sql_explain,
-                "sql_preview": guard_result.checked_sql,
-                "safety_check_result": {
+            # 按 output_mode 延迟生成 chart_spec / insight_cards / report_blocks
+            chart_spec = None
+            insight_cards: list[dict] = []
+            report_blocks: list[dict] = []
+
+            if output_mode in {"standard", "full"}:
+                t4 = time.monotonic()
+                chart_spec = self._build_chart_spec(
+                    slots=plan.slots,
+                    execution_result=execution_result,
+                    metric_name=plan.slots["metric"],
+                )
+                insight_cards = self.insight_builder.build(
+                    slots=plan.slots,
+                    rows=masking_result.rows,
+                    row_count=execution_result.row_count,
+                )
+                timing["insight_ms"] = round((time.monotonic() - t4) * 1000, 1)
+
+            if output_mode == "full":
+                t5 = time.monotonic()
+                report_blocks = self.report_formatter.build(
+                    summary=summary,
+                    insight_cards=insight_cards,
+                    tables=[
+                        {
+                            "name": "main_result",
+                            "columns": masking_result.columns,
+                            "rows": [list(row.values()) for row in masking_result.rows],
+                        }
+                    ],
+                    chart_spec=chart_spec,
+                    governance_note={
+                        "audit_info": audit_info,
+                        "permission_check_result": permission_check_result,
+                        "data_scope_result": data_scope_result,
+                        "masked_fields": masking_result.masked_fields,
+                        "effective_filters": effective_filters,
+                        "governance_action": masking_result.governance_decision,
+                    },
+                )
+                timing["report_ms"] = round((time.monotonic() - t5) * 1000, 1)
+
+            # 构造统一结果对象
+            analytics_result = AnalyticsResult(
+                run_id=task_run["run_id"],
+                trace_id=task_run["trace_id"],
+                summary=summary,
+                sql_preview=guard_result.checked_sql,
+                row_count=execution_result.row_count,
+                latency_ms=execution_result.latency_ms,
+                data_source=execution_result.data_source,
+                metric_scope=sql_bundle["metric_scope"],
+                compare_target=plan.slots.get("compare_target"),
+                group_by=plan.slots.get("group_by"),
+                slots=plan.slots,
+                planning_source=plan.planning_source,
+                columns=execution_result.columns,
+                rows=execution_result.rows,
+                masked_columns=masking_result.columns,
+                masked_rows=masking_result.rows,
+                visible_fields=masking_result.visible_fields,
+                sensitive_fields=masking_result.sensitive_fields,
+                masked_fields=masking_result.masked_fields,
+                hidden_fields=masking_result.hidden_fields,
+                governance_decision=masking_result.governance_decision,
+                chart_spec=chart_spec,
+                insight_cards=insight_cards,
+                report_blocks=report_blocks,
+                safety_check_result={
                     "is_safe": guard_result.is_safe,
                     "blocked_reason": guard_result.blocked_reason,
-                    "table_whitelist": self.schema_registry.get_allowed_tables(
-                        data_source=sql_bundle["data_source"]
-                    ),
-                    "field_whitelist_reserved": self.schema_registry.get_table_field_whitelist(
+                    "table_whitelist": self._get_cached_allowed_tables(sql_bundle["data_source"]),
+                    "field_whitelist_reserved": self._get_cached_field_whitelist(
                         table_name=metric_definition.table_name,
                         data_source=sql_bundle["data_source"],
                     ),
                     "governance_detail": guard_result.governance_detail,
                 },
-                "metric_scope": sql_bundle["metric_scope"],
-                "data_source": execution_result.data_source,
-                "row_count": execution_result.row_count,
-                "latency_ms": execution_result.latency_ms,
-                "compare_target": plan.slots.get("compare_target"),
-                "group_by": plan.slots.get("group_by"),
-                "chart_spec": chart_spec,
-                "insight_cards": insight_cards,
-                "report_blocks": report_blocks,
-                "audit_info": audit_info,
-                "permission_check_result": permission_check_result,
-                "data_scope_result": data_scope_result,
-                "masked_fields": masking_result.masked_fields,
-                "effective_filters": effective_filters,
-                "governance_decision": governance_decision,
-                "slots": plan.slots,
-                "planning_source": plan.planning_source,
-            }
+                permission_check_result=permission_check_result,
+                data_scope_result=data_scope_result,
+                effective_filters=effective_filters,
+                audit_info=audit_info,
+                sql_explain=sql_explain,
+                timing_breakdown=timing,
+            )
+
+            # 轻快照写入 output_snapshot
+            lightweight_snapshot = analytics_result.to_lightweight_snapshot()
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 status="succeeded",
                 sub_status="explaining_result",
-                output_snapshot=output_snapshot,
+                output_snapshot=lightweight_snapshot,
                 finished_at=datetime.now(timezone.utc),
+            )
+
+            # 重内容写入 analytics_result_repository
+            self.analytics_result_repository.save_heavy_result(
+                run_id=task_run["run_id"],
+                heavy_result=analytics_result.to_heavy_result(),
             )
 
             self.conversation_repository.add_message(
@@ -632,8 +730,6 @@ class AnalyticsService:
                 content=summary,
                 related_run_id=task_run["run_id"],
                 structured_content={
-                    "tables": tables,
-                    "sql_explain": sql_explain,
                     "sql_preview": guard_result.checked_sql,
                     "chart_spec": chart_spec,
                 },
@@ -653,29 +749,16 @@ class AnalyticsService:
                 },
             )
 
+            # 按 output_mode 返回分级视图
+            if output_mode == "lite":
+                response_data = analytics_result.to_lite_view()
+            elif output_mode == "standard":
+                response_data = analytics_result.to_standard_view()
+            else:
+                response_data = analytics_result.to_full_view()
+
             return {
-                "data": {
-                    "summary": summary,
-                    "tables": tables,
-                    "sql_explain": sql_explain,
-                    "sql_preview": guard_result.checked_sql,
-                    "safety_check_result": output_snapshot["safety_check_result"],
-                    "metric_scope": sql_bundle["metric_scope"],
-                    "data_source": execution_result.data_source,
-                    "row_count": execution_result.row_count,
-                    "latency_ms": execution_result.latency_ms,
-                    "compare_target": plan.slots.get("compare_target"),
-                    "group_by": plan.slots.get("group_by"),
-                    "chart_spec": chart_spec,
-                    "insight_cards": insight_cards,
-                    "report_blocks": report_blocks,
-                    "audit_info": audit_info,
-                    "permission_check_result": permission_check_result,
-                    "data_scope_result": data_scope_result,
-                    "masked_fields": masking_result.masked_fields,
-                    "effective_filters": effective_filters,
-                    "governance_decision": governance_decision,
-                },
+                "data": response_data,
                 "meta": build_response_meta(
                     conversation_id=conversation_id,
                     run_id=task_run["run_id"],
@@ -720,19 +803,62 @@ class AnalyticsService:
                 detail={"reason": str(exc)},
             ) from exc
 
+    def _get_cached_metric(self, metric_name: str | None):
+        """通过缓存获取指标定义。"""
+
+        cache_key = f"metric:{metric_name}"
+        return self.registry_cache.get_or_compute(
+            cache_key,
+            lambda: self.metric_catalog.resolve_metric(metric_name),
+        )
+
+    def _get_cached_allowed_tables(self, data_source: str) -> list[str]:
+        """通过缓存获取表白名单。"""
+
+        cache_key = f"allowed_tables:{data_source}"
+        return self.registry_cache.get_or_compute(
+            cache_key,
+            lambda: self.schema_registry.get_allowed_tables(data_source=data_source),
+        )
+
+    def _get_cached_visible_fields(self, table_name: str, data_source: str) -> list[str]:
+        """通过缓存获取可见字段。"""
+
+        cache_key = f"visible_fields:{data_source}:{table_name}"
+        return self.registry_cache.get_or_compute(
+            cache_key,
+            lambda: self.schema_registry.get_table_visible_fields(table_name=table_name, data_source=data_source),
+        )
+
+    def _get_cached_sensitive_fields(self, table_name: str, data_source: str) -> list[str]:
+        """通过缓存获取敏感字段。"""
+
+        cache_key = f"sensitive_fields:{data_source}:{table_name}"
+        return self.registry_cache.get_or_compute(
+            cache_key,
+            lambda: self.schema_registry.get_table_sensitive_fields(table_name=table_name, data_source=data_source),
+        )
+
+    def _get_cached_masked_fields(self, table_name: str, data_source: str) -> list[str]:
+        """通过缓存获取脱敏字段。"""
+
+        cache_key = f"masked_fields:{data_source}:{table_name}"
+        return self.registry_cache.get_or_compute(
+            cache_key,
+            lambda: self.schema_registry.get_table_masked_fields(table_name=table_name, data_source=data_source),
+        )
+
+    def _get_cached_field_whitelist(self, table_name: str, data_source: str) -> list[str]:
+        """通过缓存获取字段白名单。"""
+
+        cache_key = f"field_whitelist:{data_source}:{table_name}"
+        return self.registry_cache.get_or_compute(
+            cache_key,
+            lambda: self.schema_registry.get_table_field_whitelist(table_name=table_name, data_source=data_source),
+        )
+
     def _assert_metric_permission(self, *, metric_definition, user_context: UserContext) -> dict:
-        """执行最小指标级权限校验。
-
-        当前阶段先采用“指标定义声明权限 + 用户上下文显式权限集合”的简单模型：
-        - required_permissions 决定“查这个指标至少需要哪些权限”；
-        - allowed_roles 决定“哪些角色默认允许访问这个指标”；
-        - allowed_departments 决定“哪些部门允许访问这个指标”。
-
-        经营分析不能默认所有指标都可查：
-        - 发电量、产量通常属于一般经营指标；
-        - 收入、成本、利润往往更敏感；
-        - 因此必须把 metric 级治理做成显式结构，而不是靠前端按钮控制。
-        """
+        """执行最小指标级权限校验。"""
 
         required_permissions = metric_definition.required_permissions or ["analytics:query"]
         if not self._has_all_permissions(user_context.permissions, required_permissions):
@@ -785,13 +911,7 @@ class AnalyticsService:
         }
 
     def _assert_data_source_permission(self, *, data_source_definition, user_context: UserContext) -> dict:
-        """执行最小数据源级权限校验。
-
-        为什么经营分析必须做数据源级治理：
-        - 同一个系统未来会接多个库、多个数仓、多个权限域；
-        - 即使指标相同，不同数据源的敏感级别和可见范围也可能完全不同；
-        - 所以不能只判断“是不是经营分析用户”，还要判断“能不能访问这个 data_source”。
-        """
+        """执行最小数据源级权限校验。"""
 
         required_permissions = data_source_definition.required_permissions
         if required_permissions and not self._has_all_permissions(
@@ -874,7 +994,7 @@ class AnalyticsService:
 
         scope_text = org_scope["value"] if org_scope else "全部范围"
         if not rows:
-            return f"在{time_label}的{scope_text}范围内，未查询到与“{metric}”相关的数据。"
+            return f'在{time_label}的{scope_text}范围内，未查询到与"{metric}"相关的数据。'
 
         if slots.get("compare_target") in {"mom", "yoy"} and group_by not in {"region", "station", "month"}:
             current_value = rows[0].get("current_value")
@@ -888,7 +1008,7 @@ class AnalyticsService:
         if group_by in {"region", "station", "month"}:
             analysis_name = "趋势" if group_by == "month" else "排名"
             return (
-                f"已完成“{metric}”在{time_label}范围内的{analysis_name}查询，"
+                f'已完成"{metric}"在{time_label}范围内的{analysis_name}查询，'
                 f"当前返回 {execution_result.row_count} 行结果，可继续做对比或下钻分析。"
             )
 
@@ -896,12 +1016,7 @@ class AnalyticsService:
         return f"{time_label}{scope_text}的{metric}汇总值为 {total_value}。"
 
     def _build_chart_spec(self, *, slots: dict, execution_result, metric_name: str) -> dict | None:
-        """生成前端可直接消费的最小图表描述。
-
-        当前阶段不生成真实图片，而是返回结构化 chart_spec：
-        - 前端可以按 type / x_field / y_field / title 直接渲染；
-        - 后续如果要接更复杂 BI 图层，也能继续沿用这层描述。
-        """
+        """生成前端可直接消费的最小图表描述。"""
 
         rows = execution_result.rows
         if not rows:

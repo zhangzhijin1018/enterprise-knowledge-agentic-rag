@@ -535,6 +535,14 @@ flowchart TD
 
 ## 9. 核心工作流三：经营分析工作流
 
+> **V1 性能优化说明**：经营分析工作流已完成性能优化，核心变更包括：
+> - output_snapshot 轻量化：重内容单独存储到 analytics_result_repository，轻快照保留在 task_run.output_snapshot；
+> - analytics_results 持久化：重结果优先落 PostgreSQL `analytics_results` 表，本地无库时回退到内存仓储；
+> - query 响应分级：支持 lite / standard / full 三级输出，默认 lite；
+> - export 真异步化：POST 只创建任务返回 export_id，后台 AsyncTaskRunner 异步渲染；
+> - insight / report 延迟生成：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
+> - registry / schema / cache 常驻缓存：高频只读对象通过 RegistryCache 进程内缓存。
+
 ## 9.1 适用场景
 
 - 自然语言查询经营数据；
@@ -601,7 +609,13 @@ flowchart TD
 ### 节点 7：报告生成或直接返回
 - 简单查询：直接返回表格/结论；
 - 多指标分析：生成报告草稿；
-- 敏感经营分析：进入人工审核。
+- 敏感经营分析：进入人工审核；
+- **V1 性能优化**：按 output_mode 延迟生成：
+  - summary：查询成功后立即生成；
+  - chart_spec：按 output_mode 决定是否生成（standard / full）；
+  - insight_cards：在 standard / full 模式生成；
+  - report_blocks：优先在 export 或 full 模式时生成；
+  - 重内容（tables / insight_cards / report_blocks / chart_spec）写入 analytics_result_repository，轻快照写入 output_snapshot。
 
 ## 9.4 性能要求
 
@@ -1638,4 +1652,3 @@ flowchart TD
 - 追问填槽与恢复执行
 - 多轮对话状态机补充
 - 多轮场景下的用户体验与安全补充
-

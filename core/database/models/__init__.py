@@ -3,6 +3,7 @@
 from core.database.models.conversation import Conversation, ConversationMemory, ConversationMessage
 from core.database.models.knowledge import Document, DocumentChunk, KnowledgeBase
 from core.database.models.runtime import (
+    AnalyticsResultRecord,
     AnalyticsExportTask,
     AnalyticsReviewTask,
     ClarificationEvent,
@@ -23,6 +24,7 @@ __all__ = [
     "SlotSnapshot",
     "ClarificationEvent",
     "SQLAudit",
+    "AnalyticsResultRecord",
     "AnalyticsExportTask",
     "AnalyticsReviewTask",
     "DataSourceConfig",
