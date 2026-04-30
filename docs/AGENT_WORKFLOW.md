@@ -544,6 +544,14 @@ flowchart TD
 > - registry / schema / cache 常驻缓存：高频只读对象通过 RegistryCache 进程内缓存。
 >
 > 第18轮性能验收与慢点复盘结果见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
+>
+> 如果需要看经营分析在 Supervisor + Workflow 模式下的状态持久化边界，请结合：
+> - `docs/SUPERVISOR_ANALYTICS_STATE_MACHINE.md`
+> - `docs/SUPERVISOR_ANALYTICS_PERSISTENCE_BOUNDARY.md`
+>
+> 两份文档一起理解：
+> - 前者回答“当前处于什么状态”；
+> - 后者回答“这些状态和上下文应该落在哪里”。
 
 ## 9.1 适用场景
 

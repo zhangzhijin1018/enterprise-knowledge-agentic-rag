@@ -365,6 +365,11 @@ sql/analytics/
   - 第18轮性能验收与慢点复盘文档；
   - 记录验收范围、方法、结果、当前瓶颈和下一轮优化建议。
 
+- `docs/SUPERVISOR_ANALYTICS_PERSISTENCE_BOUNDARY.md`
+  - Supervisor + Analytics 子 Agent 持久化边界说明文档；
+  - 用于说明 `task_run / slot_snapshot / clarification_event / analytics_result_repository / workflow state`
+    的职责分层，避免后续把微观大对象重新塞回权威运行态。
+
 ## 4.1 `apps/api/main.py`
 
 职责：

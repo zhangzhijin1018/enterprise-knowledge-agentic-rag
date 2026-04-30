@@ -145,48 +145,69 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # -------------------------
 
     # 会话实体快照。
+    # 这是 workflow 执行期间引用的会话对象，不是新的权威持久化副本。
     conversation: dict
 
     # 会话记忆。
     # 用于多轮继承，但只是执行期上下文，不是额外权威存储。
+    # 需要持久化的多轮记忆仍应回到 conversation memory / slot_snapshot 等专属位置。
     conversation_memory: dict
 
     # 结构化分析计划。
     # 包含 slots、clarification、data_source 等结果。
+    # 这是 Planner 的微观执行产物，通常不直接全量写入 task_run，
+    # 只会把其中少量摘要（例如 slots / planning_source / confidence）写入轻快照。
     plan: AnalyticsPlan
 
     # 当前 task_run 快照。
     # 这是权威运行态对象在 workflow 中的引用。
+    # 注意：它本身不是新的持久化层，只是 workflow 对权威运行态的当前视图。
     task_run: dict
 
     # 指标定义。
+    # 这是执行期读取到的配置对象，节点结束后即可丢弃，不应直接落 task_run。
     metric_definition: Any
 
     # 数据源定义。
+    # 这是执行期读取到的配置对象，节点结束后即可丢弃，不应直接落 task_run。
     data_source_definition: Any
 
     # 表定义。
+    # 这是执行期读取到的配置对象，节点结束后即可丢弃，不应直接落 task_run。
     table_definition: Any
 
     # 指标级 / 数据源级权限检查结果。
+    # 该对象常包含较细粒度治理信息，通常只保留摘要进入 output_snapshot，
+    # 全量治理结果应进入 analytics_result / audit_info，而不是 task_run 主表。
     permission_check_result: dict
 
     # 部门范围等数据范围过滤结果。
+    # 这是治理执行中间态，通常只保留轻量摘要，不直接作为权威运行态持久化。
     data_scope_result: dict
 
     # SQLBuilder 生成的结构化结果。
+    # 该对象可能包含 generated_sql、builder_metadata 等中间态信息，
+    # 它属于微观执行上下文，通常不直接落 task_run。
     sql_bundle: dict
 
     # SQL Guard 校验结果。
+    # Guard 结果的全量对象属于执行期临时态；
+    # 如果需要跨请求审计，应进入 sql_audit 或治理摘要，而不是直接写入 task_run。
     guard_result: Any
 
     # SQL 执行结果。
+    # 该对象可能带全量 rows / columns，是典型的大对象执行态，
+    # 原则上只在当前 workflow 内部流转，不直接写回 task_run。
     execution_result: Any
 
     # SQL 审计记录。
+    # 审计记录本身已经有 sql_audits 作为权威存储，
+    # workflow state 这里只保存当前节点需要引用的结果快照。
     audit_record: dict
 
     # 脱敏结果。
+    # 脱敏后的 rows 仍然可能很大，因此该对象只在当前执行链中流转，
+    # 需要重结果持久化时由 analytics_result_repository 承接。
     masking_result: Any
 
     # -------------------------
@@ -195,16 +216,21 @@ class AnalyticsWorkflowState(TypedDict, total=False):
 
     # 文本摘要。
     # 在 summarize 节点生成，供最终响应和 report/export 复用。
+    # 这是少数会进入 task_run.output_snapshot 的微观产物之一，因为它是轻量摘要。
     summary: str
 
     # 统一分析结果对象。
     # 这是 workflow 对外部 service/export/result_repository 提供的标准载体。
+    # 它本身不直接等于持久化对象：轻部分会进入 task_run.output_snapshot，
+    # 重部分会拆到 analytics_result_repository。
     analytics_result: AnalyticsResult
 
     # 各关键阶段耗时。
     # 用于性能验收和慢点分析，不作为权威业务状态。
+    # 一般只会以 timing_breakdown 摘要形式进入 output_snapshot 或 audit metadata。
     timing: dict[str, float]
 
     # 最终响应。
     # 这是 workflow 对 API / Adapter 返回的最终业务结果。
+    # 它是输出载体，不是新的权威存储层；真正落库仍要分拆到 task_run / analytics_result / sql_audit。
     final_response: dict

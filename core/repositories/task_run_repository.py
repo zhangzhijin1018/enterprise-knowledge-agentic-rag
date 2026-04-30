@@ -18,6 +18,63 @@ _TASK_RUNS: dict[str, dict] = {}
 _SLOT_SNAPSHOTS: dict[str, dict] = {}
 _CLARIFICATION_EVENTS: dict[str, dict] = {}
 
+# task_run 里的轻快照必须明确禁止落入的大对象字段。
+# 这些字段要么属于经营分析重结果，要么属于微观 workflow 临时上下文，
+# 如果继续写回 task_run，就会重新把“权威运行态”变成“大对象垃圾桶”。
+_FORBIDDEN_RUNTIME_SNAPSHOT_KEYS = {
+    "tables",
+    "chart_spec",
+    "insight_cards",
+    "report_blocks",
+    "execution_result",
+    "sql_bundle",
+    "plan",
+    "metric_definition",
+    "data_source_definition",
+    "table_definition",
+    "permission_check_result",
+    "data_scope_result",
+    "guard_result",
+    "audit_record",
+    "masking_result",
+    "analytics_result",
+    "workflow_stage",
+    "workflow_outcome",
+    "next_step",
+    "rows",
+    "columns",
+    "masked_rows",
+    "masked_columns",
+}
+
+# slot_snapshot 的职责是“恢复执行态”，因此只允许保存补槽恢复所需的最小字段。
+_ALLOWED_SLOT_SNAPSHOT_FIELDS = {
+    "run_id",
+    "task_type",
+    "required_slots",
+    "collected_slots",
+    "missing_slots",
+    "min_executable_satisfied",
+    "awaiting_user_input",
+    "resume_step",
+    "updated_at",
+}
+
+# clarification_event 的职责是“可审计的交互事件”，
+# 所以只允许保存追问、回复、解析结果和事件状态。
+_ALLOWED_CLARIFICATION_EVENT_FIELDS = {
+    "clarification_id",
+    "run_id",
+    "conversation_id",
+    "question_text",
+    "target_slots",
+    "user_reply",
+    "resolved_slots",
+    "status",
+    "created_at",
+    "resolved_at",
+}
+
 
 def _utcnow() -> datetime:
     """返回当前 UTC 时间。"""
@@ -31,6 +88,44 @@ def _generate_prefixed_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
+def _sanitize_runtime_snapshot(snapshot: dict | None) -> dict:
+    """裁剪 task_run 里的轻量快照。
+
+    为什么需要仓储层再做一次裁剪：
+    1. 上层 Service / Workflow 已经按设计只写轻快照；
+    2. 但仓储层仍要兜底，防止后续维护时有人把微观大对象重新塞回 task_run；
+    3. 这样数据库模式和内存模式都能共享同一套边界约束。
+    """
+
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if key not in _FORBIDDEN_RUNTIME_SNAPSHOT_KEYS
+    }
+
+
+def _sanitize_slot_snapshot_record(record: dict) -> dict:
+    """裁剪 slot_snapshot，只保留恢复执行所需字段。"""
+
+    return {
+        key: value
+        for key, value in record.items()
+        if key in _ALLOWED_SLOT_SNAPSHOT_FIELDS
+    }
+
+
+def _sanitize_clarification_event_record(record: dict) -> dict:
+    """裁剪 clarification_event，只保留澄清交互事件字段。"""
+
+    return {
+        key: value
+        for key, value in record.items()
+        if key in _ALLOWED_CLARIFICATION_EVENT_FIELDS
+    }
+
+
 def reset_in_memory_task_run_store() -> None:
     """重置运行态相关内存存储。"""
 
@@ -40,7 +135,15 @@ def reset_in_memory_task_run_store() -> None:
 
 
 class TaskRunRepository:
-    """任务运行数据访问层。"""
+    """任务运行数据访问层。
+
+    职责分层说明：
+    1. `task_run` 是权威运行态，负责保存跨请求可恢复、跨层可观测、跨系统可审计的主状态；
+    2. `slot_snapshot` 是恢复执行态，只服务补槽和 clarification 恢复；
+    3. `clarification_event` 是可审计交互事件，记录“系统怎么问、用户怎么答、解析出什么”；
+    4. 经营分析 workflow 的微观大对象不能直接落到这里，而应该留在 workflow state
+       或拆到 analytics_result_repository / sql_audit 等专属存储。
+    """
 
     def __init__(self, session: Session | None = None) -> None:
         """初始化任务运行 Repository。
@@ -59,7 +162,11 @@ class TaskRunRepository:
         return self.session is not None
 
     def _serialize_task_run(self, task_run: TaskRun, conversation_uuid: str | None = None) -> dict:
-        """把 ORM 任务运行对象转换成统一字典结构。"""
+        """把 ORM 任务运行对象转换成统一字典结构。
+
+        这里会再次裁剪 input/output/context snapshot，
+        目的是保证即使历史记录里曾出现过越界字段，对外读取时也尽量保持边界干净。
+        """
 
         return {
             "run_id": task_run.run_id,
@@ -76,9 +183,9 @@ class TaskRunRepository:
             "review_status": task_run.review_status,
             "status": task_run.status,
             "sub_status": task_run.sub_status,
-            "input_snapshot": task_run.input_snapshot or {},
-            "output_snapshot": task_run.output_snapshot or {},
-            "context_snapshot": task_run.context_snapshot or {},
+            "input_snapshot": _sanitize_runtime_snapshot(task_run.input_snapshot or {}),
+            "output_snapshot": _sanitize_runtime_snapshot(task_run.output_snapshot or {}),
+            "context_snapshot": _sanitize_runtime_snapshot(task_run.context_snapshot or {}),
             "retry_count": task_run.retry_count,
             "error_code": task_run.error_code,
             "error_message": task_run.error_message,
@@ -151,7 +258,7 @@ class TaskRunRepository:
                 review_status=review_status,
                 status=status,
                 sub_status=sub_status,
-                input_snapshot=input_snapshot,
+                input_snapshot=_sanitize_runtime_snapshot(input_snapshot),
                 output_snapshot={},
                 context_snapshot={},
                 retry_count=0,
@@ -185,7 +292,7 @@ class TaskRunRepository:
             "review_status": review_status,
             "status": status,
             "sub_status": sub_status,
-            "input_snapshot": input_snapshot,
+            "input_snapshot": _sanitize_runtime_snapshot(input_snapshot),
             "output_snapshot": {},
             "context_snapshot": {},
             "retry_count": 0,
@@ -217,7 +324,20 @@ class TaskRunRepository:
         return _TASK_RUNS.get(run_id)
 
     def update_task_run(self, run_id: str, **updates) -> dict | None:
-        """更新任务运行记录。"""
+        """更新任务运行记录。
+
+        边界约束：
+        - task_run 是权威运行态，不应承载 workflow 微观大对象；
+        - 因此对 input/output/context snapshot 会做一次仓储层裁剪；
+        - 这样即使调用方误传 tables / sql_bundle / execution_result，也不会直接落库。
+        """
+
+        if "input_snapshot" in updates:
+            updates["input_snapshot"] = _sanitize_runtime_snapshot(updates["input_snapshot"])
+        if "output_snapshot" in updates:
+            updates["output_snapshot"] = _sanitize_runtime_snapshot(updates["output_snapshot"])
+        if "context_snapshot" in updates:
+            updates["context_snapshot"] = _sanitize_runtime_snapshot(updates["context_snapshot"])
 
         if self._use_database():
             task_run = self._get_task_run_model(run_id)
@@ -255,7 +375,11 @@ class TaskRunRepository:
         awaiting_user_input: bool,
         resume_step: str | None,
     ) -> dict:
-        """创建槽位快照。"""
+        """创建槽位快照。
+
+        slot_snapshot 只服务“补槽后恢复执行”，不是 task_run 的替代品，
+        因此这里只保存恢复执行必需的最小槽位状态。
+        """
 
         if self._use_database():
             snapshot = SlotSnapshot(
@@ -271,7 +395,7 @@ class TaskRunRepository:
             self.session.add(snapshot)
             self.session.flush()
             self.session.refresh(snapshot)
-            return {
+            return _sanitize_slot_snapshot_record({
                 "run_id": snapshot.run_id,
                 "task_type": snapshot.task_type,
                 "required_slots": snapshot.required_slots or [],
@@ -281,9 +405,9 @@ class TaskRunRepository:
                 "awaiting_user_input": snapshot.awaiting_user_input,
                 "resume_step": snapshot.resume_step,
                 "updated_at": snapshot.updated_at,
-            }
+            })
 
-        record = {
+        record = _sanitize_slot_snapshot_record({
             "run_id": run_id,
             "task_type": task_type,
             "required_slots": required_slots,
@@ -293,7 +417,7 @@ class TaskRunRepository:
             "awaiting_user_input": awaiting_user_input,
             "resume_step": resume_step,
             "updated_at": _utcnow(),
-        }
+        })
         _SLOT_SNAPSHOTS[run_id] = record
         return record
 
@@ -305,7 +429,7 @@ class TaskRunRepository:
             snapshot = self.session.execute(statement).scalar_one_or_none()
             if snapshot is None:
                 return None
-            return {
+            return _sanitize_slot_snapshot_record({
                 "run_id": snapshot.run_id,
                 "task_type": snapshot.task_type,
                 "required_slots": snapshot.required_slots or [],
@@ -315,12 +439,14 @@ class TaskRunRepository:
                 "awaiting_user_input": snapshot.awaiting_user_input,
                 "resume_step": snapshot.resume_step,
                 "updated_at": snapshot.updated_at,
-            }
+            })
 
         return _SLOT_SNAPSHOTS.get(run_id)
 
     def update_slot_snapshot(self, run_id: str, **updates) -> dict | None:
         """更新槽位快照。"""
+
+        updates = _sanitize_slot_snapshot_record(updates)
 
         if self._use_database():
             statement = select(SlotSnapshot).where(SlotSnapshot.run_id == run_id)
@@ -332,7 +458,7 @@ class TaskRunRepository:
                     setattr(snapshot, key, value)
             self.session.flush()
             self.session.refresh(snapshot)
-            return {
+            return _sanitize_slot_snapshot_record({
                 "run_id": snapshot.run_id,
                 "task_type": snapshot.task_type,
                 "required_slots": snapshot.required_slots or [],
@@ -342,13 +468,15 @@ class TaskRunRepository:
                 "awaiting_user_input": snapshot.awaiting_user_input,
                 "resume_step": snapshot.resume_step,
                 "updated_at": snapshot.updated_at,
-            }
+            })
 
         record = self.get_slot_snapshot(run_id)
         if record is None:
             return None
         record.update(updates)
         record["updated_at"] = _utcnow()
+        record = _sanitize_slot_snapshot_record(record)
+        _SLOT_SNAPSHOTS[run_id] = record
         return record
 
     def create_clarification_event(
@@ -358,7 +486,12 @@ class TaskRunRepository:
         question_text: str,
         target_slots: list[str],
     ) -> dict:
-        """创建澄清事件。"""
+        """创建澄清事件。
+
+        clarification_event 是“可审计的交互事件”，
+        只记录系统提问、目标槽位、用户回复和解析结果，
+        不承担微观 workflow 上下文和大对象存储职责。
+        """
 
         if self._use_database():
             conversation = self._get_conversation_model(conversation_id)
@@ -379,7 +512,7 @@ class TaskRunRepository:
             self.session.add(clarification)
             self.session.flush()
             self.session.refresh(clarification)
-            return {
+            return _sanitize_clarification_event_record({
                 "clarification_id": clarification.clarification_uuid,
                 "run_id": clarification.run_id,
                 "conversation_id": conversation_id,
@@ -390,11 +523,11 @@ class TaskRunRepository:
                 "status": clarification.status,
                 "created_at": clarification.created_at,
                 "resolved_at": clarification.resolved_at,
-            }
+            })
 
         now = _utcnow()
         clarification_id = _generate_prefixed_id("clr")
-        record = {
+        record = _sanitize_clarification_event_record({
             "clarification_id": clarification_id,
             "run_id": run_id,
             "conversation_id": conversation_id,
@@ -405,7 +538,7 @@ class TaskRunRepository:
             "status": "pending",
             "created_at": now,
             "resolved_at": None,
-        }
+        })
         _CLARIFICATION_EVENTS[clarification_id] = record
         return record
 
@@ -425,7 +558,7 @@ class TaskRunRepository:
                 conversation = self.session.execute(statement).scalar_one_or_none()
                 if conversation is not None:
                     conversation_uuid = conversation.conversation_uuid
-            return {
+            return _sanitize_clarification_event_record({
                 "clarification_id": clarification.clarification_uuid,
                 "run_id": clarification.run_id,
                 "conversation_id": conversation_uuid,
@@ -436,12 +569,14 @@ class TaskRunRepository:
                 "status": clarification.status,
                 "created_at": clarification.created_at,
                 "resolved_at": clarification.resolved_at,
-            }
+            })
 
         return _CLARIFICATION_EVENTS.get(clarification_id)
 
     def update_clarification_event(self, clarification_id: str, **updates) -> dict | None:
         """更新澄清事件。"""
+
+        updates = _sanitize_clarification_event_record(updates)
 
         if self._use_database():
             statement = select(ClarificationEvent).where(
@@ -461,7 +596,7 @@ class TaskRunRepository:
                 conversation = self.session.execute(statement).scalar_one_or_none()
                 if conversation is not None:
                     conversation_uuid = conversation.conversation_uuid
-            return {
+            return _sanitize_clarification_event_record({
                 "clarification_id": clarification.clarification_uuid,
                 "run_id": clarification.run_id,
                 "conversation_id": conversation_uuid,
@@ -472,10 +607,12 @@ class TaskRunRepository:
                 "status": clarification.status,
                 "created_at": clarification.created_at,
                 "resolved_at": clarification.resolved_at,
-            }
+            })
 
         record = self.get_clarification_event(clarification_id)
         if record is None:
             return None
         record.update(updates)
+        record = _sanitize_clarification_event_record(record)
+        _CLARIFICATION_EVENTS[clarification_id] = record
         return record

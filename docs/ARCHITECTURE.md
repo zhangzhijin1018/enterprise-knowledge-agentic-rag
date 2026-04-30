@@ -1463,6 +1463,13 @@ sequenceDiagram
 > - registry / schema / cache 常驻缓存：高频只读对象通过 RegistryCache 进程内缓存。
 >
 > 对应的验收与慢点复盘文档见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
+>
+> 持久化边界进一步收紧后的分层说明见：`docs/SUPERVISOR_ANALYTICS_PERSISTENCE_BOUNDARY.md`。
+> 当前项目明确区分：
+> - `task_run`：权威运行态；
+> - `slot_snapshot / clarification_event`：恢复执行态；
+> - `analytics_result_repository / analytics_results`：重结果态；
+> - `AnalyticsWorkflowState`：微观临时态。
 
 ```mermaid
 sequenceDiagram
