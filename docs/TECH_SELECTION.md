@@ -356,6 +356,13 @@ ANALYTICS_REACT_MAX_STEPS=3
 2. ReAct 只服务复杂问题拆解，不能成为 SQL 执行链路；
 3. 企业环境需要先可控，再增强智能。
 
+生产启用前必须满足：
+
+- 配置 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL_NAME`；
+- 确认模型服务以 OpenAI-compatible API 暴露；
+- 保持 `SQL Builder / SQL Guard / SQL Gateway` 为唯一执行链；
+- 确认 `ReactPlanValidator` 已拦截非法字段和越界 slots。
+
 ### 6.3.2 Prompt Registry 与结构化输出
 
 Prompt 工程采用：
@@ -366,6 +373,19 @@ Prompt 工程采用：
 - Pydantic Structured Output：强制 LLM 输出结构化对象。
 
 Prompt 不散落在业务节点中，原因是 prompt 需要版本化、审查、替换和模型适配。经营分析 ReAct prompt 明确约束：只能做规划，不能生成 SQL，不能绕过权限、SQL Guard 和数据范围治理。
+
+结构化输出安全链路为：
+
+```text
+Prompt Registry
+  -> Prompt Renderer
+  -> LLMGateway.structured_output(Pydantic)
+  -> ReactPlanValidator
+  -> AnalyticsPlanner.build_plan_from_slots
+  -> SQL Builder / SQL Guard / SQL Gateway
+```
+
+其中 `ReactPlanValidator` 是模型输出进入业务执行链前的硬校验点。
 
 ### 6.4 设计建议
 

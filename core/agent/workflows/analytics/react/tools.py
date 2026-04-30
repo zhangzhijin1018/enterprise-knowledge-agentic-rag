@@ -15,6 +15,7 @@ from typing import Any
 
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
+from core.common.exceptions import AppException
 
 
 ALLOWED_REACT_TOOLS = {
@@ -47,17 +48,19 @@ class AnalyticsReactToolRegistry:
         只会让 ReAct planner 停止并回退到确定性 Planner。
         """
 
-        if tool_name not in ALLOWED_REACT_TOOLS:
-            return {"allowed": False, "reason": "tool_not_allowed", "tool_name": tool_name}
-        if tool_name == "metric_catalog_lookup":
-            return self._metric_catalog_lookup(tool_input)
-        if tool_name == "schema_registry_lookup":
-            return self._schema_registry_lookup(tool_input)
-        if tool_name == "conversation_memory_lookup":
+        clean_tool_name = str(tool_name or "").strip()
+        clean_tool_input = self._clean_tool_input(tool_input)
+        if clean_tool_name not in ALLOWED_REACT_TOOLS:
+            return {"allowed": False, "reason": "tool_not_allowed", "tool_name": clean_tool_name}
+        if clean_tool_name == "metric_catalog_lookup":
+            return self._metric_catalog_lookup(clean_tool_input)
+        if clean_tool_name == "schema_registry_lookup":
+            return self._schema_registry_lookup(clean_tool_input)
+        if clean_tool_name == "conversation_memory_lookup":
             return {"allowed": True, "memory": conversation_memory}
-        if tool_name == "business_term_normalize":
-            return self._business_term_normalize(tool_input)
-        return {"allowed": False, "reason": "unknown_tool", "tool_name": tool_name}
+        if clean_tool_name == "business_term_normalize":
+            return self._business_term_normalize(clean_tool_input)
+        return {"allowed": False, "reason": "unknown_tool", "tool_name": clean_tool_name}
 
     def _metric_catalog_lookup(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         raw_text = str(tool_input.get("metric") or tool_input.get("query") or "")
@@ -78,8 +81,21 @@ class AnalyticsReactToolRegistry:
         }
 
     def _schema_registry_lookup(self, tool_input: dict[str, Any]) -> dict[str, Any]:
-        data_source = tool_input.get("data_source")
-        source_definition = self.schema_registry.get_data_source(data_source)
+        data_source = self._clean_text(tool_input.get("data_source"))
+        if not data_source:
+            # data_source 为空时使用默认数据源。
+            # 这是 planning 只读查询，不会触发真实数据库访问，也不会绕过后续 SQL Guard。
+            source_definition = self.schema_registry.get_default_data_source()
+        else:
+            try:
+                source_definition = self.schema_registry.get_data_source(data_source)
+            except (AppException, KeyError):
+                return {
+                    "allowed": True,
+                    "matched": False,
+                    "reason": "data_source_not_found",
+                    "data_source": data_source,
+                }
         table_definition = self.schema_registry.get_table_definition(
             table_name=source_definition.default_table,
             data_source=source_definition.key,
@@ -104,3 +120,36 @@ class AnalyticsReactToolRegistry:
         if any(keyword in text for keyword in ("按月", "趋势", "时间序列")):
             normalized["group_by"] = "month"
         return {"allowed": True, "normalized_terms": normalized}
+
+    def _clean_tool_input(self, tool_input: dict[str, Any] | None) -> dict[str, Any]:
+        """对模型传入的 tool_input 做最小清洗。
+
+        ReAct 工具只允许 planning 只读能力。这里不会执行任何 SQL，
+        也不会把模型传入的复杂对象原样转发到状态写入或外部系统。
+        """
+
+        if not isinstance(tool_input, dict):
+            return {}
+        clean: dict[str, Any] = {}
+        for key, value in tool_input.items():
+            clean_key = self._clean_text(key)
+            if not clean_key:
+                continue
+            if isinstance(value, str):
+                clean[clean_key] = value.strip()
+            elif isinstance(value, (int, float, bool)) or value is None:
+                clean[clean_key] = value
+            elif isinstance(value, list):
+                clean[clean_key] = [item for item in value if isinstance(item, (str, int, float, bool))]
+            elif isinstance(value, dict):
+                clean[clean_key] = {
+                    str(child_key).strip(): child_value
+                    for child_key, child_value in value.items()
+                    if isinstance(child_value, (str, int, float, bool)) or child_value is None
+                }
+        return clean
+
+    def _clean_text(self, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value).strip() or None

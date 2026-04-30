@@ -23,9 +23,10 @@ def test_prompt_renderer_renders_variables() -> None:
     renderer = PromptRenderer()
 
     result = renderer.render(
-        "问题：{{ query }}\n记忆：{{ memory }}",
-        {"query": "收入同比", "memory": {"last_metric": "收入"}},
+        "问题：{{ query }}\n指标：{{ metric_names }}\n记忆：{{ memory }}",
+        {"query": "收入同比", "metric_names": ["收入", "成本"], "memory": {"last_metric": "收入"}},
     )
 
     assert "收入同比" in result
+    assert "成本" in result
     assert "last_metric" in result

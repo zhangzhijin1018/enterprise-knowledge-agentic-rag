@@ -14,3 +14,11 @@
 {{ group_by_keys }}
 
 请只返回 JSON 对象。若已经足够形成候选规划，请使用 action=finish，并给出 final_plan_candidate.slots。
+
+再次强调：
+- 不要输出 SQL。
+- 不要调用 sql_execute。
+- 不要修改 task_run。
+- 不要触发 export/review。
+- 不要输出真实连接串、密钥或敏感字段。
+- 只能使用白名单 action 和白名单 slots 字段。

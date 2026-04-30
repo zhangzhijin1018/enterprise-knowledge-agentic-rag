@@ -598,8 +598,11 @@ analytics_entry
 - ReAct 最多执行 `ANALYTICS_REACT_MAX_STEPS` 步；
 - ReAct 只允许调用 `metric_catalog_lookup / schema_registry_lookup / conversation_memory_lookup / business_term_normalize`；
 - ReAct 禁止调用 `sql_execute / sql_guard_bypass / export / review / task_run_update`；
+- ReAct final_plan_candidate 必须经过 `ReactPlanValidator`，校验 metric、group_by、compare_target、top_n、sort_direction 和禁止字段；
 - ReAct 失败会回退到确定性 Planner，并记录 `react_fallback_used`；
 - 是否缺槽位、是否允许执行 SQL，仍由本地 `SlotValidator / SQL Guard` 决定。
+
+这意味着 ReAct 的产物只能是安全的 plan candidate。即使模型输出了 `raw_sql / generated_sql / permission_override / sql_guard_bypass` 等字段，也会在 validator 层被拦截，然后回退到确定性 Planner。
 
 ### 节点 1：问题理解
 提取：

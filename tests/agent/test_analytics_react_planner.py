@@ -94,6 +94,31 @@ def test_react_planner_rejects_forbidden_tools_without_execution() -> None:
         planner.plan(query="收入原因分析", conversation_memory={})
 
 
+def test_react_planner_rejects_sql_in_final_candidate() -> None:
+    """ReAct final_plan_candidate 不能携带 SQL 字段。"""
+
+    planner, _ = _build_react_planner(
+        response_payload={
+            "thought": "错误地输出 SQL",
+            "action": "finish",
+            "action_input": {},
+            "final_plan_candidate": {
+                "slots": {
+                    "metric": "收入",
+                    "time_range": {"label": "上个月"},
+                    "raw_sql": "select * from analytics_metrics_daily",
+                },
+                "confidence": 0.9,
+                "reason": "bad",
+            },
+            "stopped_reason": "finished",
+        }
+    )
+
+    with pytest.raises(ValueError, match="禁止字段"):
+        planner.plan(query="收入同比原因分析", conversation_memory={})
+
+
 def test_react_planner_respects_max_steps() -> None:
     """ReAct 子循环必须遵守 max_steps，防止无限循环。"""
 

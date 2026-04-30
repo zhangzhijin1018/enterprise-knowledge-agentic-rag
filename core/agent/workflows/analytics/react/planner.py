@@ -10,6 +10,7 @@ from core.agent.workflows.analytics.react.state import (
     ReactStepOutput,
 )
 from core.agent.workflows.analytics.react.tools import AnalyticsReactToolRegistry
+from core.agent.workflows.analytics.react.validator import ReactPlanValidator
 from core.config.settings import Settings, get_settings
 from core.llm import LLMGateway, LLMMessage, OpenAICompatibleLLMGateway
 from core.prompts import PromptRegistry, PromptRenderer
@@ -33,6 +34,7 @@ class AnalyticsReactPlanner:
         llm_gateway: LLMGateway | None = None,
         prompt_registry: PromptRegistry | None = None,
         prompt_renderer: PromptRenderer | None = None,
+        plan_validator: ReactPlanValidator | None = None,
         settings: Settings | None = None,
     ) -> None:
         self.base_planner = base_planner
@@ -41,6 +43,10 @@ class AnalyticsReactPlanner:
         self.llm_gateway = llm_gateway or OpenAICompatibleLLMGateway(settings=self.settings)
         self.prompt_registry = prompt_registry or PromptRegistry()
         self.prompt_renderer = prompt_renderer or PromptRenderer()
+        self.plan_validator = plan_validator or ReactPlanValidator(
+            metric_catalog=base_planner.metric_catalog,
+            schema_registry=tool_registry.schema_registry,
+        )
 
     def plan(
         self,
@@ -127,8 +133,14 @@ class AnalyticsReactPlanner:
             raise RuntimeError(f"ReAct planner 未产出可用候选：{react_state.stopped_reason}")
 
         candidate = react_state.final_plan_candidate
+        # LLM 输出进入 AnalyticsPlan 前必须二次校验。
+        # Prompt 只能作为软约束，Validator 才是工程侧的硬边界：
+        # - 去掉非白名单字段；
+        # - 拦截 SQL / task_run_update / review / export 等越界意图；
+        # - 校验 metric / group_by / compare_target / top_n 等槽位是否可控。
+        safe_slots = self.plan_validator.validate(candidate.slots)
         plan = self.base_planner.build_plan_from_slots(
-            slots=candidate.slots,
+            slots=safe_slots,
             planning_source="react_planner",
             confidence=candidate.confidence,
         )

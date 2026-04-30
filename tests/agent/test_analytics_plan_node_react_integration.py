@@ -125,6 +125,33 @@ def test_simple_question_does_not_use_react() -> None:
     assert state["plan"].planning_source == "rule"
 
 
+def test_react_disabled_never_uses_react_even_for_complex_question() -> None:
+    """开关关闭时，复杂问题也必须走确定性 Planner。"""
+
+    gateway = MockLLMGateway(
+        structured_payload={
+            "thought": "不应该被调用",
+            "action": "finish",
+            "final_plan_candidate": {
+                "slots": {"metric": "收入", "time_range": {"label": "上个月"}},
+                "confidence": 0.9,
+                "reason": "disabled",
+            },
+        }
+    )
+    workflow = AnalyticsLangGraphWorkflow(_build_service(react_enabled=False, react_gateway=gateway))
+
+    state = workflow.run_state(
+        query="帮我做一下上个月收入同比对比",
+        user_context=_user_context(),
+        output_mode="lite",
+    )
+
+    assert state["react_used"] is False
+    assert len(gateway.calls) == 0
+    assert state["final_response"]["meta"]["status"] == "succeeded"
+
+
 def test_complex_question_uses_react_and_keeps_sql_guard_chain() -> None:
     """复杂问题可走 ReAct，但后续仍会经过 SQL Guard / SQL Gateway。"""
 

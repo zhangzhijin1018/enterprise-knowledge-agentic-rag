@@ -325,6 +325,8 @@ StateGraph 受控流程
 - ReAct 只允许出现在 `analytics_plan` 阶段，用于复杂问题拆解、指标选择、维度选择和槽位候选生成；
 - ReAct 输出必须收敛为结构化 `AnalyticsPlan`；
 - ReAct 不允许生成最终 SQL，不允许执行 SQL，不允许绕过权限、SQL Guard、数据范围治理和 Human Review；
+- ReAct 输出进入 `AnalyticsPlan` 前必须经过 `ReactPlanValidator` 二次校验，只允许白名单 slots；
+- ReAct 工具只允许只读 planning 能力，禁止 `sql_execute / task_run_update / export / review`；
 - 后续执行继续由 `SQL Builder / SQL Guard / SQL Gateway` 串联完成。
 
 为什么不把全链路改成 ReAct：
@@ -332,6 +334,8 @@ StateGraph 受控流程
 1. 经营分析涉及真实数据库、指标权限、部门范围过滤和敏感字段治理，必须保持确定性执行边界；
 2. SQL 生成和执行已经由 schema-aware Builder、SQL Guard、SQL MCP-compatible Gateway 控制；
 3. ReAct 更适合作为复杂 planning 的局部增强，而不是替代企业级工作流状态机。
+
+生产启用前必须配置统一 LLM Gateway；本地默认 `ANALYTICS_REACT_PLANNER_ENABLED=false`，单元测试通过 `MockLLMGateway` 覆盖结构化输出，不依赖真实外部模型服务。
 
 ### 4.1 为什么这样命名
 
