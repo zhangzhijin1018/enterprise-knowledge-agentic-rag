@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from core.llm import LLMMessage, MockLLMGateway
+import pytest
+
+from core.common import error_codes
+from core.common.exceptions import AppException
+from core.config.settings import Settings
+from core.llm import LLMMessage, MockLLMGateway, OpenAICompatibleLLMGateway
 
 
 class DemoStructuredOutput(BaseModel):
@@ -47,3 +52,14 @@ def test_mock_llm_gateway_records_trace_and_metadata() -> None:
 
     assert gateway.calls[0].trace_id == "tr_test"
     assert gateway.calls[0].metadata["component"] == "unit_test"
+
+
+def test_openai_compatible_gateway_requires_api_key() -> None:
+    """未配置真实 API Key 时应返回统一 LLM 调用错误，而不是访问外网。"""
+
+    gateway = OpenAICompatibleLLMGateway(settings=Settings(llm_api_key="your-api-key"))
+
+    with pytest.raises(AppException) as exc_info:
+        gateway.chat(messages=[LLMMessage(role="user", content="hello")])
+
+    assert exc_info.value.error_code == error_codes.LLM_CALL_FAILED

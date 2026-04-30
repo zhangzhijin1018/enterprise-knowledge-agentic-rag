@@ -1,5 +1,32 @@
 # 新疆能源集团知识与生产经营智能 Agent 平台 系统架构设计文档
 
+## 0. 中文导读与流程图入口
+
+如果你希望先用中文快速理解整套架构理念和主流程，建议先阅读：
+
+- `docs/ARCHITECTURE_FLOW_GUIDE_CN.md`
+
+这份导读文档用中文解释了：
+
+- 为什么本项目是企业级 Agent 平台，而不是普通 RAG Demo；
+- `Supervisor / LangGraph / MCP / A2A` 分别管什么；
+- 经营分析为什么采用 `StateGraph 受控主流程 + analytics_plan 局部 ReAct 子循环`；
+- SQL 为什么必须经过 `SQL Builder / SQL Guard / SQL Gateway`；
+- `task_run / slot_snapshot / clarification_event / workflow state / analytics_result_repository` 的持久化边界。
+
+核心流程可以先记住下面这张图：
+
+```mermaid
+flowchart LR
+    A["用户请求"] --> B["API / Service<br/>接收与校验"]
+    B --> C["Supervisor<br/>决定交给哪个业务专家"]
+    C --> D["业务 Agent<br/>LangGraph StateGraph 微观执行"]
+    D --> E["Tool / MCP / A2A<br/>统一能力调用"]
+    E --> F["数据与知识底座<br/>PostgreSQL / Milvus / 业务只读库"]
+    D --> G["治理与审计<br/>权限 / SQL Guard / Review / Trace"]
+    G --> H["结构化结果<br/>summary / tables / report / audit"]
+```
+
 ## 1. 文档说明
 
 本文档为 **新疆能源集团知识与生产经营智能 Agent 平台** 的当前唯一总架构文档。
@@ -336,6 +363,39 @@ StateGraph 受控流程
 3. ReAct 更适合作为复杂 planning 的局部增强，而不是替代企业级工作流状态机。
 
 生产启用前必须配置统一 LLM Gateway；本地默认 `ANALYTICS_REACT_PLANNER_ENABLED=false`，单元测试通过 `MockLLMGateway` 覆盖结构化输出，不依赖真实外部模型服务。
+
+## 4.4 项目级 Prompt 工程治理
+
+从本阶段开始，项目内所有 LLM 调用统一遵循 Prompt 工程治理规则：
+
+```text
+PromptRegistry
+  -> PromptRenderer
+  -> LLMGateway
+  -> Pydantic Structured Output
+  -> Validator
+  -> 安全业务对象
+```
+
+关键边界：
+
+- 业务代码不得直接调用具体模型 SDK；
+- 业务代码不得散落大段 Prompt 字符串；
+- Prompt 模板统一放在 `core/prompts/templates/{domain}/{prompt_name}.j2`；
+- Prompt 清单统一登记在 `core/prompts/catalog.py`；
+- 影响业务决策的 LLM 输出必须先 Pydantic 化，再经过 Validator 二次校验；
+- LLM 不能直接生成 SQL、不能更新 task_run、不能触发 export/review。
+
+经营分析当前有两类 LLM 能力：
+
+| 能力 | 位置 | 作用 | 安全边界 |
+|---|---|---|---|
+| Slot fallback | `core/agent/control_plane/llm_analytics_planner.py` | 规则低置信时补强槽位 | `AnalyticsSlotFallbackOutput` + `AnalyticsSlotFallbackValidator` |
+| 局部 ReAct planning | `core/agent/workflows/analytics/react/` | 复杂问题拆解与 plan candidate | `ReactStepOutput` + `ReactPlanValidator` |
+
+两者都不能生成 SQL，后续执行仍必须经过 `SQL Builder -> SQL Guard -> SQL Gateway`。
+
+详细规范见：[PROMPT_ENGINEERING.md](PROMPT_ENGINEERING.md)。
 
 ### 4.1 为什么这样命名
 

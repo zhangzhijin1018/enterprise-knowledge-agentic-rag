@@ -18,6 +18,32 @@
 
 这份文档的目标不是讲概念，而是让你可以开始真正搭项目。
 
+如果需要先用中文理解整体架构和流程图，请先看：
+
+- `docs/ARCHITECTURE_FLOW_GUIDE_CN.md`
+
+代码目录与架构理念的对应关系可以这样理解：
+
+```mermaid
+flowchart LR
+    A["apps/api<br/>接口入口"] --> B["core/services<br/>业务编排"]
+    B --> C["core/agent/supervisor<br/>宏观调度"]
+    C --> D["core/agent/workflows<br/>业务专家微观工作流"]
+    D --> E["core/tools<br/>Tool / MCP / A2A 能力边界"]
+    B --> F["core/repositories<br/>权威状态与业务数据访问"]
+    D --> G["core/llm + core/prompts<br/>LLM Gateway 与 Prompt Registry"]
+```
+
+其中 `core/llm + core/prompts` 是项目级 Prompt 工程治理边界：
+
+- `core/llm/gateway.py`：统一模型访问入口，业务代码不得直接调用具体模型 SDK；
+- `core/prompts/registry.py`：统一加载文件化 Prompt；
+- `core/prompts/renderer.py`：统一渲染模板变量；
+- `core/prompts/catalog.py`：登记 Prompt 名称、用途、输入变量、输出 Schema 和风险等级；
+- `core/prompts/templates/{domain}/`：按业务域管理 Prompt 模板。
+
+详细规范见 `docs/PROMPT_ENGINEERING.md`。
+
 ---
 
 ## 2. 第一阶段代码分层原则
@@ -86,6 +112,20 @@ Agent 层负责：
   - `status_mapper.py` 负责微观状态到宏观状态的映射。
   - 从当前这一轮开始，`graph.py` 中的经营分析 workflow 已经正式长期跑在 `LangGraph StateGraph` 上；
   - 当前不接 checkpoint，恢复继续由业务状态机承担。
+
+经营分析相关 LLM 能力必须继续遵守分层：
+
+```text
+AnalyticsService / Workflow Node
+  -> LLMAnalyticsPlannerGateway 或 AnalyticsReactPlanner
+  -> PromptRegistry / PromptRenderer
+  -> LLMGateway
+  -> Pydantic Structured Output
+  -> Validator
+  -> AnalyticsPlan / safe slots
+```
+
+这条链路的含义是：LLM 只能输出结构化候选，不能直接生成 SQL、不能写 task_run、不能触发 export/review。
 
 ### 2.5 Tool 层负责执行
 

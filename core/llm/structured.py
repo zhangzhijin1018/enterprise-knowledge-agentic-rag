@@ -27,13 +27,21 @@ def parse_structured_json(content: str, output_schema: type[T]) -> T:
     candidate = _extract_json_object(content)
     try:
         payload = json.loads(candidate)
-        return output_schema.model_validate(payload)
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except json.JSONDecodeError as exc:
         raise AppException(
-            error_code=error_codes.ANALYTICS_QUERY_FAILED,
-            message="LLM 结构化输出解析失败",
+            error_code=error_codes.LLM_OUTPUT_PARSE_FAILED,
+            message="LLM 结构化输出不是合法 JSON",
             status_code=502,
             detail={"reason": str(exc)},
+        ) from exc
+    try:
+        return output_schema.model_validate(payload)
+    except ValidationError as exc:
+        raise AppException(
+            error_code=error_codes.LLM_OUTPUT_VALIDATION_FAILED,
+            message="LLM 结构化输出不符合业务 Schema",
+            status_code=502,
+            detail={"reason": str(exc), "schema": output_schema.__name__},
         ) from exc
 
 

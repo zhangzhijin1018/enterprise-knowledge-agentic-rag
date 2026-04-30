@@ -118,7 +118,7 @@ class OpenAICompatibleLLMGateway(LLMGateway):
         resolved_timeout = timeout_seconds or self.settings.llm_timeout_seconds
         if not self.settings.llm_api_key or self.settings.llm_api_key == "your-api-key":
             raise AppException(
-                error_code=error_codes.ANALYTICS_QUERY_FAILED,
+                error_code=error_codes.LLM_CALL_FAILED,
                 message="LLM_API_KEY 未配置，无法调用 OpenAI-compatible Gateway",
                 status_code=503,
                 detail={"provider": self.settings.llm_provider},
@@ -145,7 +145,7 @@ class OpenAICompatibleLLMGateway(LLMGateway):
                 payload = json.loads(resp.read().decode("utf-8"))
         except (error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise AppException(
-                error_code=error_codes.ANALYTICS_QUERY_FAILED,
+                error_code=error_codes.LLM_CALL_FAILED,
                 message="LLM Gateway 调用失败",
                 status_code=502,
                 detail={"reason": str(exc), "provider": self.settings.llm_provider},

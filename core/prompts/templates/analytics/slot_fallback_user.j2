@@ -1,0 +1,22 @@
+请基于以下信息，输出经营分析槽位补强 JSON。
+
+用户问题：
+{{ query }}
+
+当前规则已抽取槽位：
+{{ current_slots }}
+
+会话记忆：
+{{ conversation_memory }}
+
+允许补强的 slots 字段：
+{{ allowed_slots }}
+
+要求：
+- 只能补强 slots，不能生成 SQL。
+- metric 必须尽量使用已知业务指标名；不确定时放入 metric_candidates。
+- compare_target 只能使用 yoy、mom 或 none。
+- sort_direction 只能使用 asc 或 desc。
+- top_n 必须是 1 到 100 的整数。
+- 如果仍缺关键槽位，请给出 clarification_question 和 clarification_target_slots。
+- 只返回 JSON object，不要输出其他文本。

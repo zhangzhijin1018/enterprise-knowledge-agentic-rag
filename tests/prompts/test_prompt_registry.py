@@ -17,6 +17,18 @@ def test_prompt_registry_loads_analytics_react_templates() -> None:
     assert "{{ query }}" in user_template
 
 
+def test_prompt_registry_loads_analytics_slot_fallback_templates() -> None:
+    """Prompt Registry 应能加载经营分析槽位补强模板。"""
+
+    registry = PromptRegistry()
+
+    system_template = registry.load("analytics/slot_fallback_system")
+    user_template = registry.load("analytics/slot_fallback_user")
+
+    assert "只能帮助规则 Planner 补全结构化槽位" in system_template
+    assert "{{ current_slots }}" in user_template
+
+
 def test_prompt_renderer_renders_variables() -> None:
     """轻量 Renderer 应支持基本变量替换。"""
 

@@ -5,6 +5,40 @@
 
 ---
 
+## 0. 中文流程总览
+
+如果只想先理解“用户请求到底怎么跑”，可以先看这张图：
+
+```mermaid
+flowchart TD
+    A["用户输入"] --> B["API 层<br/>参数校验、用户上下文、trace_id"]
+    B --> C["Service 层<br/>业务用例编排"]
+    C --> D["Supervisor 宏观调度<br/>判断交给哪个业务专家"]
+    D --> E["业务 Agent Workflow<br/>LangGraph StateGraph"]
+    E --> F{"是否缺少关键信息？"}
+    F -->|是| G["结构化澄清<br/>保存 clarification_event + slot_snapshot"]
+    G --> H["用户补充信息后恢复执行"]
+    H --> E
+    F -->|否| I["Tool / MCP 执行<br/>RAG、SQL、Report、A2A"]
+    I --> J{"是否高风险？"}
+    J -->|是| K["Human Review<br/>等待人工审核"]
+    K --> L["审核通过后恢复 / 驳回后终止"]
+    J -->|否| M["生成结果<br/>summary、tables、report、audit"]
+    L --> M
+    M --> N["返回前端并记录 Trace / Audit"]
+```
+
+中文解释：
+
+- API 不写复杂业务，只负责接请求；
+- Service 负责串联业务流程；
+- Supervisor 只做宏观调度，不处理业务内部 SQL 细节；
+- 业务 Agent 内部由 LangGraph 管节点流转；
+- 缺槽位进入澄清，澄清不是失败；
+- 高风险进入 Human Review；
+- 工具调用必须通过 Tool/MCP/A2A 边界；
+- 所有关键动作都要可审计、可恢复。
+
 ## 1. 文档定位
 
 本文档是 `ARCHITECTURE.md` 的下位落地设计文档，用于把总架构进一步细化为：
@@ -603,6 +637,30 @@ analytics_entry
 - 是否缺槽位、是否允许执行 SQL，仍由本地 `SlotValidator / SQL Guard` 决定。
 
 这意味着 ReAct 的产物只能是安全的 plan candidate。即使模型输出了 `raw_sql / generated_sql / permission_override / sql_guard_bypass` 等字段，也会在 validator 层被拦截，然后回退到确定性 Planner。
+
+### 9.3.1 LLM Slot Fallback 与 Prompt 治理
+
+经营分析并不是所有问题都走 ReAct。对于规则 Planner 已经能稳定理解的简单问题，系统继续走确定性规则；对于“语义像经营分析但规则置信度不足”的问题，才允许在开关开启时使用 LLM slot fallback。
+
+slot fallback 的统一链路：
+
+```text
+SemanticResolver
+  -> LLMAnalyticsPlannerGateway
+  -> PromptRegistry / PromptRenderer
+  -> LLMGateway.structured_output(AnalyticsSlotFallbackOutput)
+  -> AnalyticsSlotFallbackValidator
+  -> 安全 slots
+  -> SlotValidator 决定是否可执行
+```
+
+边界说明：
+
+- fallback 默认由 `ANALYTICS_PLANNER_ENABLE_LLM_FALLBACK=false` 关闭；
+- LLM 只能补强 `metric / time_range / org_scope / group_by / compare_target / top_n / sort_direction / metric_candidates`；
+- LLM 不能生成 SQL，不能写 task_run，不能触发 review/export；
+- 未识别 metric 只能进入 `metric_candidates`，不能直接作为可执行指标；
+- 即使 LLM 返回 `should_use=true`，仍必须由本地 SlotValidator 判断最小可执行条件。
 
 ### 节点 1：问题理解
 提取：
