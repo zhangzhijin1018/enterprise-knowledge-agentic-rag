@@ -111,6 +111,54 @@ class AnalyticsPlanner:
             validation_reason=validation.validation_reason,
         )
 
+    def build_plan_from_slots(
+        self,
+        *,
+        slots: dict,
+        planning_source: str = "clarification_resume",
+        confidence: float = 1.0,
+    ) -> AnalyticsPlan:
+        """基于已经收集到的槽位直接重建 AnalyticsPlan。
+
+        这个方法服务于 clarification 恢复场景。
+
+        为什么这里需要“基于槽位重建 plan”而不是重新从自然语言开始：
+        1. clarification 恢复的本质是“补全已有业务状态机”，而不是重新理解一条全新问题；
+        2. 此时真正可信的恢复依据是 `slot_snapshot + clarification_event + 原 run_id`；
+        3. 因此这里直接对合并后的槽位重新做最小可执行条件判断，
+           再决定是继续 clarification 还是恢复 workflow 执行。
+        """
+
+        normalized_slots = {
+            key: value
+            for key, value in (slots or {}).items()
+            if value not in (None, "", {}, [])
+        }
+        validation = self.slot_validator.validate(normalized_slots)
+        clarification = self._build_clarification_if_needed(
+            resolution_slots=normalized_slots,
+            validation=validation,
+            llm_question=None,
+        )
+        resolved_metric_definition = self.metric_catalog.resolve_metric(normalized_slots.get("metric"))
+        return AnalyticsPlan(
+            intent="business_analysis",
+            slots=normalized_slots,
+            required_slots=self.REQUIRED_SLOTS.copy(),
+            missing_slots=validation.missing_slots,
+            conflict_slots=validation.conflict_slots,
+            is_executable=validation.is_executable,
+            clarification_question=clarification.question if clarification is not None else None,
+            clarification_target_slots=clarification.target_slots if clarification is not None else [],
+            clarification_type=clarification.clarification_type if clarification is not None else None,
+            clarification_reason=clarification.reason if clarification is not None else None,
+            clarification_suggested_options=clarification.suggested_options if clarification is not None else [],
+            data_source=resolved_metric_definition.data_source if resolved_metric_definition is not None else None,
+            planning_source=planning_source,
+            confidence=confidence,
+            validation_reason=validation.validation_reason,
+        )
+
     def _build_clarification_if_needed(
         self,
         *,

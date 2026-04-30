@@ -142,6 +142,9 @@ class AnalyticsLangGraphWorkflow:
         run_id: str | None = None,
         trace_id: str | None = None,
         parent_task_id: str | None = None,
+        recovered_plan=None,
+        resume_from_clarification: bool = False,
+        existing_task_run: dict | None = None,
     ) -> AnalyticsWorkflowState:
         """执行经营分析微观工作流并返回完整微观状态。
 
@@ -164,8 +167,48 @@ class AnalyticsLangGraphWorkflow:
             "trace_id": trace_id,
             "output_mode": output_mode,
             "need_sql_explain": need_sql_explain,
+            "recovered_plan": recovered_plan,
+            "resume_from_clarification": resume_from_clarification,
+            "existing_task_run": existing_task_run,
         }
         return self._compiled.invoke(state)
+
+    def resume_from_slots(
+        self,
+        *,
+        query: str,
+        user_context,
+        conversation_id: str,
+        run_id: str,
+        trace_id: str,
+        output_mode: str,
+        need_sql_explain: bool,
+        recovered_plan,
+        existing_task_run: dict,
+        parent_task_id: str | None = None,
+    ) -> AnalyticsWorkflowState:
+        """基于 clarification 补槽结果恢复 workflow。
+
+        这里恢复的是“业务状态机”，不是原 Python 线程。
+        具体做法是：
+        1. 复用原 `run_id / trace_id / conversation_id`；
+        2. 基于 `slot_snapshot + clarification_event` 重新构造可执行 state；
+        3. 让 StateGraph 从入口重新走一遍，但跳过“新建 run / 新增原始用户 query”这类动作。
+        """
+
+        return self.run_state(
+            query=query,
+            user_context=user_context,
+            conversation_id=conversation_id,
+            output_mode=output_mode,
+            need_sql_explain=need_sql_explain,
+            run_id=run_id,
+            trace_id=trace_id,
+            parent_task_id=parent_task_id,
+            recovered_plan=recovered_plan,
+            resume_from_clarification=True,
+            existing_task_run=existing_task_run,
+        )
 
     def invoke(
         self,

@@ -140,6 +140,12 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # 当前经营分析主查询链大多不走 review，但状态字段必须预留并明确表达。
     review_required: bool
 
+    # 当前是否由 clarification 恢复入口进入 workflow。
+    # 这属于微观执行控制字段，用于告诉 entry/validate 节点：
+    # - 这次不是一条全新的用户问题；
+    # - 而是基于原 run_id、slot_snapshot、clarification_event 做状态机恢复。
+    resume_from_clarification: bool
+
     # -------------------------
     # 中间态业务上下文
     # -------------------------
@@ -159,10 +165,19 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # 只会把其中少量摘要（例如 slots / planning_source / confidence）写入轻快照。
     plan: AnalyticsPlan
 
+    # clarification 恢复时预先构造好的 plan。
+    # 它是“恢复执行态 -> 微观执行态”的桥接对象，
+    # 只在本次恢复 workflow 中使用，不直接作为权威持久化对象落库。
+    recovered_plan: AnalyticsPlan
+
     # 当前 task_run 快照。
     # 这是权威运行态对象在 workflow 中的引用。
     # 注意：它本身不是新的持久化层，只是 workflow 对权威运行态的当前视图。
     task_run: dict
+
+    # clarification 恢复时复用的原 task_run。
+    # 这里引用的是权威运行态对象的当前视图，目的是避免恢复执行时重复创建新的 run。
+    existing_task_run: dict
 
     # 指标定义。
     # 这是执行期读取到的配置对象，节点结束后即可丢弃，不应直接落 task_run。
@@ -229,6 +244,24 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # 用于性能验收和慢点分析，不作为权威业务状态。
     # 一般只会以 timing_breakdown 摘要形式进入 output_snapshot 或 audit metadata。
     timing: dict[str, float]
+
+    # 节点级重试总次数。
+    # 这是微观执行可观测性字段，只会以轻量摘要形式进入 output_snapshot / meta，
+    # 不会把完整异常堆栈持久化到 task_run。
+    retry_count: int
+
+    # 节点级重试摘要。
+    # 每条记录只保留 node_name / attempt / error_type / error_message 等轻量信息，
+    # 用于排查慢点和瞬时失败，不直接替代权威审计日志。
+    retry_history: list[dict[str, Any]]
+
+    # 当前 workflow 是否发生了“可接受降级”。
+    # 例如 insight/chart/report 失败后退回 summary/table 模式时会置为 True。
+    degraded: bool
+
+    # 本次执行中被降级的特性列表。
+    # 这属于微观执行摘要，后续会进入 response meta / output_snapshot 的轻量字段。
+    degraded_features: list[str]
 
     # 最终响应。
     # 这是 workflow 对 API / Adapter 返回的最终业务结果。

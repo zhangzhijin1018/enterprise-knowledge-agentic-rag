@@ -47,6 +47,7 @@ from core.security.auth import UserContext
 from core.security.auth import resolve_user_context_from_request
 from core.services.analytics_export_service import AnalyticsExportService
 from core.services.analytics_review_service import AnalyticsReviewService
+from core.services.analytics_clarification_service import AnalyticsClarificationService
 from core.services.analytics_service import AnalyticsService
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
@@ -433,6 +434,20 @@ def get_analytics_service(
         use_workflow=settings.analytics_use_workflow,
     )
     return analytics_service
+
+
+def get_analytics_clarification_service(
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
+    task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
+    analytics_service: AnalyticsService = Depends(get_analytics_service),
+) -> AnalyticsClarificationService:
+    """提供经营分析 clarification 恢复 Service 依赖。"""
+
+    return AnalyticsClarificationService(
+        conversation_repository=conversation_repository,
+        task_run_repository=task_run_repository,
+        analytics_service=analytics_service,
+    )
 
 
 def get_analytics_export_service(

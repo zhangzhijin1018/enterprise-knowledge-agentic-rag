@@ -50,6 +50,9 @@ class AnalyticsResult:
     masked_fields: list[str] = field(default_factory=list)
     hidden_fields: list[str] = field(default_factory=list)
     governance_decision: str = "no_masking_needed"
+    degraded: bool = False
+    degraded_features: list[str] = field(default_factory=list)
+    retry_summary: dict = field(default_factory=dict)
 
     chart_spec: dict | None = None
     insight_cards: list[dict] = field(default_factory=list)
@@ -82,6 +85,7 @@ class AnalyticsResult:
             "data_source": self.data_source,
             "compare_target": self.compare_target,
             "group_by": self.group_by,
+            "degraded": self.degraded,
         }
 
     def to_standard_view(self) -> dict:
@@ -98,6 +102,8 @@ class AnalyticsResult:
             "masked_fields": self.masked_fields,
             "effective_filters": self.effective_filters,
             "governance_decision": self._build_governance_summary(),
+            "degraded_features": self.degraded_features,
+            "retry_summary": self.retry_summary,
         })
         return view
 
@@ -149,6 +155,9 @@ class AnalyticsResult:
             "data_source": self.data_source,
             "governance_decision": self._build_governance_summary(),
             "timing_breakdown": self.timing_breakdown,
+            "degraded": self.degraded,
+            "degraded_features": self.degraded_features,
+            "retry_summary": self.retry_summary,
             "has_heavy_result": True,
         }
 
@@ -171,6 +180,8 @@ class AnalyticsResult:
             "masked_fields": self.masked_fields,
             "effective_filters": self.effective_filters,
             "timing_breakdown": self.timing_breakdown,
+            "degraded_features": self.degraded_features,
+            "retry_summary": self.retry_summary,
         }
 
     def _build_tables(self) -> list[dict]:

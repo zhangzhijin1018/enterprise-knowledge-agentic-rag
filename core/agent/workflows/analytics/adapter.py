@@ -102,6 +102,43 @@ class AnalyticsWorkflowAdapter:
             parent_task_id=parent_task_id,
         )
 
+    def resume_from_clarification(
+        self,
+        *,
+        query: str,
+        user_context: UserContext,
+        conversation_id: str,
+        run_id: str,
+        trace_id: str,
+        output_mode: str,
+        need_sql_explain: bool,
+        recovered_plan,
+        existing_task_run: dict,
+        parent_task_id: str | None = None,
+    ) -> dict:
+        """从 clarification 补槽结果恢复经营分析 workflow。
+
+        这里恢复的是 StateGraph 的业务执行路径，不是恢复旧线程或旧调用栈。
+        Adapter 的职责仍然只是：
+        - 调 workflow；
+        - 屏蔽 graph 细节；
+        - 对上返回稳定业务响应。
+        """
+
+        workflow_state = self.workflow.resume_from_slots(
+            query=query,
+            user_context=user_context,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            output_mode=output_mode,
+            need_sql_explain=need_sql_explain,
+            recovered_plan=recovered_plan,
+            existing_task_run=existing_task_run,
+            parent_task_id=parent_task_id,
+        )
+        return workflow_state["final_response"]
+
     def to_result_contract(
         self,
         *,

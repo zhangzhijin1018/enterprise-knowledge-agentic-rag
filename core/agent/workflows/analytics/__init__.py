@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
     from core.agent.workflows.analytics.adapter import AnalyticsWorkflowAdapter
+    from core.agent.workflows.analytics.degradation import AnalyticsWorkflowDegradationController
     from core.agent.workflows.analytics.graph import AnalyticsLangGraphWorkflow
+    from core.agent.workflows.analytics.retry_policy import AnalyticsWorkflowRetryController
     from core.agent.workflows.analytics.snapshot_builder import AnalyticsSnapshotBuilder
     from core.agent.workflows.analytics.state import (
         AnalyticsWorkflowOutcome,
@@ -26,11 +28,13 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
 __all__ = [
     "AnalyticsLangGraphWorkflow",
     "AnalyticsWorkflowAdapter",
+    "AnalyticsWorkflowDegradationController",
     "AnalyticsSnapshotBuilder",
     "AnalyticsWorkflowState",
     "AnalyticsWorkflowStage",
     "AnalyticsWorkflowOutcome",
     "AnalyticsWorkflowStatusMapper",
+    "AnalyticsWorkflowRetryController",
 ]
 
 
@@ -39,8 +43,12 @@ def __getattr__(name: str) -> Any:
 
     if name == "AnalyticsWorkflowAdapter":
         return getattr(import_module("core.agent.workflows.analytics.adapter"), name)
+    if name == "AnalyticsWorkflowDegradationController":
+        return getattr(import_module("core.agent.workflows.analytics.degradation"), name)
     if name == "AnalyticsLangGraphWorkflow":
         return getattr(import_module("core.agent.workflows.analytics.graph"), name)
+    if name == "AnalyticsWorkflowRetryController":
+        return getattr(import_module("core.agent.workflows.analytics.retry_policy"), name)
     if name == "AnalyticsSnapshotBuilder":
         return getattr(import_module("core.agent.workflows.analytics.snapshot_builder"), name)
     if name in {"AnalyticsWorkflowState", "AnalyticsWorkflowStage", "AnalyticsWorkflowOutcome"}:

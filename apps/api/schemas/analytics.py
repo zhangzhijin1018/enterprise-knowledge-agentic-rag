@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -15,6 +17,14 @@ class AnalyticsQueryRequest(BaseModel):
     output_mode: str = Field(default="lite", description="输出模式：lite / standard / full")
 
     need_sql_explain: bool = Field(default=False, description="是否返回 SQL 解释")
+
+
+class AnalyticsClarificationReplyRequest(BaseModel):
+    """经营分析澄清回复请求。"""
+
+    reply: str = Field(description="用户针对经营分析澄清问题补充的内容")
+    output_mode: str = Field(default="lite", description="恢复执行后希望返回的输出模式：lite / standard / full")
+    need_sql_explain: bool = Field(default=False, description="恢复执行后是否返回 SQL 解释")
 
 
 class AnalyticsResultTable(BaseModel):
@@ -34,6 +44,21 @@ class AnalyticsClarificationData(BaseModel):
     clarification_type: str | None = Field(default=None, description="澄清类型，例如 missing_required_slot 或 slot_conflict")
     reason: str | None = Field(default=None, description="触发澄清的规则原因")
     suggested_options: list[str] = Field(default_factory=list, description="建议补充选项")
+
+
+class AnalyticsClarificationDetailData(BaseModel):
+    """经营分析澄清详情。"""
+
+    clarification_id: str = Field(description="澄清事件 ID")
+    run_id: str = Field(description="关联经营分析 run_id")
+    conversation_id: str = Field(description="关联会话 ID")
+    question: str = Field(description="系统发出的澄清问题")
+    target_slots: list[str] = Field(default_factory=list, description="本轮需要补齐的目标槽位")
+    user_reply: str | None = Field(default=None, description="用户已经提交的补充内容")
+    resolved_slots: dict = Field(default_factory=dict, description="从用户回复中解析出的结构化槽位")
+    status: str = Field(description="澄清事件状态，例如 pending / resolved")
+    created_at: datetime | None = Field(default=None, description="澄清创建时间")
+    resolved_at: datetime | None = Field(default=None, description="澄清解决时间")
 
 
 class AnalyticsQueryResponseData(BaseModel):

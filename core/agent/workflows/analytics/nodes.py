@@ -21,8 +21,11 @@ from core.analytics.analytics_result_model import AnalyticsResult
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
+from core.agent.workflows.analytics.degradation import AnalyticsWorkflowDegradationController
+from core.agent.workflows.analytics.retry_policy import AnalyticsWorkflowRetryController
 from core.agent.workflows.analytics.state import AnalyticsWorkflowOutcome, AnalyticsWorkflowStage
 from core.services.analytics_service import AnalyticsService
+from core.tools.mcp import SQLGatewayExecutionError
 from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 
 
@@ -31,6 +34,8 @@ class AnalyticsWorkflowNodes:
 
     def __init__(self, analytics_service: AnalyticsService) -> None:
         self.analytics_service = analytics_service
+        self.retry_controller = AnalyticsWorkflowRetryController()
+        self.degradation_controller = AnalyticsWorkflowDegradationController()
 
     def analytics_entry(self, state: dict) -> dict:
         """工作流入口节点。
@@ -39,7 +44,7 @@ class AnalyticsWorkflowNodes:
         - 校验 query；
         - 标准化 output_mode；
         - 创建/读取 conversation；
-        - 记录用户消息；
+        - 记录用户消息（clarification 恢复场景不重复写原始问题）；
         - 为后续 plan 节点准备 conversation memory。
         """
 
@@ -54,26 +59,42 @@ class AnalyticsWorkflowNodes:
 
         user_context = state["user_context"]
         output_mode = self.analytics_service._normalize_output_mode(state.get("output_mode") or "lite")
-        conversation = self.analytics_service._get_or_create_conversation(
-            conversation_id=state.get("conversation_id"),
-            query=query,
-            user_context=user_context,
-        )
+        if state.get("resume_from_clarification"):
+            conversation_id = state.get("conversation_id")
+            conversation = self.analytics_service.conversation_repository.get_conversation(conversation_id)
+            if conversation is None:
+                raise AppException(
+                    error_code=error_codes.CONVERSATION_NOT_FOUND,
+                    message="恢复经营分析时找不到原始会话",
+                    status_code=404,
+                    detail={"conversation_id": conversation_id},
+                )
+        else:
+            conversation = self.analytics_service._get_or_create_conversation(
+                conversation_id=state.get("conversation_id"),
+                query=query,
+                user_context=user_context,
+            )
         memory = self.analytics_service.conversation_repository.get_memory(conversation["conversation_id"])
-        self.analytics_service.conversation_repository.add_message(
-            conversation_id=conversation["conversation_id"],
-            role="user",
-            message_type="analytics_query",
-            content=query,
-            related_run_id=None,
-            structured_content={"output_mode": output_mode},
-        )
+        if not state.get("resume_from_clarification"):
+            self.analytics_service.conversation_repository.add_message(
+                conversation_id=conversation["conversation_id"],
+                role="user",
+                message_type="analytics_query",
+                content=query,
+                related_run_id=None,
+                structured_content={"output_mode": output_mode},
+            )
         state["query"] = query
         state["output_mode"] = output_mode
         state["conversation"] = conversation
         state["conversation_id"] = conversation["conversation_id"]
         state["conversation_memory"] = memory
         state["timing"] = {}
+        state.setdefault("retry_count", 0)
+        state.setdefault("retry_history", [])
+        state.setdefault("degraded", False)
+        state.setdefault("degraded_features", [])
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_ENTRY
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         state["clarification_needed"] = False
@@ -88,10 +109,13 @@ class AnalyticsWorkflowNodes:
         - 得到结构化槽位、clarification 信息和 data_source。
         """
 
-        plan = self.analytics_service.analytics_planner.plan(
-            query=state["query"],
-            conversation_memory=state.get("conversation_memory"),
-        )
+        if state.get("recovered_plan") is not None:
+            plan = state["recovered_plan"]
+        else:
+            plan = self.analytics_service.analytics_planner.plan(
+                query=state["query"],
+                conversation_memory=state.get("conversation_memory"),
+            )
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_PLAN
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         state["plan"] = plan
@@ -109,46 +133,51 @@ class AnalyticsWorkflowNodes:
         plan = state["plan"]
         conversation = state["conversation"]
         user_context = state["user_context"]
-        task_run = self.analytics_service.task_run_repository.create_task_run(
-            conversation_id=conversation["conversation_id"],
-            user_id=user_context.user_id,
-            task_type="analytics",
-            route="business_analysis",
-            status="executing",
-            sub_status="planning_query",
-            # 这里只写“权威运行态”的轻量输入摘要。
-            # workflow state 自己会继续保存 plan / workflow_stage 等微观临时态，
-            # 但这些对象不应直接进入 task_run.input_snapshot。
-            input_snapshot=self.analytics_service.snapshot_builder.build_input_snapshot(
-                query=state["query"],
+        if state.get("existing_task_run") is not None:
+            task_run = state["existing_task_run"]
+            state["run_id"] = task_run["run_id"]
+            state["trace_id"] = task_run["trace_id"]
+        else:
+            task_run = self.analytics_service.task_run_repository.create_task_run(
                 conversation_id=conversation["conversation_id"],
-                output_mode=state["output_mode"],
-                need_sql_explain=state.get("need_sql_explain", False),
-                user_context=user_context,
-                planner_slots=plan.slots,
-                planning_source=plan.planning_source,
-                confidence=plan.confidence,
-            ),
-            risk_level="medium",
-            review_status="not_required",
-            run_id=state.get("run_id"),
-            trace_id=state.get("trace_id"),
-            parent_task_id=state.get("parent_task_id"),
-        )
-        state["run_id"] = task_run["run_id"]
-        state["trace_id"] = task_run["trace_id"]
-        self.analytics_service.conversation_repository.update_conversation(
-            conversation["conversation_id"],
-            current_route="analytics",
-            current_status="active",
-            last_run_id=task_run["run_id"],
-        )
-        # slot_snapshot 属于“恢复执行态”，只保存补槽恢复的必要字段。
-        self.analytics_service.task_run_repository.create_slot_snapshot(
-            run_id=task_run["run_id"],
-            task_type="analytics",
-            **self.analytics_service.snapshot_builder.build_slot_snapshot_payload(plan=plan),
-        )
+                user_id=user_context.user_id,
+                task_type="analytics",
+                route="business_analysis",
+                status="executing",
+                sub_status="planning_query",
+                # 这里只写“权威运行态”的轻量输入摘要。
+                # workflow state 自己会继续保存 plan / workflow_stage 等微观临时态，
+                # 但这些对象不应直接进入 task_run.input_snapshot。
+                input_snapshot=self.analytics_service.snapshot_builder.build_input_snapshot(
+                    query=state["query"],
+                    conversation_id=conversation["conversation_id"],
+                    output_mode=state["output_mode"],
+                    need_sql_explain=state.get("need_sql_explain", False),
+                    user_context=user_context,
+                    planner_slots=plan.slots,
+                    planning_source=plan.planning_source,
+                    confidence=plan.confidence,
+                ),
+                risk_level="medium",
+                review_status="not_required",
+                run_id=state.get("run_id"),
+                trace_id=state.get("trace_id"),
+                parent_task_id=state.get("parent_task_id"),
+            )
+            state["run_id"] = task_run["run_id"]
+            state["trace_id"] = task_run["trace_id"]
+            self.analytics_service.conversation_repository.update_conversation(
+                conversation["conversation_id"],
+                current_route="analytics",
+                current_status="active",
+                last_run_id=task_run["run_id"],
+            )
+            # slot_snapshot 属于“恢复执行态”，只保存补槽恢复的必要字段。
+            self.analytics_service.task_run_repository.create_slot_snapshot(
+                run_id=task_run["run_id"],
+                task_type="analytics",
+                **self.analytics_service.snapshot_builder.build_slot_snapshot_payload(plan=plan),
+            )
         state["task_run"] = task_run
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_VALIDATE_SLOTS
         state["clarification_needed"] = not plan.is_executable
@@ -196,50 +225,72 @@ class AnalyticsWorkflowNodes:
         task_run = state["task_run"]
         user_context = state["user_context"]
 
-        metric_definition = self.analytics_service._get_cached_metric(plan.slots.get("metric"))
-        if metric_definition is None:
-            raise AppException(
-                error_code=error_codes.ANALYTICS_QUERY_FAILED,
-                message="未识别到可执行指标",
-                status_code=400,
-                detail={"metric": plan.slots.get("metric")},
+        def _build_sql_bundle():
+            metric_definition = self.analytics_service._get_cached_metric(plan.slots.get("metric"))
+            if metric_definition is None:
+                raise AppException(
+                    error_code=error_codes.ANALYTICS_QUERY_FAILED,
+                    message="未识别到可执行指标",
+                    status_code=400,
+                    detail={"metric": plan.slots.get("metric")},
+                )
+            data_source_definition = (
+                self.analytics_service.data_source_registry.get_data_source(plan.data_source)
+                if self.analytics_service.data_source_registry is not None
+                else self.analytics_service.schema_registry.get_data_source(plan.data_source)
             )
-        data_source_definition = (
-            self.analytics_service.data_source_registry.get_data_source(plan.data_source)
-            if self.analytics_service.data_source_registry is not None
-            else self.analytics_service.schema_registry.get_data_source(plan.data_source)
-        )
-        table_definition = self.analytics_service.schema_registry.get_table_definition(
-            table_name=metric_definition.table_name,
-            data_source=data_source_definition.key,
-        )
-        permission_check_result = self.analytics_service._assert_metric_permission(
-            metric_definition=metric_definition,
-            user_context=user_context,
-        )
-        permission_check_result["data_source"] = self.analytics_service._assert_data_source_permission(
-            data_source_definition=data_source_definition,
-            user_context=user_context,
-        )
-        data_scope_result = self.analytics_service._build_data_scope_result(
-            table_definition=table_definition,
-            user_context=user_context,
-        )
-        self.analytics_service.task_run_repository.update_task_run(
-            task_run["run_id"],
-            sub_status="building_sql",
-            # 这里只写权威运行态需要理解的轻量上下文摘要。
-            # plan / sql_bundle / workflow_stage 仍然只保留在微观 workflow state。
-            context_snapshot=self.analytics_service.snapshot_builder.build_context_snapshot(
-                slots=plan.slots,
-                planning_source=plan.planning_source,
-                confidence=plan.confidence,
-                resume_step="run_sql_pipeline",
-            ),
-        )
-        sql_bundle = self.analytics_service.sql_builder.build(
-            plan.slots,
-            department_code=user_context.department_code,
+            table_definition = self.analytics_service.schema_registry.get_table_definition(
+                table_name=metric_definition.table_name,
+                data_source=data_source_definition.key,
+            )
+            permission_check_result = self.analytics_service._assert_metric_permission(
+                metric_definition=metric_definition,
+                user_context=user_context,
+            )
+            permission_check_result["data_source"] = self.analytics_service._assert_data_source_permission(
+                data_source_definition=data_source_definition,
+                user_context=user_context,
+            )
+            data_scope_result = self.analytics_service._build_data_scope_result(
+                table_definition=table_definition,
+                user_context=user_context,
+            )
+            self.analytics_service.task_run_repository.update_task_run(
+                task_run["run_id"],
+                sub_status="building_sql",
+                # 这里只写权威运行态需要理解的轻量上下文摘要。
+                # plan / sql_bundle / workflow_stage 仍然只保留在微观 workflow state。
+                context_snapshot=self.analytics_service.snapshot_builder.build_context_snapshot(
+                    slots=plan.slots,
+                    planning_source=plan.planning_source,
+                    confidence=plan.confidence,
+                    resume_step="run_sql_pipeline",
+                ),
+            )
+            sql_bundle = self.analytics_service.sql_builder.build(
+                plan.slots,
+                department_code=user_context.department_code,
+            )
+            return (
+                metric_definition,
+                data_source_definition,
+                table_definition,
+                permission_check_result,
+                data_scope_result,
+                sql_bundle,
+            )
+
+        (
+            metric_definition,
+            data_source_definition,
+            table_definition,
+            permission_check_result,
+            data_scope_result,
+            sql_bundle,
+        ) = self.retry_controller.run(
+            node_name="analytics_build_sql",
+            state=state,
+            action=_build_sql_bundle,
         )
         state["metric_definition"] = metric_definition
         state["data_source_definition"] = data_source_definition
@@ -312,20 +363,44 @@ class AnalyticsWorkflowNodes:
             status="executing",
             sub_status="running_sql",
         )
-        execution_result = self.analytics_service.sql_gateway.execute_readonly_query(
-            SQLReadQueryRequest(
-                data_source=sql_bundle["data_source"],
-                sql=guard_result.checked_sql,
-                timeout_ms=3000,
-                row_limit=500,
-                trace_id=task_run["trace_id"],
-                run_id=task_run["run_id"],
-                metadata={
-                    "planning_source": plan.planning_source,
-                    "confidence": plan.confidence,
-                },
+        def _execute_sql():
+            return self.analytics_service.sql_gateway.execute_readonly_query(
+                SQLReadQueryRequest(
+                    data_source=sql_bundle["data_source"],
+                    sql=guard_result.checked_sql,
+                    timeout_ms=3000,
+                    row_limit=500,
+                    trace_id=task_run["trace_id"],
+                    run_id=task_run["run_id"],
+                    metadata={
+                        "planning_source": plan.planning_source,
+                        "confidence": plan.confidence,
+                    },
+                )
             )
-        )
+
+        try:
+            execution_result = self.retry_controller.run(
+                node_name="analytics_execute_sql",
+                state=state,
+                action=_execute_sql,
+            )
+        except Exception as exc:
+            state["workflow_outcome"] = AnalyticsWorkflowOutcome.FAIL
+            self.analytics_service.task_run_repository.update_task_run(
+                task_run["run_id"],
+                status="failed",
+                sub_status="running_sql",
+                error_code=error_codes.SQL_EXECUTION_FAILED,
+                error_message=str(exc),
+                finished_at=datetime.now(timezone.utc),
+            )
+            raise AppException(
+                error_code=error_codes.SQL_EXECUTION_FAILED,
+                message="经营分析 SQL 执行失败",
+                status_code=500,
+                detail={"reason": str(exc)},
+            ) from exc
         state["timing"]["sql_execute_ms"] = round((time.monotonic() - t2) * 1000, 1)
 
         audit_record = self.analytics_service.sql_audit_repository.create_audit(
@@ -437,40 +512,72 @@ class AnalyticsWorkflowNodes:
 
         if output_mode in {"standard", "full"}:
             t4 = time.monotonic()
-            chart_spec = self.analytics_service._build_chart_spec(
-                slots=plan.slots,
-                execution_result=execution_result,
-                metric_name=plan.slots["metric"],
-            )
-            insight_cards = self.analytics_service.insight_builder.build(
-                slots=plan.slots,
-                rows=masking_result.rows,
-                row_count=execution_result.row_count,
-            )
+            try:
+                chart_spec = self.analytics_service._build_chart_spec(
+                    slots=plan.slots,
+                    execution_result=execution_result,
+                    metric_name=plan.slots["metric"],
+                )
+            except Exception as exc:  # pragma: no cover - 降级保护
+                self.degradation_controller.mark_degraded(
+                    state=state,
+                    feature="chart_spec",
+                    reason=f"图表描述生成失败：{exc}",
+                )
+                chart_spec = None
+            try:
+                insight_cards = self.retry_controller.run(
+                    node_name="analytics_summarize",
+                    state=state,
+                    action=lambda: self.analytics_service.insight_builder.build(
+                        slots=plan.slots,
+                        rows=masking_result.rows,
+                        row_count=execution_result.row_count,
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - 降级保护
+                self.degradation_controller.mark_degraded(
+                    state=state,
+                    feature="insight_cards",
+                    reason=f"洞察卡片生成失败：{exc}",
+                )
+                insight_cards = []
             state["timing"]["insight_ms"] = round((time.monotonic() - t4) * 1000, 1)
 
         if output_mode == "full":
             t5 = time.monotonic()
-            report_blocks = self.analytics_service.report_formatter.build(
-                summary=summary,
-                insight_cards=insight_cards,
-                tables=[
-                    {
-                        "name": "main_result",
-                        "columns": masking_result.columns,
-                        "rows": [list(row.values()) for row in masking_result.rows],
-                    }
-                ],
-                chart_spec=chart_spec,
-                governance_note={
-                    "audit_info": audit_info,
-                    "permission_check_result": permission_check_result,
-                    "data_scope_result": data_scope_result,
-                    "masked_fields": masking_result.masked_fields,
-                    "effective_filters": effective_filters,
-                    "governance_action": masking_result.governance_decision,
-                },
-            )
+            try:
+                report_blocks = self.retry_controller.run(
+                    node_name="analytics_summarize",
+                    state=state,
+                    action=lambda: self.analytics_service.report_formatter.build(
+                        summary=summary,
+                        insight_cards=insight_cards,
+                        tables=[
+                            {
+                                "name": "main_result",
+                                "columns": masking_result.columns,
+                                "rows": [list(row.values()) for row in masking_result.rows],
+                            }
+                        ],
+                        chart_spec=chart_spec,
+                        governance_note={
+                            "audit_info": audit_info,
+                            "permission_check_result": permission_check_result,
+                            "data_scope_result": data_scope_result,
+                            "masked_fields": masking_result.masked_fields,
+                            "effective_filters": effective_filters,
+                            "governance_action": masking_result.governance_decision,
+                        },
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - 降级保护
+                self.degradation_controller.mark_degraded(
+                    state=state,
+                    feature="report_blocks",
+                    reason=f"报告块生成失败：{exc}",
+                )
+                report_blocks = []
             state["timing"]["report_ms"] = round((time.monotonic() - t5) * 1000, 1)
         else:
             state["timing"].setdefault("insight_ms", 0.0)
@@ -517,6 +624,12 @@ class AnalyticsWorkflowNodes:
             audit_info=audit_info,
             sql_explain=sql_explain,
             timing_breakdown=state["timing"],
+            degraded=bool(state.get("degraded")),
+            degraded_features=list(state.get("degraded_features") or []),
+            retry_summary={
+                "retry_count": int(state.get("retry_count", 0)),
+                "retry_history": list(state.get("retry_history") or []),
+            },
         )
         return state
 
@@ -599,6 +712,8 @@ class AnalyticsWorkflowNodes:
                     status="waiting_review",
                     sub_status="awaiting_review",
                     review_status="pending",
+                    degraded=bool(state.get("degraded")),
+                    degraded_features=list(state.get("degraded_features") or []),
                     is_async=False,
                     need_clarification=False,
                 ),
@@ -614,6 +729,8 @@ class AnalyticsWorkflowNodes:
                 run_id=task_run["run_id"],
                 status="succeeded",
                 sub_status="explaining_result",
+                degraded=bool(state.get("degraded")),
+                degraded_features=list(state.get("degraded_features") or []),
                 is_async=False,
                 need_clarification=False,
             ),
