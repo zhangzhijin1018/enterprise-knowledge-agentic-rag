@@ -577,6 +577,30 @@ flowchart TD
 
 ## 9.3 工作流节点
 
+当前经营分析节点已经升级为：
+
+```text
+analytics_entry
+  -> analytics_plan
+      -> 局部 ReAct Planning 子循环（仅复杂问题、仅规划、不执行）
+  -> analytics_validate_slots
+  -> analytics_clarify / analytics_build_sql
+  -> analytics_guard_sql
+  -> analytics_execute_sql
+  -> analytics_summarize
+  -> analytics_finish
+```
+
+关键边界：
+
+- 简单问题继续走确定性 `AnalyticsPlanner`；
+- 复杂问题在 `ANALYTICS_REACT_PLANNER_ENABLED=true` 时才进入局部 ReAct；
+- ReAct 最多执行 `ANALYTICS_REACT_MAX_STEPS` 步；
+- ReAct 只允许调用 `metric_catalog_lookup / schema_registry_lookup / conversation_memory_lookup / business_term_normalize`；
+- ReAct 禁止调用 `sql_execute / sql_guard_bypass / export / review / task_run_update`；
+- ReAct 失败会回退到确定性 Planner，并记录 `react_fallback_used`；
+- 是否缺槽位、是否允许执行 SQL，仍由本地 `SlotValidator / SQL Guard` 决定。
+
 ### 节点 1：问题理解
 提取：
 

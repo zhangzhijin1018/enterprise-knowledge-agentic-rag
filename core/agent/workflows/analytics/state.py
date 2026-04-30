@@ -225,6 +225,22 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # 需要重结果持久化时由 analytics_result_repository 承接。
     masking_result: Any
 
+    # 是否在 analytics_plan 节点使用了局部 ReAct planning。
+    # 这是微观执行调试字段，不是权威运行态；不能把完整 ReAct trace 写入 task_run。
+    react_used: bool
+
+    # ReAct 子循环的轻量步骤摘要。
+    # 每步只保留 action/observation 摘要，不能包含 SQL 执行或状态写入指令。
+    react_steps: list[dict[str, Any]]
+
+    # ReAct 子循环停止原因。
+    # 用于解释是正常 finish、达到 max_steps，还是触发禁止工具后回退。
+    react_stopped_reason: str
+
+    # ReAct 失败后是否回退到确定性 Planner。
+    # 降级回规则 Planner 是可接受的规划降级，不应影响后续 SQL 安全链。
+    react_fallback_used: bool
+
     # -------------------------
     # 输出态字段
     # -------------------------

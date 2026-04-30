@@ -99,6 +99,15 @@ Supervisor 层有两个硬约束：
 - `analytics_summarize`
 - `analytics_finish`
 
+从当前这一轮开始，`analytics_plan` 阶段内部允许一个局部 ReAct Planning 子循环。
+它不是新的宏观状态，也不是新的 workflow 节点，而是 planning 节点内部的微观增强：
+
+- 简单问题仍走确定性 Planner；
+- 复杂问题可走 ReAct 子循环；
+- ReAct 只生成结构化 `AnalyticsPlan` 候选；
+- 后续仍进入 `analytics_validate_slots / analytics_build_sql / analytics_guard_sql / analytics_execute_sql`；
+- ReAct trace 只作为微观调试摘要，不作为 Supervisor 宏观状态。
+
 ### 4.2 微观结果方向
 
 当前经营分析 workflow 结果方向包括：
@@ -129,6 +138,10 @@ Supervisor 层有两个硬约束：
 - `execution_result`
 - `summary`
 - `final_response`
+- `react_used`
+- `react_steps`
+- `react_stopped_reason`
+- `react_fallback_used`
 
 这些字段的分层很明确：
 

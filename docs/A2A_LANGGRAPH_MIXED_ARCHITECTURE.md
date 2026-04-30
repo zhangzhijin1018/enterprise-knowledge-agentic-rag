@@ -185,6 +185,8 @@ SupervisorService
 1. `AnalyticsLangGraphWorkflow` 已经正式长期跑在 `LangGraph StateGraph` 上；
 2. fallback runner 不再作为生产默认执行路径；
 3. 当前不接 LangGraph checkpoint，clarification / review / export 等恢复仍由业务状态机承担。
+4. 经营分析不是纯 ReAct 架构，而是 `StateGraph 受控流程 + analytics_plan 局部 ReAct Planning 子循环`。
+5. 局部 ReAct 只负责复杂问题 planning，最终仍输出结构化 `AnalyticsPlan`，后续 SQL 必须继续经过 `SQL Builder / SQL Guard / SQL Gateway`。
 
 当前如果需要进一步理解宏观状态与微观状态的边界，可继续参考：
 

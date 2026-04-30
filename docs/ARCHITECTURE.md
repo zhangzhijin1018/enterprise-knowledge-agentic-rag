@@ -308,6 +308,31 @@ API
 
 原因是当前经营分析恢复点相对固定，业务持久化层已经足够；如果此时引入 checkpoint，容易把微观执行大对象重新序列化进持久化链路。
 
+## 4.3 StateGraph 受控流程 + 局部 ReAct Planning
+
+当前项目不是纯 ReAct 架构。
+
+经营分析采用的是：
+
+```text
+StateGraph 受控流程
+  + analytics_plan 节点内部的局部 ReAct Planning 子循环
+```
+
+边界如下：
+
+- StateGraph 仍然是主流程，负责 `entry -> plan -> validate -> clarify/build_sql -> guard_sql -> execute_sql -> summarize -> finish`；
+- ReAct 只允许出现在 `analytics_plan` 阶段，用于复杂问题拆解、指标选择、维度选择和槽位候选生成；
+- ReAct 输出必须收敛为结构化 `AnalyticsPlan`；
+- ReAct 不允许生成最终 SQL，不允许执行 SQL，不允许绕过权限、SQL Guard、数据范围治理和 Human Review；
+- 后续执行继续由 `SQL Builder / SQL Guard / SQL Gateway` 串联完成。
+
+为什么不把全链路改成 ReAct：
+
+1. 经营分析涉及真实数据库、指标权限、部门范围过滤和敏感字段治理，必须保持确定性执行边界；
+2. SQL 生成和执行已经由 schema-aware Builder、SQL Guard、SQL MCP-compatible Gateway 控制；
+3. ReAct 更适合作为复杂 planning 的局部增强，而不是替代企业级工作流状态机。
+
 ### 4.1 为什么这样命名
 
 这样命名的原因是：

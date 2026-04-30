@@ -21,7 +21,11 @@ from core.analytics.analytics_result_model import AnalyticsResult
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
+from core.config.settings import get_settings
 from core.agent.workflows.analytics.degradation import AnalyticsWorkflowDegradationController
+from core.agent.workflows.analytics.react.planner import AnalyticsReactPlanner
+from core.agent.workflows.analytics.react.policy import AnalyticsReactPlanningPolicy
+from core.agent.workflows.analytics.react.tools import AnalyticsReactToolRegistry
 from core.agent.workflows.analytics.retry_policy import AnalyticsWorkflowRetryController
 from core.agent.workflows.analytics.state import AnalyticsWorkflowOutcome, AnalyticsWorkflowStage
 from core.services.analytics_service import AnalyticsService
@@ -36,6 +40,20 @@ class AnalyticsWorkflowNodes:
         self.analytics_service = analytics_service
         self.retry_controller = AnalyticsWorkflowRetryController()
         self.degradation_controller = AnalyticsWorkflowDegradationController()
+        self.settings = get_settings()
+        self.react_policy = analytics_service.analytics_react_policy or AnalyticsReactPlanningPolicy(
+            settings=self.settings,
+        )
+        self.react_planner = analytics_service.analytics_react_planner
+        if self.react_planner is None and self.settings.analytics_react_planner_enabled:
+            self.react_planner = AnalyticsReactPlanner(
+                base_planner=analytics_service.analytics_planner,
+                tool_registry=AnalyticsReactToolRegistry(
+                    metric_catalog=analytics_service.metric_catalog,
+                    schema_registry=analytics_service.schema_registry,
+                ),
+                settings=self.settings,
+            )
 
     def analytics_entry(self, state: dict) -> dict:
         """工作流入口节点。
@@ -95,6 +113,10 @@ class AnalyticsWorkflowNodes:
         state.setdefault("retry_history", [])
         state.setdefault("degraded", False)
         state.setdefault("degraded_features", [])
+        state.setdefault("react_used", False)
+        state.setdefault("react_steps", [])
+        state.setdefault("react_stopped_reason", "")
+        state.setdefault("react_fallback_used", False)
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_ENTRY
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         state["clarification_needed"] = False
@@ -107,19 +129,71 @@ class AnalyticsWorkflowNodes:
         职责：
         - 调用现有 AnalyticsPlanner；
         - 得到结构化槽位、clarification 信息和 data_source。
+
+        本轮开始，这个节点内部允许一个“局部 ReAct Planning 子循环”：
+        - 只在复杂经营分析问题上触发；
+        - 只做问题拆解和槽位候选生成；
+        - 最终仍然收敛为 `AnalyticsPlan`；
+        - 后续 SQL 仍必须走 SQL Builder / SQL Guard / SQL Gateway。
         """
 
         if state.get("recovered_plan") is not None:
             plan = state["recovered_plan"]
         else:
-            plan = self.analytics_service.analytics_planner.plan(
+            use_react = self.react_policy.should_use_react(
                 query=state["query"],
                 conversation_memory=state.get("conversation_memory"),
             )
+            if use_react and self.react_planner is not None:
+                try:
+                    plan, react_state = self.react_planner.plan(
+                        query=state["query"],
+                        conversation_memory=state.get("conversation_memory"),
+                        trace_id=state.get("trace_id"),
+                    )
+                    state["react_used"] = True
+                    state["react_steps"] = self._build_react_steps_summary(react_state)
+                    state["react_stopped_reason"] = react_state.stopped_reason
+                    state["react_fallback_used"] = False
+                except Exception as exc:
+                    # ReAct 是 planning 节点内部的增强子循环，不是受控主链的唯一入口。
+                    # 当 LLM、prompt 或结构化输出失败时，必须回退到确定性 Planner，
+                    # 避免复杂问题因为辅助规划失败而完全不可用。
+                    state["react_used"] = True
+                    state["react_fallback_used"] = True
+                    state["react_stopped_reason"] = f"fallback_to_rule_planner:{type(exc).__name__}"
+                    plan = self.analytics_service.analytics_planner.plan(
+                        query=state["query"],
+                        conversation_memory=state.get("conversation_memory"),
+                    )
+            else:
+                plan = self.analytics_service.analytics_planner.plan(
+                    query=state["query"],
+                    conversation_memory=state.get("conversation_memory"),
+                )
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_PLAN
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         state["plan"] = plan
         return state
+
+    def _build_react_steps_summary(self, react_state) -> list[dict]:
+        """构造 ReAct 轻量调试摘要。
+
+        ReAct trace 属于微观执行态，不是 task_run 权威运行态。
+        这里仅保留 action/observation/stopped_reason 的轻量摘要，
+        避免把 prompt、完整推理链或大对象写入持久化快照。
+        """
+
+        observations = {item.step: item.observation for item in react_state.observations}
+        return [
+            {
+                "step": item.step,
+                "action": item.action,
+                "action_input": item.action_input,
+                "observation": observations.get(item.step, {}),
+            }
+            for item in react_state.actions
+        ]
 
     def analytics_validate_slots(self, state: dict) -> dict:
         """槽位验证节点。
@@ -714,6 +788,9 @@ class AnalyticsWorkflowNodes:
                     review_status="pending",
                     degraded=bool(state.get("degraded")),
                     degraded_features=list(state.get("degraded_features") or []),
+                    react_used=bool(state.get("react_used")),
+                    react_fallback_used=bool(state.get("react_fallback_used")),
+                    react_stopped_reason=state.get("react_stopped_reason") or None,
                     is_async=False,
                     need_clarification=False,
                 ),
@@ -731,6 +808,9 @@ class AnalyticsWorkflowNodes:
                 sub_status="explaining_result",
                 degraded=bool(state.get("degraded")),
                 degraded_features=list(state.get("degraded_features") or []),
+                react_used=bool(state.get("react_used")),
+                react_fallback_used=bool(state.get("react_fallback_used")),
+                react_stopped_reason=state.get("react_stopped_reason") or None,
                 is_async=False,
                 need_clarification=False,
             ),

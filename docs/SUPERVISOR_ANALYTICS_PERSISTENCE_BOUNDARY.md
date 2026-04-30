@@ -272,6 +272,13 @@
 - `audit_record`
 - `masking_result`
 - `timing`
+- `react_used`
+- `react_steps`
+- `react_stopped_reason`
+- `react_fallback_used`
+
+其中 `react_*` 字段来自 `analytics_plan` 节点内部的局部 ReAct Planning 子循环。
+这些字段只用于调试复杂问题拆解过程，不是权威运行态；完整 prompt、模型原始输出和长推理链不进入 `task_run`。
 
 ### 7.2 为什么这些字段通常不直接落 task_run
 

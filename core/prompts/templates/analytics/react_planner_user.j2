@@ -1,0 +1,16 @@
+用户问题：
+{{ query }}
+
+当前会话记忆：
+{{ conversation_memory }}
+
+当前已执行步骤：
+{{ steps }}
+
+可用指标：
+{{ metric_names }}
+
+可用分组维度：
+{{ group_by_keys }}
+
+请只返回 JSON 对象。若已经足够形成候选规划，请使用 action=finish，并给出 final_plan_candidate.slots。

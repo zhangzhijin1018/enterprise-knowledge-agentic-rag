@@ -196,6 +196,45 @@ class Settings(BaseSettings):
         description="经营分析 Planner fallback 模型名称",
     )
 
+    # LLM Provider 名称。
+    # 从本轮开始，经营分析局部 ReAct planner 通过统一 LLM Gateway 接入模型，
+    # 业务节点不直接依赖某个具体 SDK。默认使用 openai_compatible，
+    # 便于对接 vLLM、阿里百炼、DeepSeek 或 OpenAI-compatible API。
+    llm_provider: str = Field(
+        default="openai_compatible",
+        description="LLM Provider 名称",
+    )
+
+    # 经营分析 ReAct planner 默认模型。
+    # 一期推荐私有化优先使用 Qwen2.5-14B-Instruct / Qwen2.5-32B-Instruct，
+    # 并通过 vLLM 暴露 OpenAI-compatible API。
+    llm_model_name: str = Field(
+        default="qwen2.5-14b-instruct",
+        description="LLM 默认模型名称",
+    )
+
+    # LLM 调用超时时间。
+    # 统一配置后，workflow 节点不会因为模型调用无限等待。
+    llm_timeout_seconds: int = Field(
+        default=30,
+        description="LLM 调用超时时间（秒）",
+    )
+
+    # 是否启用经营分析局部 ReAct planner。
+    # 默认关闭，原因是简单经营分析问题继续走本地确定性 Planner，
+    # 只有复杂问题且明确开启时才进入 LLM 子循环，避免成本和延迟无谓上升。
+    analytics_react_planner_enabled: bool = Field(
+        default=False,
+        description="是否启用经营分析局部 ReAct Planner",
+    )
+
+    # 经营分析 ReAct planner 最大步数。
+    # ReAct 子循环只做 planning，不做执行，因此必须限制步数防止无限循环。
+    analytics_react_max_steps: int = Field(
+        default=3,
+        description="经营分析 ReAct Planner 最大步数",
+    )
+
     # 是否默认让经营分析主查询链路走 workflow-first 执行路径。
     # 当前阶段保持这个开关的原因是：
     # 1. 经营分析已经有一条稳定的 Service 直连实现，不能贸然删除；

@@ -205,6 +205,17 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── review_service.py
 │   │   ├── trace_service.py
 │   │   └── evaluation_service.py
+│   ├── llm/
+│   │   ├── gateway.py
+│   │   ├── models.py
+│   │   └── structured.py
+│   ├── prompts/
+│   │   ├── registry.py
+│   │   ├── renderer.py
+│   │   └── templates/
+│   │       └── analytics/
+│   │           ├── react_planner_system.j2
+│   │           └── react_planner_user.j2
 │   ├── agent/
 │   │   ├── control_plane/
 │   │   │   ├── task_router.py
@@ -223,7 +234,12 @@ enterprise-knowledge-agentic-rag/
 │   │   │       ├── status_mapper.py
 │   │   │       ├── state.py
 │   │   │       ├── nodes.py
-│   │   │       └── graph.py
+│   │   │       ├── graph.py
+│   │   │       └── react/
+│   │   │           ├── planner.py
+│   │   │           ├── policy.py
+│   │   │           ├── state.py
+│   │   │           └── tools.py
 │   │   ├── mesh/
 │   │   │   ├── policy_agent.py
 │   │   │   ├── safety_agent.py

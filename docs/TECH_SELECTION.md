@@ -331,6 +331,42 @@ LLM Gateway 负责：
 - Token 统计；
 - LLM Call Trace。
 
+### 6.3.1 经营分析局部 ReAct Planner 的模型选型
+
+经营分析复杂 planning 场景使用统一 `LLMGateway` 接入模型，推荐：
+
+- 私有化优先：`Qwen2.5-14B-Instruct`；
+- 更强复杂拆解：`Qwen2.5-32B-Instruct`；
+- 部署方式：优先通过 vLLM 暴露 OpenAI-compatible API；
+- 测试环境：使用 `MockLLMGateway`，不要求真实 API Key。
+
+默认配置：
+
+```text
+LLM_PROVIDER=openai_compatible
+LLM_MODEL_NAME=qwen2.5-14b-instruct
+LLM_TIMEOUT_SECONDS=30
+ANALYTICS_REACT_PLANNER_ENABLED=false
+ANALYTICS_REACT_MAX_STEPS=3
+```
+
+默认关闭 ReAct planner 的原因是：
+
+1. 简单经营分析问题由确定性 Planner 更稳、更快、更可解释；
+2. ReAct 只服务复杂问题拆解，不能成为 SQL 执行链路；
+3. 企业环境需要先可控，再增强智能。
+
+### 6.3.2 Prompt Registry 与结构化输出
+
+Prompt 工程采用：
+
+- `core/prompts/registry.py`：按 `prompt_name` 加载模板；
+- `core/prompts/renderer.py`：渲染模板变量；
+- `core/prompts/templates/analytics/`：管理经营分析 ReAct planner 模板；
+- Pydantic Structured Output：强制 LLM 输出结构化对象。
+
+Prompt 不散落在业务节点中，原因是 prompt 需要版本化、审查、替换和模型适配。经营分析 ReAct prompt 明确约束：只能做规划，不能生成 SQL，不能绕过权限、SQL Guard 和数据范围治理。
+
 ### 6.4 设计建议
 
 代码中不允许业务模块直接调用具体模型 SDK。

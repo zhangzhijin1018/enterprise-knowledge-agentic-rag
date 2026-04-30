@@ -52,6 +52,8 @@ from core.tools.sql.sql_gateway import SQLGateway
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
     from core.agent.workflows.analytics.adapter import AnalyticsWorkflowAdapter
+    from core.agent.workflows.analytics.react.planner import AnalyticsReactPlanner
+    from core.agent.workflows.analytics.react.policy import AnalyticsReactPlanningPolicy
 
 VALID_OUTPUT_MODES = {"lite", "standard", "full"}
 DEFAULT_OUTPUT_MODE = "lite"
@@ -80,6 +82,8 @@ class AnalyticsService:
         snapshot_builder: AnalyticsSnapshotBuilder | None = None,
         use_workflow: bool = False,
         workflow_adapter: AnalyticsWorkflowAdapter | None = None,
+        analytics_react_planner: AnalyticsReactPlanner | None = None,
+        analytics_react_policy: AnalyticsReactPlanningPolicy | None = None,
     ) -> None:
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
@@ -105,6 +109,10 @@ class AnalyticsService:
         # 3. 因此通过 use_workflow 开关渐进切换，风险最小。
         self.use_workflow = use_workflow
         self.workflow_adapter = workflow_adapter
+        # 局部 ReAct planner 只允许挂在 analytics_plan 节点内部。
+        # Service 这里只持有可选依赖，避免 API / Service 直接操作 ReAct 子循环细节。
+        self.analytics_react_planner = analytics_react_planner
+        self.analytics_react_policy = analytics_react_policy
 
     def bind_workflow_adapter(
         self,
