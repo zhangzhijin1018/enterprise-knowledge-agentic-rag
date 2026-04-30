@@ -18,8 +18,13 @@ Supervisor 是“谁来做”的决策层，不是“怎么做”的执行层。
 from __future__ import annotations
 
 from core.agent.supervisor.delegation_controller import DelegationController
+from core.agent.supervisor.status import (
+    SupervisorStatus,
+    SupervisorSubStatus,
+    build_supervisor_status_contract,
+)
 from core.runtime.events import EventBus, InMemoryEventBus
-from core.tools.a2a import ResultContract, StatusContract
+from core.tools.a2a import ResultContract
 
 
 class SupervisorService:
@@ -45,7 +50,7 @@ class SupervisorService:
         """接收一个业务请求，并完成最小宏观调度。
 
         当前阶段先支持：
-        - 本地经营分析专家样板；
+        - 本地经营分析 workflow-first 子 Agent；
         - A2A-ready 远程委托占位；
         - 基于事件总线发布最小 task_submitted / task_finished 事件。
         """
@@ -65,6 +70,12 @@ class SupervisorService:
                 "task_type": task_type,
                 "source_agent": source_agent,
                 "target_agent": target.agent_card.agent_name,
+                "status": SupervisorStatus.DISPATCHED.value,
+                "sub_status": (
+                    SupervisorSubStatus.DELEGATING_LOCAL.value
+                    if target.agent_card.execution_mode == "local"
+                    else SupervisorSubStatus.DELEGATING_REMOTE.value
+                ),
             },
             trace_id=envelope.trace_id,
             run_id=envelope.run_id,
@@ -79,6 +90,8 @@ class SupervisorService:
                 payload={
                     "task_type": task_type,
                     "target_agent": target.agent_card.agent_name,
+                    "status": SupervisorStatus.FAILED.value,
+                    "sub_status": SupervisorSubStatus.TERMINAL_FAILURE.value,
                     "error": str(exc),
                 },
                 trace_id=envelope.trace_id,
@@ -86,7 +99,7 @@ class SupervisorService:
             )
             raise
 
-        event_type = "task_failed" if result.status.status == "failed" else "task_finished"
+        event_type = "task_failed" if result.status.status == SupervisorStatus.FAILED.value else "task_finished"
         self.event_bus.publish(
             stream="supervisor.tasks",
             event_type=event_type,
@@ -127,7 +140,11 @@ class SupervisorService:
             task_type=task_type,
             source_agent=source_agent,
             target_agent=target.agent_card.agent_name,
-            status=StatusContract(status="failed", sub_status="supervisor_failure", message=message),
+            status=build_supervisor_status_contract(
+                status=SupervisorStatus.FAILED,
+                sub_status=SupervisorSubStatus.TERMINAL_FAILURE,
+                message=message,
+            ),
             output_payload={},
             error={"message": message},
         )

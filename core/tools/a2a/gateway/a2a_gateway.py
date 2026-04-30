@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import Callable
 
-from core.tools.a2a.contracts import ResultContract, StatusContract, TaskEnvelope
+from core.agent.supervisor.status import (
+    SupervisorStatus,
+    SupervisorSubStatus,
+    build_supervisor_status_contract,
+)
+from core.tools.a2a.contracts import ResultContract, TaskEnvelope
 
 
 class A2AGateway:
@@ -45,9 +50,9 @@ class A2AGateway:
             task_type=envelope.task_type,
             source_agent=envelope.source_agent,
             target_agent=envelope.target_agent,
-            status=StatusContract(
-                status="waiting_remote",
-                sub_status="a2a_transport_not_implemented",
+            status=build_supervisor_status_contract(
+                status=SupervisorStatus.WAITING_REMOTE,
+                sub_status=SupervisorSubStatus.AWAITING_REMOTE_RESULT,
                 message="当前阶段仅完成 A2A-ready 委托边界，尚未接入真实远端 transport",
             ),
             output_payload={},

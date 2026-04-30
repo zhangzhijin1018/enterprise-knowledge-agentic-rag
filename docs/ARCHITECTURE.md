@@ -637,6 +637,7 @@ flowchart TB
 详细说明见：
 
 - `docs/A2A_LANGGRAPH_MIXED_ARCHITECTURE.md`
+- `docs/SUPERVISOR_ANALYTICS_STATE_MACHINE.md`
 
 ### 9.3 好理解的说法
 

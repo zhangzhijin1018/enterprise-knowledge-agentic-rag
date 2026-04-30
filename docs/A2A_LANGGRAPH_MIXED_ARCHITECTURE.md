@@ -180,6 +180,10 @@ SupervisorService
 3. Adapter 负责屏蔽 workflow 细节，是从 service-first 过渡到 workflow-first 的稳定边界；
 4. Supervisor 现在已经是“调 workflow”，而不是“调普通 service 样板”。
 
+当前如果需要进一步理解宏观状态与微观状态的边界，可继续参考：
+
+- `docs/SUPERVISOR_ANALYTICS_STATE_MACHINE.md`
+
 ---
 
 ## 7. 当前目录落点

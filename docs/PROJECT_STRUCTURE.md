@@ -77,11 +77,13 @@ Agent 层负责：
 - `core/agent/supervisor/`
   - 宏观调度层；
   - 负责 Supervisor、委托、结果汇总、A2A-ready 边界；
+  - `status.py` 负责定义宏观状态机；
 
 - `core/agent/workflows/`
   - 微观执行层；
   - 负责单个业务专家内部的 workflow；
-  - 当前先落地 `analytics/`，并通过 `adapter.py` 作为真实接入层。
+  - 当前先落地 `analytics/`，并通过 `adapter.py` 作为真实接入层；
+  - `status_mapper.py` 负责微观状态到宏观状态的映射。
 
 ### 2.5 Tool 层负责执行
 
@@ -211,10 +213,12 @@ enterprise-knowledge-agentic-rag/
 │   │   │   └── result_aggregator.py
 │   │   ├── supervisor/
 │   │   │   ├── supervisor_service.py
+│   │   │   ├── status.py
 │   │   │   └── delegation_controller.py
 │   │   ├── workflows/
 │   │   │   └── analytics/
 │   │   │       ├── adapter.py
+│   │   │       ├── status_mapper.py
 │   │   │       ├── state.py
 │   │   │       ├── nodes.py
 │   │   │       └── graph.py
@@ -276,6 +280,7 @@ enterprise-knowledge-agentic-rag/
 │   ├── ANALYTICS_DATA_SOURCE.md
 │   ├── A2A_LANGGRAPH_MIXED_ARCHITECTURE.md
 │   ├── ANALYTICS_PERF_REVIEW_V1.md
+│   ├── SUPERVISOR_ANALYTICS_STATE_MACHINE.md
 │   ├── AGENT_WORKFLOW.md
 │   ├── DB_DESIGN.md
 │   ├── API_DESIGN.md

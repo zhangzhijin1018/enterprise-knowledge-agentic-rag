@@ -20,6 +20,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from core.agent.workflows.analytics.status_mapper import AnalyticsWorkflowStatusMapper
+from core.common.exceptions import AppException
 from core.tools.a2a import ResultContract, StatusContract, TaskEnvelope
 from core.agent.workflows.analytics.graph import AnalyticsLangGraphWorkflow
 
@@ -64,7 +66,44 @@ class AnalyticsWorkflowAdapter:
             parent_task_id=parent_task_id,
         )
 
-    def to_result_contract(self, *, envelope: TaskEnvelope, response: dict) -> ResultContract:
+    def execute_state(
+        self,
+        *,
+        query: str,
+        user_context: UserContext,
+        conversation_id: str | None = None,
+        output_mode: str = "lite",
+        need_sql_explain: bool = False,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
+    ) -> dict:
+        """执行 workflow 并返回完整微观状态。
+
+        这个方法主要供：
+        1. Supervisor / A2A 本地 handler 做状态映射；
+        2. 状态机测试验证微观字段；
+        3. 后续恢复执行和更细粒度可观测性接入。
+        """
+
+        return self.workflow.run_state(
+            query=query,
+            user_context=user_context,
+            conversation_id=conversation_id,
+            output_mode=output_mode,
+            need_sql_explain=need_sql_explain,
+            run_id=run_id,
+            trace_id=trace_id,
+            parent_task_id=parent_task_id,
+        )
+
+    def to_result_contract(
+        self,
+        *,
+        envelope: TaskEnvelope,
+        response: dict,
+        workflow_state: dict | None = None,
+    ) -> ResultContract:
         """把 workflow 业务返回统一收敛为 A2A ResultContract。
 
         为什么必须做这一步：
@@ -75,6 +114,16 @@ class AnalyticsWorkflowAdapter:
 
         meta = response.get("meta", {})
         data = response.get("data", {})
+        status = (
+            AnalyticsWorkflowStatusMapper.map_to_supervisor_status(workflow_state)
+            if workflow_state is not None
+            else StatusContract(
+                status=meta.get("status", "failed"),
+                sub_status=meta.get("sub_status"),
+                review_status=meta.get("review_status"),
+                message=meta.get("message"),
+            )
+        )
         return ResultContract(
             run_id=meta.get("run_id") or envelope.run_id,
             trace_id=data.get("trace_id") or envelope.trace_id,
@@ -82,12 +131,7 @@ class AnalyticsWorkflowAdapter:
             task_type=envelope.task_type,
             source_agent=envelope.source_agent,
             target_agent=envelope.target_agent,
-            status=StatusContract(
-                status=meta.get("status", "failed"),
-                sub_status=meta.get("sub_status"),
-                review_status=meta.get("review_status"),
-                message=meta.get("message"),
-            ),
+            status=status,
             output_payload=response,
             error=response.get("error"),
         )
@@ -97,16 +141,43 @@ class AnalyticsWorkflowAdapter:
 
         def _handler(envelope: TaskEnvelope) -> ResultContract:
             payload = envelope.input_payload
-            response = self.execute_query(
-                query=payload["query"],
-                user_context=payload["user_context"],
-                conversation_id=payload.get("conversation_id"),
-                output_mode=payload.get("output_mode", "lite"),
-                need_sql_explain=payload.get("need_sql_explain", False),
-                run_id=envelope.run_id,
-                trace_id=envelope.trace_id,
-                parent_task_id=envelope.parent_task_id,
-            )
-            return self.to_result_contract(envelope=envelope, response=response)
+            try:
+                workflow_state = self.execute_state(
+                    query=payload["query"],
+                    user_context=payload["user_context"],
+                    conversation_id=payload.get("conversation_id"),
+                    output_mode=payload.get("output_mode", "lite"),
+                    need_sql_explain=payload.get("need_sql_explain", False),
+                    run_id=envelope.run_id,
+                    trace_id=envelope.trace_id,
+                    parent_task_id=envelope.parent_task_id,
+                )
+                response = workflow_state["final_response"]
+                return self.to_result_contract(
+                    envelope=envelope,
+                    response=response,
+                    workflow_state=workflow_state,
+                )
+            except AppException as exc:
+                return ResultContract(
+                    run_id=envelope.run_id,
+                    trace_id=envelope.trace_id,
+                    parent_task_id=envelope.parent_task_id,
+                    task_type=envelope.task_type,
+                    source_agent=envelope.source_agent,
+                    target_agent=envelope.target_agent,
+                    status=StatusContract(
+                        status="failed",
+                        sub_status="terminal_failure",
+                        review_status=None,
+                        message=exc.message,
+                    ),
+                    output_payload={},
+                    error={
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                        "detail": exc.detail,
+                    },
+                )
 
         return _handler

@@ -20,9 +20,15 @@ from __future__ import annotations
 from typing import Callable
 
 from core.agent.workflows.analytics.nodes import AnalyticsWorkflowNodes
-from core.agent.workflows.analytics.state import AnalyticsWorkflowState
+from core.agent.workflows.analytics.state import (
+    AnalyticsWorkflowOutcome,
+    AnalyticsWorkflowStage,
+    AnalyticsWorkflowState,
+)
+from core.agent.workflows.analytics.status_mapper import AnalyticsWorkflowStatusMapper
+from core.common.exceptions import AppException
 from core.services.analytics_service import AnalyticsService
-from core.tools.a2a import ResultContract, StatusContract
+from core.tools.a2a import ResultContract
 
 try:  # pragma: no cover - 当前仓库未强依赖 langgraph 时走 fallback
     from langgraph.graph import END, StateGraph
@@ -111,6 +117,32 @@ class AnalyticsLangGraphWorkflow:
         graph.add_edge("analytics_finish", END)
         return graph.compile()
 
+    def run_state(
+        self,
+        *,
+        query: str,
+        user_context,
+        conversation_id: str | None = None,
+        output_mode: str = "lite",
+        need_sql_explain: bool = False,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
+    ) -> AnalyticsWorkflowState:
+        """执行经营分析微观工作流并返回完整微观状态。"""
+
+        state: AnalyticsWorkflowState = {
+            "query": query,
+            "user_context": user_context,
+            "conversation_id": conversation_id,
+            "parent_task_id": parent_task_id,
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "output_mode": output_mode,
+            "need_sql_explain": need_sql_explain,
+        }
+        return self._compiled.invoke(state)
+
     def invoke(
         self,
         *,
@@ -123,19 +155,18 @@ class AnalyticsLangGraphWorkflow:
         trace_id: str | None = None,
         parent_task_id: str | None = None,
     ) -> dict:
-        """执行经营分析微观工作流。"""
+        """执行经营分析微观工作流并返回最终业务响应。"""
 
-        state: AnalyticsWorkflowState = {
-            "query": query,
-            "user_context": user_context,
-            "conversation_id": conversation_id,
-            "parent_task_id": parent_task_id,
-            "run_id": run_id,
-            "trace_id": trace_id,
-            "output_mode": output_mode,
-            "need_sql_explain": need_sql_explain,
-        }
-        result_state = self._compiled.invoke(state)
+        result_state = self.run_state(
+            query=query,
+            user_context=user_context,
+            conversation_id=conversation_id,
+            output_mode=output_mode,
+            need_sql_explain=need_sql_explain,
+            run_id=run_id,
+            trace_id=trace_id,
+            parent_task_id=parent_task_id,
+        )
         return result_state["final_response"]
 
     def as_local_handler(self) -> Callable:
@@ -143,28 +174,50 @@ class AnalyticsLangGraphWorkflow:
 
         def _handler(envelope) -> dict:
             payload = envelope.input_payload
-            response = self.invoke(
-                query=payload["query"],
-                user_context=payload["user_context"],
-                conversation_id=payload.get("conversation_id"),
-                output_mode=payload.get("output_mode", "lite"),
-                need_sql_explain=payload.get("need_sql_explain", False),
-            )
-            meta = response.get("meta", {})
-            return ResultContract(
-                run_id=meta.get("run_id") or envelope.run_id,
-                trace_id=response.get("data", {}).get("trace_id") or envelope.trace_id,
-                parent_task_id=envelope.parent_task_id,
-                task_type=envelope.task_type,
-                source_agent=envelope.source_agent,
-                target_agent=envelope.target_agent,
-                status=StatusContract(
-                    status=meta.get("status", "failed"),
-                    sub_status=meta.get("sub_status"),
-                    review_status=meta.get("review_status"),
-                ),
-                output_payload=response,
-                error=None,
-            )
+            try:
+                result_state = self.run_state(
+                    query=payload["query"],
+                    user_context=payload["user_context"],
+                    conversation_id=payload.get("conversation_id"),
+                    output_mode=payload.get("output_mode", "lite"),
+                    need_sql_explain=payload.get("need_sql_explain", False),
+                    run_id=envelope.run_id,
+                    trace_id=envelope.trace_id,
+                    parent_task_id=envelope.parent_task_id,
+                )
+                response = result_state["final_response"]
+                status = AnalyticsWorkflowStatusMapper.map_to_supervisor_status(result_state)
+                return ResultContract(
+                    run_id=result_state.get("run_id") or envelope.run_id,
+                    trace_id=result_state.get("trace_id") or envelope.trace_id,
+                    parent_task_id=envelope.parent_task_id,
+                    task_type=envelope.task_type,
+                    source_agent=envelope.source_agent,
+                    target_agent=envelope.target_agent,
+                    status=status,
+                    output_payload=response,
+                    error=None,
+                )
+            except AppException as exc:
+                return ResultContract(
+                    run_id=envelope.run_id,
+                    trace_id=envelope.trace_id,
+                    parent_task_id=envelope.parent_task_id,
+                    task_type=envelope.task_type,
+                    source_agent=envelope.source_agent,
+                    target_agent=envelope.target_agent,
+                    status=AnalyticsWorkflowStatusMapper.map_to_supervisor_status(
+                        {
+                            "workflow_outcome": AnalyticsWorkflowOutcome.FAIL,
+                            "workflow_stage": AnalyticsWorkflowStage.ANALYTICS_FINISH,
+                        }
+                    ),
+                    output_payload={},
+                    error={
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                        "detail": exc.detail,
+                    },
+                )
 
         return _handler

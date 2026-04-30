@@ -21,6 +21,7 @@ from core.analytics.analytics_result_model import AnalyticsResult
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
+from core.agent.workflows.analytics.state import AnalyticsWorkflowOutcome, AnalyticsWorkflowStage
 from core.services.analytics_service import AnalyticsService
 from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 
@@ -73,6 +74,10 @@ class AnalyticsWorkflowNodes:
         state["conversation_id"] = conversation["conversation_id"]
         state["conversation_memory"] = memory
         state["timing"] = {}
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_ENTRY
+        state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
+        state["clarification_needed"] = False
+        state["review_required"] = False
         return state
 
     def analytics_plan(self, state: dict) -> dict:
@@ -87,6 +92,8 @@ class AnalyticsWorkflowNodes:
             query=state["query"],
             conversation_memory=state.get("conversation_memory"),
         )
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_PLAN
+        state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         state["plan"] = plan
         return state
 
@@ -142,7 +149,14 @@ class AnalyticsWorkflowNodes:
             resume_step="resume_after_analytics_slot_fill" if not plan.is_executable else "run_sql_pipeline",
         )
         state["task_run"] = task_run
-        state["next_step"] = "analytics_clarify" if not plan.is_executable else "analytics_build_sql"
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_VALIDATE_SLOTS
+        state["clarification_needed"] = not plan.is_executable
+        if not plan.is_executable:
+            state["workflow_outcome"] = AnalyticsWorkflowOutcome.CLARIFY
+            state["next_step"] = "analytics_clarify"
+        else:
+            state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
+            state["next_step"] = "analytics_build_sql"
         return state
 
     def analytics_clarify(self, state: dict) -> dict:
@@ -158,6 +172,9 @@ class AnalyticsWorkflowNodes:
             task_run=state["task_run"],
             plan=state["plan"],
         )
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_CLARIFY
+        state["workflow_outcome"] = AnalyticsWorkflowOutcome.CLARIFY
+        state["clarification_needed"] = True
         return state
 
     def analytics_build_sql(self, state: dict) -> dict:
@@ -170,6 +187,8 @@ class AnalyticsWorkflowNodes:
         """
 
         t0 = time.monotonic()
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_BUILD_SQL
+        state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         plan = state["plan"]
         task_run = state["task_run"]
         user_context = state["user_context"]
@@ -235,6 +254,7 @@ class AnalyticsWorkflowNodes:
         """
 
         t1 = time.monotonic()
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_GUARD_SQL
         task_run = state["task_run"]
         table_definition = state["table_definition"]
         user_context = state["user_context"]
@@ -251,6 +271,7 @@ class AnalyticsWorkflowNodes:
         )
         state["timing"]["sql_guard_ms"] = round((time.monotonic() - t1) * 1000, 1)
         if not guard_result.is_safe or not guard_result.checked_sql:
+            state["workflow_outcome"] = AnalyticsWorkflowOutcome.FAIL
             raise AppException(
                 error_code=error_codes.SQL_GUARD_BLOCKED,
                 message="SQL 安全检查未通过",
@@ -270,6 +291,7 @@ class AnalyticsWorkflowNodes:
         """
 
         t2 = time.monotonic()
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_EXECUTE_SQL
         plan = state["plan"]
         task_run = state["task_run"]
         user_context = state["user_context"]
@@ -360,6 +382,8 @@ class AnalyticsWorkflowNodes:
         """
 
         plan = state["plan"]
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_SUMMARIZE
+        state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         output_mode = state["output_mode"]
         execution_result = state["execution_result"]
         masking_result = state["masking_result"]
@@ -371,6 +395,7 @@ class AnalyticsWorkflowNodes:
         need_sql_explain = bool(state.get("need_sql_explain"))
 
         summary = self.analytics_service._build_summary(plan.slots, execution_result)
+        state["summary"] = summary
         sql_explain = None
         if need_sql_explain:
             sql_explain = (
@@ -500,6 +525,7 @@ class AnalyticsWorkflowNodes:
         """
 
         if state.get("final_response") is not None:
+            state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_FINISH
             return state
 
         analytics_result = state["analytics_result"]
@@ -550,6 +576,27 @@ class AnalyticsWorkflowNodes:
             response_data = analytics_result.to_standard_view()
         else:
             response_data = analytics_result.to_full_view()
+
+        if state.get("review_required"):
+            state["final_response"] = {
+                "data": {
+                    "review_required": True,
+                    "summary": analytics_result.summary,
+                },
+                "meta": build_response_meta(
+                    conversation_id=conversation_id,
+                    run_id=task_run["run_id"],
+                    status="waiting_review",
+                    sub_status="awaiting_review",
+                    review_status="pending",
+                    is_async=False,
+                    need_clarification=False,
+                ),
+            }
+            state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_FINISH
+            state["workflow_outcome"] = AnalyticsWorkflowOutcome.REVIEW
+            return state
+
         state["final_response"] = {
             "data": response_data,
             "meta": build_response_meta(
@@ -561,4 +608,6 @@ class AnalyticsWorkflowNodes:
                 need_clarification=False,
             ),
         }
+        state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_FINISH
+        state["workflow_outcome"] = AnalyticsWorkflowOutcome.REVIEW if state.get("review_required") else AnalyticsWorkflowOutcome.FINISH
         return state

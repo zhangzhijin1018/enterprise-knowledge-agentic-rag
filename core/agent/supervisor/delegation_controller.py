@@ -17,13 +17,17 @@ from __future__ import annotations
 from typing import Callable
 from uuid import uuid4
 
+from core.agent.supervisor.status import (
+    SupervisorStatus,
+    SupervisorSubStatus,
+    build_supervisor_status_contract,
+)
 from core.security.auth import UserContext
 from core.tools.a2a import (
     A2AGateway,
     AgentCardRef,
     DelegationTarget,
     ResultContract,
-    StatusContract,
     TaskEnvelope,
 )
 
@@ -112,7 +116,7 @@ class DelegationController:
             source_agent=source_agent,
             target_agent=target_agent,
             input_payload=input_payload,
-            status="pending",
+            status=SupervisorStatus.CREATED.value,
         )
 
     def dispatch(self, envelope: TaskEnvelope) -> ResultContract:
@@ -129,9 +133,9 @@ class DelegationController:
                     task_type=envelope.task_type,
                     source_agent=envelope.source_agent,
                     target_agent=envelope.target_agent,
-                    status=StatusContract(
-                        status="failed",
-                        sub_status="missing_local_handler",
+                    status=build_supervisor_status_contract(
+                        status=SupervisorStatus.FAILED,
+                        sub_status=SupervisorSubStatus.TERMINAL_FAILURE,
                         message=f"未找到本地业务专家处理器: {target.agent_card.agent_name}",
                     ),
                     output_payload={},
