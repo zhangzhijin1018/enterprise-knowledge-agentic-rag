@@ -84,6 +84,8 @@ Agent 层负责：
   - 负责单个业务专家内部的 workflow；
   - 当前先落地 `analytics/`，并通过 `adapter.py` 作为真实接入层；
   - `status_mapper.py` 负责微观状态到宏观状态的映射。
+  - 从当前这一轮开始，`graph.py` 中的经营分析 workflow 已经正式长期跑在 `LangGraph StateGraph` 上；
+  - 当前不接 checkpoint，恢复继续由业务状态机承担。
 
 ### 2.5 Tool 层负责执行
 
@@ -356,6 +358,16 @@ sql/analytics/
 - `core/repositories/analytics_result_repository.py`
   - 经营分析重结果仓储；
   - 配合 `task_runs.output_snapshot` 轻快照工作，负责 tables / insight_cards / report_blocks / chart_spec 的独立存取。
+
+- `core/agent/workflows/analytics/snapshot_builder.py`
+  - 经营分析轻量快照构造层；
+  - 负责统一构造 `input_snapshot / output_snapshot / context_snapshot / slot_snapshot / clarification_event`
+    的轻量 payload，避免上游继续手写松散 dict。
+
+- `core/agent/workflows/analytics/graph.py`
+  - 经营分析 `StateGraph-first` 正式执行图；
+  - 当前不再把本地 fallback runner 作为生产默认路径；
+  - 如果运行环境缺少 `langgraph`，应直接清晰失败并提示检查正式依赖。
 
 - `tests/perf/test_analytics_perf_acceptance.py`
   - 第18轮性能验收自动化测试；

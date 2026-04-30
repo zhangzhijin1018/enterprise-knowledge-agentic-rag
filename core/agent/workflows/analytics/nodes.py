@@ -116,14 +116,19 @@ class AnalyticsWorkflowNodes:
             route="business_analysis",
             status="executing",
             sub_status="planning_query",
-            input_snapshot={
-                "query": state["query"],
-                "output_mode": state["output_mode"],
-                "need_sql_explain": state.get("need_sql_explain", False),
-                "planner_slots": plan.slots,
-                "planning_source": plan.planning_source,
-                "confidence": plan.confidence,
-            },
+            # 这里只写“权威运行态”的轻量输入摘要。
+            # workflow state 自己会继续保存 plan / workflow_stage 等微观临时态，
+            # 但这些对象不应直接进入 task_run.input_snapshot。
+            input_snapshot=self.analytics_service.snapshot_builder.build_input_snapshot(
+                query=state["query"],
+                conversation_id=conversation["conversation_id"],
+                output_mode=state["output_mode"],
+                need_sql_explain=state.get("need_sql_explain", False),
+                user_context=user_context,
+                planner_slots=plan.slots,
+                planning_source=plan.planning_source,
+                confidence=plan.confidence,
+            ),
             risk_level="medium",
             review_status="not_required",
             run_id=state.get("run_id"),
@@ -138,15 +143,11 @@ class AnalyticsWorkflowNodes:
             current_status="active",
             last_run_id=task_run["run_id"],
         )
+        # slot_snapshot 属于“恢复执行态”，只保存补槽恢复的必要字段。
         self.analytics_service.task_run_repository.create_slot_snapshot(
             run_id=task_run["run_id"],
             task_type="analytics",
-            required_slots=plan.required_slots,
-            collected_slots=plan.slots,
-            missing_slots=plan.missing_slots,
-            min_executable_satisfied=plan.is_executable,
-            awaiting_user_input=not plan.is_executable,
-            resume_step="resume_after_analytics_slot_fill" if not plan.is_executable else "run_sql_pipeline",
+            **self.analytics_service.snapshot_builder.build_slot_snapshot_payload(plan=plan),
         )
         state["task_run"] = task_run
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_VALIDATE_SLOTS
@@ -167,6 +168,8 @@ class AnalyticsWorkflowNodes:
         - 当前阶段仍复用现有 AnalyticsService 的澄清落库和返回格式。
         """
 
+        # clarification 的持久化写入仍复用 service，
+        # 但 service 内部现在也只会写轻量 context_snapshot 和 clarification_event。
         state["final_response"] = self.analytics_service._build_clarification_response(
             conversation_id=state["conversation_id"],
             task_run=state["task_run"],
@@ -225,11 +228,14 @@ class AnalyticsWorkflowNodes:
         self.analytics_service.task_run_repository.update_task_run(
             task_run["run_id"],
             sub_status="building_sql",
-            context_snapshot={
-                "slots": plan.slots,
-                "planning_source": plan.planning_source,
-                "confidence": plan.confidence,
-            },
+            # 这里只写权威运行态需要理解的轻量上下文摘要。
+            # plan / sql_bundle / workflow_stage 仍然只保留在微观 workflow state。
+            context_snapshot=self.analytics_service.snapshot_builder.build_context_snapshot(
+                slots=plan.slots,
+                planning_source=plan.planning_source,
+                confidence=plan.confidence,
+                resume_step="run_sql_pipeline",
+            ),
         )
         sql_bundle = self.analytics_service.sql_builder.build(
             plan.slots,
@@ -533,7 +539,11 @@ class AnalyticsWorkflowNodes:
         conversation_id = state["conversation_id"]
         plan = state["plan"]
 
-        lightweight_snapshot = analytics_result.to_lightweight_snapshot()
+        # finish 节点只把轻量输出摘要写回 task_run。
+        # 重结果继续交给 analytics_result_repository，避免 output_snapshot 再次膨胀。
+        lightweight_snapshot = self.analytics_service.snapshot_builder.build_output_snapshot(
+            analytics_result=analytics_result,
+        )
         self.analytics_service.task_run_repository.update_task_run(
             task_run["run_id"],
             status="succeeded",

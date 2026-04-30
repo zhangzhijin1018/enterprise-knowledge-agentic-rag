@@ -272,6 +272,42 @@ RAG、Agent、SQL、合同审查、MCP 调用、A2A 委托、Human Review 触发
 - 也不是一上来就强依赖复杂配置中心；
 - 而是在“内置默认定义 + repository 覆盖”的方式下，先把一期真实数据源接入边界做稳。
 
+## 4.2 Analytics Workflow 的正式执行路径
+
+从当前这一轮开始，经营分析子 Agent 已经从“LangGraph-ready 样板”升级为 **StateGraph-first 正式执行路径**。
+
+当前稳定分层为：
+
+```text
+API
+  -> AnalyticsService
+  -> AnalyticsWorkflowAdapter
+  -> AnalyticsLangGraphWorkflow(StateGraph)
+  -> SQL Builder / SQL Guard / SQL Gateway / Repository
+```
+
+这意味着：
+
+- `Supervisor` 继续负责宏观调度；
+- `AnalyticsLangGraphWorkflow` 负责经营分析内部的微观状态流转；
+- fallback runner 不再作为生产默认路径。
+
+这样做的原因是：
+
+1. 经营分析已经是第一个真实接入 workflow-first 的业务专家；
+2. `StateGraph` 能把 `plan -> validate_slots -> clarify/build_sql -> guard_sql -> execute_sql -> summarize -> finish` 显式化；
+3. 生产主路径和测试主路径必须一致，不能长期保留“双执行引擎”。
+
+当前仍然 **不接 LangGraph checkpoint**。恢复执行继续由业务状态机承担：
+
+- `task_run`
+- `slot_snapshot`
+- `clarification_event`
+- `review_task`
+- `export_task`
+
+原因是当前经营分析恢复点相对固定，业务持久化层已经足够；如果此时引入 checkpoint，容易把微观执行大对象重新序列化进持久化链路。
+
 ### 4.1 为什么这样命名
 
 这样命名的原因是：
@@ -1470,6 +1506,11 @@ sequenceDiagram
 > - `slot_snapshot / clarification_event`：恢复执行态；
 > - `analytics_result_repository / analytics_results`：重结果态；
 > - `AnalyticsWorkflowState`：微观临时态。
+> - `AnalyticsSnapshotBuilder`：上游轻量快照构造层。
+>
+> 额外约束：
+> - Repository sanitize 只是最后兜底；
+> - `AnalyticsService / workflow nodes` 上游写入点本身也必须主动只写轻量 snapshot。
 
 ```mermaid
 sequenceDiagram

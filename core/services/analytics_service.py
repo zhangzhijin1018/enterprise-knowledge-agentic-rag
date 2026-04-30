@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
+from core.agent.workflows.analytics.snapshot_builder import AnalyticsSnapshotBuilder
 from core.analytics.analytics_result_model import AnalyticsResult
 from core.analytics.data_masking import DataMaskingResult, DataMaskingService
 from core.analytics.data_source_registry import DataSourceRegistry
@@ -76,6 +77,7 @@ class AnalyticsService:
         report_formatter: ReportFormatter | None = None,
         analytics_result_repository: AnalyticsResultRepository | None = None,
         registry_cache: RegistryCache | None = None,
+        snapshot_builder: AnalyticsSnapshotBuilder | None = None,
         use_workflow: bool = False,
         workflow_adapter: AnalyticsWorkflowAdapter | None = None,
     ) -> None:
@@ -94,6 +96,9 @@ class AnalyticsService:
         self.report_formatter = report_formatter or ReportFormatter()
         self.analytics_result_repository = analytics_result_repository or AnalyticsResultRepository()
         self.registry_cache = registry_cache or get_global_cache()
+        # Snapshot Builder 是“上游主动收口”的关键层。
+        # Repository sanitize 仍然保留，但这里优先保证上游写入本身就是轻量、边界正确的快照。
+        self.snapshot_builder = snapshot_builder or AnalyticsSnapshotBuilder()
         # 当前阶段保留“兼容直连模式”，原因是：
         # 1. 已有 analytics/export/review/测试链路都还依赖现有 Service；
         # 2. workflow-first 是本轮新主路径，但不能一次性把所有调用方都强制改完；
@@ -177,14 +182,18 @@ class AnalyticsService:
             route="business_analysis",
             status="executing",
             sub_status="planning_query",
-            input_snapshot={
-                "query": normalized_query,
-                "output_mode": normalized_output_mode,
-                "need_sql_explain": need_sql_explain,
-                "planner_slots": plan.slots,
-                "planning_source": plan.planning_source,
-                "confidence": plan.confidence,
-            },
+            # 这里只写“权威运行态”的轻量输入快照。
+            # plan/sql_bundle/workflow_state 之类的微观对象不应该进入 task_run。
+            input_snapshot=self.snapshot_builder.build_input_snapshot(
+                query=normalized_query,
+                conversation_id=conversation["conversation_id"],
+                output_mode=normalized_output_mode,
+                need_sql_explain=need_sql_explain,
+                user_context=user_context,
+                planner_slots=plan.slots,
+                planning_source=plan.planning_source,
+                confidence=plan.confidence,
+            ),
             risk_level="medium",
             review_status="not_required",
         )
@@ -195,15 +204,11 @@ class AnalyticsService:
             last_run_id=task_run["run_id"],
         )
 
+        # slot_snapshot 是“恢复执行态”，这里只写补槽恢复的必要字段。
         self.task_run_repository.create_slot_snapshot(
             run_id=task_run["run_id"],
             task_type="analytics",
-            required_slots=plan.required_slots,
-            collected_slots=plan.slots,
-            missing_slots=plan.missing_slots,
-            min_executable_satisfied=plan.is_executable,
-            awaiting_user_input=not plan.is_executable,
-            resume_step="resume_after_analytics_slot_fill" if not plan.is_executable else "run_sql_pipeline",
+            **self.snapshot_builder.build_slot_snapshot_payload(plan=plan),
         )
 
         if not plan.is_executable:
@@ -348,22 +353,25 @@ class AnalyticsService:
     ) -> dict:
         """构造经营分析澄清响应。"""
 
+        # clarification_event 是“可审计的交互事件”，这里只写问题文本和目标槽位。
         clarification = self.task_run_repository.create_clarification_event(
             run_id=task_run["run_id"],
             conversation_id=conversation_id,
-            question_text=plan.clarification_question or "请补充经营分析关键条件",
-            target_slots=plan.clarification_target_slots,
+            **self.snapshot_builder.build_clarification_event_payload(plan=plan),
         )
+        # context_snapshot 只保留恢复执行所需的轻量上下文摘要，
+        # 明确不写 plan/sql_bundle/execution_result 等微观临时态。
         self.task_run_repository.update_task_run(
             task_run["run_id"],
             status="awaiting_user_clarification",
             sub_status="awaiting_slot_fill",
-            context_snapshot={
-                "slots": plan.slots,
-                "missing_slots": plan.missing_slots,
-                "conflict_slots": plan.conflict_slots,
-                "clarification_type": plan.clarification_type,
-            },
+            context_snapshot=self.snapshot_builder.build_context_snapshot(
+                slots=plan.slots,
+                missing_slots=plan.missing_slots,
+                conflict_slots=plan.conflict_slots,
+                clarification_type=plan.clarification_type,
+                resume_step="resume_after_analytics_slot_fill",
+            ),
         )
         self.conversation_repository.add_message(
             conversation_id=conversation_id,
@@ -497,11 +505,13 @@ class AnalyticsService:
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 sub_status="building_sql",
-                context_snapshot={
-                    "slots": plan.slots,
-                    "planning_source": plan.planning_source,
-                    "confidence": plan.confidence,
-                },
+                # 这里只写权威运行态需要的轻量上下文摘要，不写 plan/sql_bundle 全量对象。
+                context_snapshot=self.snapshot_builder.build_context_snapshot(
+                    slots=plan.slots,
+                    planning_source=plan.planning_source,
+                    confidence=plan.confidence,
+                    resume_step="run_sql_pipeline",
+                ),
             )
             sql_bundle = self.sql_builder.build(
                 plan.slots,
@@ -745,8 +755,12 @@ class AnalyticsService:
                 timing_breakdown=timing,
             )
 
-            # 轻快照写入 output_snapshot
-            lightweight_snapshot = analytics_result.to_lightweight_snapshot()
+            # 轻快照写入 output_snapshot。
+            # 这里明确通过 Snapshot Builder 收口，避免上游直接把 tables / chart_spec / insight_cards
+            # 等重对象写回 task_run。
+            lightweight_snapshot = self.snapshot_builder.build_output_snapshot(
+                analytics_result=analytics_result,
+            )
             self.task_run_repository.update_task_run(
                 task_run["run_id"],
                 status="succeeded",

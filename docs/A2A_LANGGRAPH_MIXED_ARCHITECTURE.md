@@ -180,6 +180,12 @@ SupervisorService
 3. Adapter 负责屏蔽 workflow 细节，是从 service-first 过渡到 workflow-first 的稳定边界；
 4. Supervisor 现在已经是“调 workflow”，而不是“调普通 service 样板”。
 
+从当前这一轮开始，还需要再补一层明确口径：
+
+1. `AnalyticsLangGraphWorkflow` 已经正式长期跑在 `LangGraph StateGraph` 上；
+2. fallback runner 不再作为生产默认执行路径；
+3. 当前不接 LangGraph checkpoint，clarification / review / export 等恢复仍由业务状态机承担。
+
 当前如果需要进一步理解宏观状态与微观状态的边界，可继续参考：
 
 - `docs/SUPERVISOR_ANALYTICS_STATE_MACHINE.md`

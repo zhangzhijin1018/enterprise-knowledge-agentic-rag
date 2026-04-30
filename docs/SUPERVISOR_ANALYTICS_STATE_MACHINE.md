@@ -136,6 +136,18 @@ Supervisor 层有两个硬约束：
 - 中间态：plan / sql_bundle / execution_result / masking_result
 - 输出态：summary / analytics_result / final_response
 
+需要特别说明的是：
+
+- 当前这些微观状态字段已经正式运行在 `LangGraph StateGraph` 上；
+- 但当前仍然 **不接 checkpoint**；
+- clarification / review / export 等中断恢复继续由业务状态机承担，而不是由 LangGraph checkpointer 承担。
+
+这样设计的原因是：
+
+1. 当前经营分析的恢复点相对固定；
+2. `task_run / slot_snapshot / clarification_event / review_task / export_task` 已经足够表达恢复语义；
+3. 直接 checkpoint 容易把 `plan / sql_bundle / execution_result` 等微观大对象一起序列化，破坏持久化边界。
+
 ---
 
 ## 5. 两层状态映射关系

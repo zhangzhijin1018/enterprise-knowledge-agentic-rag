@@ -8,7 +8,11 @@ from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
-from core.agent.workflows.analytics import AnalyticsWorkflowAdapter
+from core.agent.workflows.analytics import (
+    AnalyticsWorkflowAdapter,
+    AnalyticsWorkflowOutcome,
+    AnalyticsWorkflowStage,
+)
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry
 from core.common.cache import reset_global_cache
@@ -20,6 +24,7 @@ from core.repositories.sql_audit_repository import SQLAuditRepository, reset_in_
 from core.repositories.task_run_repository import TaskRunRepository, reset_in_memory_task_run_store
 from core.security.auth import UserContext
 from core.services.analytics_service import AnalyticsService
+from core.tools.a2a import TaskEnvelope
 from core.tools.sql.sql_gateway import SQLGateway
 
 
@@ -124,3 +129,45 @@ def test_analytics_workflow_adapter_returns_clarification_when_slots_missing() -
     assert result["meta"]["status"] == "awaiting_user_clarification"
     assert result["data"]["clarification"]["clarification_type"] == "missing_required_slot"
     assert result["data"]["clarification"]["target_slots"] == ["metric"]
+
+
+def test_analytics_workflow_adapter_maps_workflow_state_to_result_contract() -> None:
+    """Adapter 应把微观 workflow state 稳定收敛成宏观 ResultContract。"""
+
+    adapter = AnalyticsWorkflowAdapter(build_analytics_service())
+    workflow_state = adapter.execute_state(
+        query="帮我分析一下上个月新疆区域发电量",
+        conversation_id=None,
+        output_mode="lite",
+        need_sql_explain=False,
+        user_context=build_user_context(),
+        run_id="run_adapter_001",
+        trace_id="trace_adapter_001",
+        parent_task_id="parent_adapter_001",
+    )
+    envelope = TaskEnvelope(
+        run_id="run_adapter_001",
+        trace_id="trace_adapter_001",
+        parent_task_id="parent_adapter_001",
+        task_type="business_analysis",
+        source_agent="supervisor",
+        target_agent="analytics",
+        input_payload={
+            "query": "帮我分析一下上个月新疆区域发电量",
+            "user_context": build_user_context(),
+            "output_mode": "lite",
+        },
+    )
+
+    result_contract = adapter.to_result_contract(
+        envelope=envelope,
+        response=workflow_state["final_response"],
+        workflow_state=workflow_state,
+    )
+
+    assert workflow_state["workflow_stage"] == AnalyticsWorkflowStage.ANALYTICS_FINISH
+    assert workflow_state["workflow_outcome"] == AnalyticsWorkflowOutcome.FINISH
+    assert result_contract.status.status == "succeeded"
+    assert result_contract.run_id == "run_adapter_001"
+    assert result_contract.trace_id == "trace_adapter_001"
+    assert result_contract.output_payload["meta"]["status"] == "succeeded"

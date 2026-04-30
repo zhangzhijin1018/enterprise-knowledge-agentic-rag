@@ -84,6 +84,11 @@ class AnalyticsWorkflowAdapter:
         1. Supervisor / A2A 本地 handler 做状态映射；
         2. 状态机测试验证微观字段；
         3. 后续恢复执行和更细粒度可观测性接入。
+
+        边界说明：
+        - 这里返回的是 `workflow_state`，属于微观临时态；
+        - 它可以包含 plan / sql_bundle / execution_result 等执行中间对象；
+        - 这些对象不能直接等同于 task_run/input_snapshot/output_snapshot 之类的持久化快照。
         """
 
         return self.workflow.run_state(
@@ -110,6 +115,11 @@ class AnalyticsWorkflowAdapter:
         1. 业务 workflow 的原生返回偏向 HTTP/API 语义；
         2. Supervisor / A2A Gateway 需要稳定的跨专家协议；
         3. 先统一 ResultContract，后续切远端 A2A transport 时，上层无需再改。
+
+        边界说明：
+        - ResultContract 是“宏观协议结果”；
+        - workflow_state 是“微观执行上下文”；
+        - 两者都不直接等于持久化 snapshot，snapshot 仍应由 service / snapshot builder 轻量化构造。
         """
 
         meta = response.get("meta", {})

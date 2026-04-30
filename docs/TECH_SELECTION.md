@@ -249,6 +249,39 @@ SQL 安全校验
 
 因此选择 LangGraph 作为主编排框架。
 
+### 5.6 当前阶段的正式落地方式
+
+从当前这一轮开始，LangGraph 不再只是“未来预留”或“本地样板”：
+
+- `Analytics Workflow` 已经正式以 `StateGraph` 作为长期执行路径；
+- `langgraph>=0.2,<1.0` 已进入正式依赖，而不是仅放在开发环境；
+- 本地 fallback runner 不再作为生产主路径。
+
+这样做的原因是：
+
+1. 经营分析已经进入 workflow-first 微观执行阶段，需要测试环境和生产环境保持一致；
+2. 如果长期保留 fallback 作为默认正常路径，容易出现“测试跑的是一套、生产跑的是另一套”；
+3. `StateGraph` 的显式节点、条件分支和状态流转，正好匹配当前经营分析的微观状态机设计。
+
+### 5.7 为什么本轮暂不接 LangGraph checkpoint
+
+本轮明确 **不接 LangGraph checkpoint**，原因不是能力不足，而是当前边界更适合由业务状态机承担恢复：
+
+- `task_run` 负责权威运行态；
+- `slot_snapshot / clarification_event` 负责 clarification 恢复态；
+- `review_task / export_task` 负责审核和导出中断恢复。
+
+当前经营分析的恢复点仍然比较固定，直接引入 checkpoint 会带来两个问题：
+
+1. 容易把 `plan / sql_bundle / execution_result` 这类微观大对象一起序列化；
+2. 会重新放大状态持久化体积，与前面已经完成的 snapshot 边界收紧目标冲突。
+
+因此当前策略是：
+
+- `StateGraph` 负责单次 workflow 的显式流转；
+- 业务状态机负责跨请求中断恢复；
+- 等后续合同审查、复杂报告生成等出现更多动态恢复点时，再引入 `thread_id / checkpoint_id / checkpointer / resume command`。
+
 ---
 
 ## 6. LLM 接入：OpenAI-compatible Gateway / 私有化大模型

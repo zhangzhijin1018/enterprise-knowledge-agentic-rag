@@ -201,7 +201,31 @@
 
 ---
 
-## 6. analytics_result_repository：重结果态
+## 6.5 上游主动收口与 Repository 兜底
+
+当前项目采用“双保险”策略：
+
+1. **上游主动收口**
+   - `AnalyticsService`
+   - `Analytics workflow nodes`
+   - `AnalyticsSnapshotBuilder`
+
+   这些上游调用点应在写入前就主动构造成边界正确的轻量快照。
+
+2. **Repository 最后兜底**
+   - `TaskRunRepository` 仍然保留 sanitize 机制；
+   - 如果后续有人误把 `sql_bundle / execution_result / tables / workflow_stage`
+     之类字段传进来，仓储层会再做一次裁剪。
+
+为什么不能只依赖 Repository：
+
+- 如果上游继续随意手拼 dict，代码可读性会持续下降；
+- 新人很难知道“哪些字段本来就不该写”；
+- sanitize 应该是最后防线，而不是主设计机制。
+
+---
+
+## 7. analytics_result_repository：重结果态
 
 `analytics_result_repository` 负责保存经营分析的大对象结果。
 
@@ -227,7 +251,7 @@
 
 ---
 
-## 7. AnalyticsWorkflowState：微观临时态
+## 8. AnalyticsWorkflowState：微观临时态
 
 `AnalyticsWorkflowState` 负责经营分析 LangGraph workflow 的单次执行上下文。
 
@@ -278,7 +302,26 @@
 
 ---
 
-## 8. Mermaid 分层图
+## 9. Snapshot Builder 的职责
+
+当前经营分析链路新增了 `AnalyticsSnapshotBuilder`，
+它位于 workflow/service 上游，专门负责构造：
+
+- `build_input_snapshot()`
+- `build_output_snapshot()`
+- `build_context_snapshot()`
+- `build_slot_snapshot_payload()`
+- `build_clarification_event_payload()`
+
+它的意义是：
+
+1. 让上游写入点统一走一份边界规则；
+2. 避免 `AnalyticsService` 和 `nodes.py` 到处手拼 dict；
+3. 让“为什么写这个字段、不写哪个字段”直接体现在代码和注释里。
+
+---
+
+## 10. Mermaid 分层图
 
 ```mermaid
 flowchart TD
@@ -291,7 +334,7 @@ flowchart TD
 
 ---
 
-## 9. 边界检查清单
+## 11. 边界检查清单
 
 后续开发如果新增字段，建议先问四个问题：
 
@@ -308,7 +351,7 @@ flowchart TD
 
 ---
 
-## 10. 当前阶段结论
+## 12. 当前阶段结论
 
 当前经营分析链路的持久化分层已经明确：
 

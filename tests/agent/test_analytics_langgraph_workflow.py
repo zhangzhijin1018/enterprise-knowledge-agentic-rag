@@ -20,7 +20,11 @@ from core.repositories.task_run_repository import TaskRunRepository, reset_in_me
 from core.security.auth import UserContext
 from core.services.analytics_service import AnalyticsService
 from core.tools.sql.sql_gateway import SQLGateway
-from core.agent.workflows.analytics import AnalyticsLangGraphWorkflow
+from core.agent.workflows.analytics import (
+    AnalyticsLangGraphWorkflow,
+    AnalyticsWorkflowOutcome,
+    AnalyticsWorkflowStage,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -90,18 +94,23 @@ def build_analytics_service() -> AnalyticsService:
 
 
 def test_analytics_langgraph_workflow_happy_path() -> None:
-    """经营分析 workflow 样板应能跑通最小 happy path。"""
+    """经营分析 workflow 应能通过真实 StateGraph 跑通最小 happy path。"""
 
     workflow = AnalyticsLangGraphWorkflow(build_analytics_service())
 
-    result = workflow.invoke(
+    state = workflow.run_state(
         query="帮我分析一下上个月新疆区域发电量",
         conversation_id=None,
         output_mode="standard",
         need_sql_explain=False,
         user_context=build_user_context(),
     )
+    result = state["final_response"]
 
+    assert workflow.backend_name == "langgraph_stategraph"
+    assert workflow.checkpoint_enabled is False
+    assert state["workflow_stage"] == AnalyticsWorkflowStage.ANALYTICS_FINISH
+    assert state["workflow_outcome"] == AnalyticsWorkflowOutcome.FINISH
     assert result["meta"]["status"] == "succeeded"
     assert result["data"]["summary"]
     assert result["data"]["chart_spec"] is not None
@@ -110,17 +119,40 @@ def test_analytics_langgraph_workflow_happy_path() -> None:
 
 
 def test_analytics_langgraph_workflow_enters_clarification_when_slots_missing() -> None:
-    """缺关键槽位时，workflow 样板应进入 clarification 分支。"""
+    """缺关键槽位时，workflow 应进入 clarification 分支而不是 failed。"""
 
     workflow = AnalyticsLangGraphWorkflow(build_analytics_service())
 
-    result = workflow.invoke(
+    state = workflow.run_state(
         query="帮我分析一下上个月的情况",
         conversation_id=None,
         output_mode="lite",
         need_sql_explain=False,
         user_context=build_user_context(),
     )
+    result = state["final_response"]
 
+    assert state["workflow_stage"] == AnalyticsWorkflowStage.ANALYTICS_FINISH
+    assert state["workflow_outcome"] == AnalyticsWorkflowOutcome.CLARIFY
+    assert state["clarification_needed"] is True
     assert result["meta"]["status"] == "awaiting_user_clarification"
     assert result["data"]["clarification"]["target_slots"] == ["metric"]
+
+
+def test_analytics_langgraph_workflow_raises_clear_error_when_langgraph_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缺少 LangGraph 依赖时，应给出清晰错误而不是静默回退到本地 runner。"""
+
+    import core.agent.workflows.analytics.graph as graph_module
+
+    def _raise_missing_dependency():
+        raise RuntimeError(
+            "当前 Analytics Workflow 已正式依赖 LangGraph StateGraph，"
+            "请检查 pyproject.toml 和运行环境依赖。"
+        )
+
+    monkeypatch.setattr(graph_module, "_load_stategraph_components", _raise_missing_dependency)
+
+    with pytest.raises(RuntimeError, match="Analytics Workflow 已正式依赖 LangGraph StateGraph"):
+        AnalyticsLangGraphWorkflow(build_analytics_service())
