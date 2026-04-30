@@ -12,7 +12,7 @@ from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGa
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
 from core.agent.supervisor import DelegationController, SupervisorService
-from core.agent.workflows.analytics import AnalyticsLangGraphWorkflow
+from core.agent.workflows.analytics import AnalyticsWorkflowAdapter
 from core.config.settings import Settings
 from core.repositories.analytics_result_repository import reset_in_memory_analytics_result_store
 from core.repositories.conversation_repository import ConversationRepository, reset_in_memory_conversation_store
@@ -93,7 +93,7 @@ def build_analytics_service() -> AnalyticsService:
 def test_supervisor_service_can_delegate_to_local_analytics_workflow() -> None:
     """Supervisor 应能完成最小本地委托，并返回标准化结果。"""
 
-    workflow = AnalyticsLangGraphWorkflow(build_analytics_service())
+    workflow = AnalyticsWorkflowAdapter(build_analytics_service())
     controller = DelegationController(
         local_handlers={"analytics_expert": workflow.as_local_handler()},
     )

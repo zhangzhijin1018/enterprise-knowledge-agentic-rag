@@ -151,7 +151,38 @@ PostgreSQL 仍然是权威状态存储与审计存储，负责保存：
 
 ---
 
-## 6. 当前目录落点
+## 6. 第二轮真实接入路径
+
+从第二轮开始，经营分析已经不只是“LangGraph-ready 样板”，而是具备真实执行接入路径：
+
+```text
+POST /api/v1/analytics/query
+  -> AnalyticsService
+  -> AnalyticsWorkflowAdapter
+  -> AnalyticsLangGraphWorkflow
+  -> SQL Builder / SQL Guard / SQL Gateway / Repository
+```
+
+同时，宏观调度层也已经可以真实调起经营分析 workflow：
+
+```text
+SupervisorService
+  -> DelegationController
+  -> local analytics workflow handler
+  -> AnalyticsWorkflowAdapter
+  -> AnalyticsLangGraphWorkflow
+```
+
+这里的设计重点是：
+
+1. API 仍然不感知 graph 细节；
+2. Service 仍保留兼容直连模式，便于渐进切换与回退；
+3. Adapter 负责屏蔽 workflow 细节，是从 service-first 过渡到 workflow-first 的稳定边界；
+4. Supervisor 现在已经是“调 workflow”，而不是“调普通 service 样板”。
+
+---
+
+## 7. 当前目录落点
 
 ```text
 core/agent/supervisor/
@@ -173,7 +204,7 @@ core/runtime/events/
 
 ---
 
-## 7. 为什么经营分析适合作为第一批样板
+## 8. 为什么经营分析适合作为第一批样板
 
 经营分析当前已经有比较清晰的执行边界：
 
@@ -192,7 +223,7 @@ core/runtime/events/
 
 ---
 
-## 8. 下一阶段演进路线
+## 9. 下一阶段演进路线
 
 建议顺序：
 
@@ -203,8 +234,8 @@ core/runtime/events/
 
 ---
 
-## 9. 当前阶段可如何对外描述
+## 10. 当前阶段可如何对外描述
 
 当前项目已经可以描述为：
 
-> 一个采用 **Supervisor / A2A Gateway 做宏观调度**、采用 **业务专家内部 Workflow 做微观执行**、并以 **经营分析专家作为第一批 LangGraph 样板** 的企业级 Agent 平台。
+> 一个采用 **Supervisor / A2A Gateway 做宏观调度**、采用 **业务专家内部 Workflow 做微观执行**、并且已经让 **经营分析专家通过 Workflow Adapter 真实接入 LangGraph 执行路径** 的企业级 Agent 平台。

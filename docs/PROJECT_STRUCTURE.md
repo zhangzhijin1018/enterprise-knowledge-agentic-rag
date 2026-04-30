@@ -81,7 +81,7 @@ Agent 层负责：
 - `core/agent/workflows/`
   - 微观执行层；
   - 负责单个业务专家内部的 workflow；
-  - 第一轮先落地 `analytics/` 样板。
+  - 当前先落地 `analytics/`，并通过 `adapter.py` 作为真实接入层。
 
 ### 2.5 Tool 层负责执行
 
@@ -214,6 +214,7 @@ enterprise-knowledge-agentic-rag/
 │   │   │   └── delegation_controller.py
 │   │   ├── workflows/
 │   │   │   └── analytics/
+│   │   │       ├── adapter.py
 │   │   │       ├── state.py
 │   │   │       ├── nodes.py
 │   │   │       └── graph.py
@@ -274,6 +275,7 @@ enterprise-knowledge-agentic-rag/
 │   ├── ARCHITECTURE.md
 │   ├── ANALYTICS_DATA_SOURCE.md
 │   ├── A2A_LANGGRAPH_MIXED_ARCHITECTURE.md
+│   ├── ANALYTICS_PERF_REVIEW_V1.md
 │   ├── AGENT_WORKFLOW.md
 │   ├── DB_DESIGN.md
 │   ├── API_DESIGN.md

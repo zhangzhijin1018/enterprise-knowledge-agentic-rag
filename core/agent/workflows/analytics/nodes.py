@@ -8,7 +8,8 @@
 设计原则：
 - 节点职责单一；
 - 优先复用现有 AnalyticsService 的稳定逻辑，不推翻已有实现；
-- 当前先做“LangGraph-ready 样板”，后续再逐步把真实 API 主链切到 workflow adapter。
+- 当前已经通过 Workflow Adapter 接入真实经营分析主链，
+  但仍然保留对既有 Service 内部稳定逻辑的复用，避免一次性重写。
 """
 
 from __future__ import annotations

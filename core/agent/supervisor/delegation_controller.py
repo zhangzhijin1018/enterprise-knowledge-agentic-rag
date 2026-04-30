@@ -57,7 +57,7 @@ class DelegationController:
     def _build_default_targets(self) -> dict[str, DelegationTarget]:
         """构造默认业务专家目标表。
 
-        第一轮只把经营分析专家接成 LangGraph 微观执行样板，
+        当前先把经营分析专家接成“可真实调起的 workflow-first 本地专家”，
         其他业务专家后续再按同样模式逐步迁移。
         """
 
