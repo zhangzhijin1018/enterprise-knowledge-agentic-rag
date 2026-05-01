@@ -43,8 +43,18 @@ def test_slot_fallback_validator_cleans_valid_slots() -> None:
 def test_slot_fallback_validator_rejects_forbidden_keys() -> None:
     """LLM fallback 不能携带 SQL 或绕过治理字段。"""
 
-    with pytest.raises(AnalyticsSlotFallbackValidationError, match="禁止字段"):
-        _validator().validate({"metric": "收入", "raw_sql": "select 1"})
+    for forbidden_key in (
+        "sql",
+        "raw_sql",
+        "generated_sql",
+        "checked_sql",
+        "task_run_update",
+        "export",
+        "review",
+        "sql_guard_bypass",
+    ):
+        with pytest.raises(AnalyticsSlotFallbackValidationError, match="禁止字段"):
+            _validator().validate({"metric": "收入", forbidden_key: "bad"})
 
 
 def test_slot_fallback_validator_moves_unknown_metric_to_candidates() -> None:
@@ -54,3 +64,10 @@ def test_slot_fallback_validator_moves_unknown_metric_to_candidates() -> None:
 
     assert "metric" not in safe_slots
     assert safe_slots["metric_candidates"] == ["未知经营指标"]
+
+
+def test_slot_fallback_validator_rejects_invalid_group_by() -> None:
+    """group_by 必须属于 SchemaRegistry 支持的 key。"""
+
+    with pytest.raises(AnalyticsSlotFallbackValidationError, match="group_by"):
+        _validator().validate({"metric": "收入", "group_by": "free_dimension"})

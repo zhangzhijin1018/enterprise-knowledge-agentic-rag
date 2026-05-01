@@ -54,6 +54,32 @@ def test_mock_llm_gateway_records_trace_and_metadata() -> None:
     assert gateway.calls[0].metadata["component"] == "unit_test"
 
 
+def test_mock_llm_gateway_returns_lightweight_call_metadata() -> None:
+    """LLM 响应 metadata 只应包含轻量调用摘要，不保存完整 prompt。"""
+
+    gateway = MockLLMGateway(response_content='{"answer":"ok","confidence":1}')
+
+    response = gateway.chat(
+        messages=[LLMMessage(role="user", content="这里是完整 prompt，不应进入 trace metadata")],
+        trace_id="tr_meta",
+        metadata={
+            "run_id": "run_1",
+            "component": "unit_test",
+            "prompt_name": "analytics/demo",
+            "prompt_version": "v1",
+            "output_schema": "DemoStructuredOutput",
+        },
+    )
+
+    llm_call = response.metadata["llm_call"]
+    assert llm_call["trace_id"] == "tr_meta"
+    assert llm_call["run_id"] == "run_1"
+    assert llm_call["prompt_name"] == "analytics/demo"
+    assert llm_call["output_schema"] == "DemoStructuredOutput"
+    assert llm_call["success"] is True
+    assert "完整 prompt" not in str(llm_call)
+
+
 def test_openai_compatible_gateway_requires_api_key() -> None:
     """未配置真实 API Key 时应返回统一 LLM 调用错误，而不是访问外网。"""
 

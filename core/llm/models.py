@@ -53,3 +53,29 @@ class LLMResponse(BaseModel):
     trace_id: str | None = Field(default=None, description="链路追踪 ID")
     # 额外响应元数据。
     metadata: dict[str, Any] = Field(default_factory=dict, description="响应元数据")
+
+
+class LLMCallMetadata(BaseModel):
+    """LLM 调用轻量 Trace 元信息。
+
+    这里刻意不保存完整 prompt、完整模型输出和完整推理链，原因是：
+    1. prompt 可能包含业务上下文或敏感字段；
+    2. 模型输出可能包含用户数据或中间推理；
+    3. task_run / trace 需要的是可观测摘要，而不是把大对象再次塞进数据库快照。
+
+    当前该结构先作为返回 metadata / 日志结构预留，不强制落库。
+    """
+
+    trace_id: str | None = Field(default=None, description="链路追踪 ID")
+    run_id: str | None = Field(default=None, description="任务运行 ID")
+    component: str | None = Field(default=None, description="发起 LLM 调用的组件名")
+    prompt_name: str | None = Field(default=None, description="Prompt 逻辑名称，不保存 Prompt 正文")
+    prompt_version: str | None = Field(default=None, description="Prompt 版本号")
+    model: str | None = Field(default=None, description="实际使用的模型名称")
+    provider: str | None = Field(default=None, description="模型提供方")
+    output_schema: str | None = Field(default=None, description="结构化输出 Schema 名称")
+    latency_ms: float | None = Field(default=None, description="模型调用耗时，单位毫秒")
+    success: bool = Field(default=True, description="本次模型调用是否成功")
+    error_code: str | None = Field(default=None, description="失败时的统一错误码")
+    validator_result: str | None = Field(default=None, description="业务 Validator 摘要结果")
+    fallback_used: bool | None = Field(default=None, description="是否使用了 fallback 逻辑")

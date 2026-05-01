@@ -149,3 +149,91 @@ ANALYTICS_REACT_PLANNER_ENABLED=false
 - 是否有 Validator 二次校验；
 - 是否补充离线单元测试；
 - 是否没有把完整 Prompt / 模型输出 / 推理链写入 task_run。
+
+---
+
+## 7. Prompt 工程验收清单
+
+一期 Prompt 工程验收必须覆盖：
+
+- `core/prompts/catalog.py` 中每个 Prompt 都有 `name / domain / purpose / input_variables / output_schema / risk_level / owner / version`；
+- Catalog 中登记的模板文件真实存在；
+- `PromptRegistry` 能加载所有 Catalog Prompt；
+- 模板里出现的 `{{ variable }}` 必须在 Catalog 的 `input_variables` 中声明；
+- `PromptRenderer` 能用测试变量离线渲染所有模板；
+- `MockLLMGateway` 能返回 Pydantic 结构化对象；
+- JSON 解析失败与 Schema 校验失败有明确错误码；
+- `AnalyticsSlotFallbackValidator / ReactPlanValidator` 能拦截 SQL、权限绕过、状态写入、导出和审核字段；
+- 没有真实 `LLM_API_KEY` 时，单元测试仍然可以离线运行。
+
+Catalog 声明变量但模板暂未使用是允许的。原因是生产治理中可能先登记兼容变量，
+再通过 Prompt 版本灰度逐步使用；但模板偷偷使用未登记变量是不允许的。
+
+---
+
+## 8. LLM 轻量 Trace 规范
+
+LLM 调用只记录轻量元信息，结构参考 `LLMCallMetadata`：
+
+```text
+trace_id
+run_id
+component
+prompt_name
+prompt_version
+model
+provider
+output_schema
+latency_ms
+success
+error_code
+validator_result
+fallback_used
+```
+
+不记录：
+
+- 完整 Prompt；
+- 完整模型输出；
+- 完整推理链；
+- 业务数据库连接串；
+- 明文 API Key。
+
+这样做是为了兼顾可观测性与数据安全：我们能知道“哪个组件、哪个 Prompt、哪个模型、哪个 Schema 出了问题”，但不会把敏感上下文塞进 `task_run.output_snapshot`。
+
+---
+
+## 9. Prompt Evaluation 最小数据集
+
+当前已新增最小离线评估数据集：
+
+```text
+evals/analytics_slot_fallback_cases.jsonl
+evals/analytics_react_planning_cases.jsonl
+scripts/eval_prompts.py
+```
+
+每条 case 至少包含：
+
+- `case_id`
+- `task_type`
+- `query`
+- `expected_slots` 或 `expected_behavior`
+- `forbidden_behavior`
+
+当前脚本默认使用确定性 fake runner / Validator，不调用真实模型。  
+后续可以在同一入口里接入：
+
+- `MockLLMGateway`；
+- OpenAI-compatible 私有化模型；
+- RAGAS；
+- 自定义 Prompt Evaluation 指标。
+
+新增 LLM 能力时，必须同步补：
+
+- Prompt Catalog；
+- Prompt 模板；
+- Pydantic Schema；
+- Validator；
+- 离线测试；
+- 必要的 eval case。

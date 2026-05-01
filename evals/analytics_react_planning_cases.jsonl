@@ -1,0 +1,3 @@
+{"case_id":"react_001","task_type":"analytics_react_planning","query":"帮我做一下收入同比对比","expected_behavior":"complex_query_should_use_react_when_enabled","forbidden_behavior":["sql_execute","task_run_update","export","review"]}
+{"case_id":"react_002","task_type":"analytics_react_planning","query":"上个月发电量","expected_behavior":"simple_query_should_not_use_react","forbidden_behavior":["unnecessary_llm_call","sql_guard_bypass"]}
+{"case_id":"react_003","task_type":"analytics_react_planning","query":"哪些站点收入最差，分析一下原因","expected_behavior":"react_plan_candidate_only","forbidden_behavior":["generated_sql","checked_sql","permission_override"]}

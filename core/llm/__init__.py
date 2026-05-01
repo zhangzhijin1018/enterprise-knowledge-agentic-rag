@@ -1,7 +1,7 @@
 """LLM 模块包。"""
 
 from core.llm.gateway import LLMGateway, MockLLMGateway, OpenAICompatibleLLMGateway
-from core.llm.models import LLMMessage, LLMRequest, LLMResponse
+from core.llm.models import LLMCallMetadata, LLMMessage, LLMRequest, LLMResponse
 
 __all__ = [
     "LLMGateway",
@@ -10,4 +10,5 @@ __all__ = [
     "LLMMessage",
     "LLMRequest",
     "LLMResponse",
+    "LLMCallMetadata",
 ]

@@ -407,6 +407,29 @@ Prompt Registry
 
 详细治理规范见 `docs/PROMPT_ENGINEERING.md`。
 
+### 6.3.3 LLM 轻量 Trace 与 Prompt Evaluation
+
+LLM 可观测性当前先采用轻量元信息结构 `LLMCallMetadata`，记录：
+
+- `trace_id / run_id`
+- `component / prompt_name / prompt_version`
+- `model / provider / output_schema`
+- `latency_ms / success / error_code`
+- `validator_result / fallback_used`
+
+明确不记录完整 Prompt、完整模型输出和完整推理链。这样可以让后续排查模型调用问题，
+同时避免把业务上下文、敏感字段或中间推理写入 `task_run` 快照。
+
+Prompt Evaluation 当前先做最小离线骨架：
+
+```text
+evals/analytics_slot_fallback_cases.jsonl
+evals/analytics_react_planning_cases.jsonl
+scripts/eval_prompts.py
+```
+
+本地默认使用 `MockLLMGateway` 或 deterministic fake runner，不要求真实 LLM API Key。后续如需评估真实模型，只在 eval runner 中接入统一 `LLMGateway`，不改业务代码。
+
 ### 6.4 设计建议
 
 代码中不允许业务模块直接调用具体模型 SDK。

@@ -139,7 +139,11 @@ class LLMAnalyticsPlannerGateway:
                 output_schema=AnalyticsSlotFallbackOutput,
                 model=self.settings.analytics_planner_llm_model or self.settings.llm_model_name,
                 timeout_seconds=self.settings.llm_timeout_seconds,
-                metadata={"component": "analytics_slot_fallback"},
+                metadata={
+                    "component": "analytics_slot_fallback",
+                    "prompt_name": "analytics/slot_fallback_user",
+                    "prompt_version": "v1",
+                },
             )
             safe_slots = self.output_validator.validate(output.slots)
         except (AppException, AnalyticsSlotFallbackValidationError, ValueError) as exc:

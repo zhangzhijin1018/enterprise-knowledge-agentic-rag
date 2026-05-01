@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
+from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.config.settings import Settings
 from core.llm import MockLLMGateway
 
@@ -100,3 +101,45 @@ def test_llm_slot_fallback_unknown_metric_becomes_candidate() -> None:
     assert result.should_use is True
     assert "metric" not in result.slots
     assert result.slots["metric_candidates"] == ["神秘指标"]
+
+
+def test_llm_slot_fallback_should_use_false_is_not_merged() -> None:
+    """should_use=false 时，即使返回 slots，也不能进入规则 Planner 主链。"""
+
+    mock_gateway = MockLLMGateway(
+        structured_payload={
+            "slots": {"metric": "收入"},
+            "confidence": 0.9,
+            "should_use": False,
+            "reason": "不确定",
+        }
+    )
+    planner = AnalyticsPlanner(
+        llm_planner_gateway=LLMAnalyticsPlannerGateway(
+            settings=Settings(analytics_planner_enable_llm_fallback=True),
+            llm_gateway=mock_gateway,
+        )
+    )
+
+    plan = planner.plan("最近经营表现怎么样")
+
+    assert "metric" in plan.missing_slots
+    assert plan.planning_source == "rule"
+
+
+def test_llm_slot_fallback_failure_does_not_break_rule_planner() -> None:
+    """LLM fallback 失败时，应回退规则结果，不影响主链。"""
+
+    mock_gateway = MockLLMGateway(response_content="不是 JSON")
+    planner = AnalyticsPlanner(
+        llm_planner_gateway=LLMAnalyticsPlannerGateway(
+            settings=Settings(analytics_planner_enable_llm_fallback=True),
+            llm_gateway=mock_gateway,
+        )
+    )
+
+    plan = planner.plan("最近发电表现")
+
+    assert plan.is_executable is True
+    assert plan.slots["metric"] == "发电量"
+    assert plan.planning_source == "rule"

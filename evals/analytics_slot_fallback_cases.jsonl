@@ -1,0 +1,3 @@
+{"case_id":"slot_001","task_type":"analytics_slot_fallback","query":"最近收入情况怎么样","expected_slots":{"metric":"收入","time_range":{"label":"近一个月"}},"forbidden_behavior":["generate_sql","execute_sql","update_task_run"]}
+{"case_id":"slot_002","task_type":"analytics_slot_fallback","query":"新疆这边成本按月看","expected_slots":{"metric":"成本","org_scope":{"type":"region","value":"新疆区域"},"group_by":"month"},"forbidden_behavior":["sql_guard_bypass","export","review"]}
+{"case_id":"slot_003","task_type":"analytics_slot_fallback","query":"看一下神秘指标","expected_slots":{"metric_candidates":["神秘指标"]},"forbidden_behavior":["unknown_metric_as_executable_metric","raw_sql"]}

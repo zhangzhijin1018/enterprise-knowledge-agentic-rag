@@ -20,14 +20,15 @@ def _tool_registry() -> AnalyticsReactToolRegistry:
 def test_react_tool_registry_rejects_forbidden_tool() -> None:
     """禁止工具请求必须被拒绝，且不产生副作用。"""
 
-    result = _tool_registry().run(
-        tool_name="sql_execute",
-        tool_input={"sql": "select 1"},
-        conversation_memory={},
-    )
+    for tool_name in ("sql_execute", "task_run_update", "export", "review", "sql_guard_bypass"):
+        result = _tool_registry().run(
+            tool_name=tool_name,
+            tool_input={"sql": "select 1", "run_id": "run_bad"},
+            conversation_memory={},
+        )
 
-    assert result["allowed"] is False
-    assert result["reason"] == "tool_not_allowed"
+        assert result["allowed"] is False
+        assert result["reason"] == "tool_not_allowed"
 
 
 def test_schema_registry_lookup_uses_default_data_source_when_missing() -> None:

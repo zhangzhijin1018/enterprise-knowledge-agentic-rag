@@ -662,6 +662,19 @@ SemanticResolver
 - 未识别 metric 只能进入 `metric_candidates`，不能直接作为可执行指标；
 - 即使 LLM 返回 `should_use=true`，仍必须由本地 SlotValidator 判断最小可执行条件。
 
+### 9.3.2 Prompt 工程验收与可观测性
+
+经营分析 LLM 能力上线前必须通过以下验收：
+
+- Prompt Catalog 与模板一致；
+- `MockLLMGateway` 离线结构化输出可运行；
+- slot fallback 和 ReAct planning 都有 Validator 拦截测试；
+- LLM 调用只记录轻量 `LLMCallMetadata`；
+- 不把完整 Prompt、完整模型输出、完整推理链写入 `task_run`；
+- `evals/analytics_slot_fallback_cases.jsonl` 和 `evals/analytics_react_planning_cases.jsonl` 至少能被 `scripts/eval_prompts.py` 离线跑通。
+
+这部分验收的目的不是扩大 LLM 能力，而是防止后续迭代时把 LLM 从“受控增强”退化成“自由执行”。
+
 ### 节点 1：问题理解
 提取：
 

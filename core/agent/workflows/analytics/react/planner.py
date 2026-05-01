@@ -96,7 +96,12 @@ class AnalyticsReactPlanner:
                 model=self.settings.llm_model_name,
                 timeout_seconds=self.settings.llm_timeout_seconds,
                 trace_id=trace_id,
-                metadata={"component": "analytics_react_planner", "step": step},
+                metadata={
+                    "component": "analytics_react_planner",
+                    "prompt_name": "analytics/react_planner_user",
+                    "prompt_version": "v1",
+                    "step": step,
+                },
             )
             react_state.thoughts.append(step_output.thought[:300])
             react_state.actions.append(

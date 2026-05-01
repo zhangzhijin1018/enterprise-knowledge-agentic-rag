@@ -44,6 +44,15 @@ flowchart LR
 
 详细规范见 `docs/PROMPT_ENGINEERING.md`。
 
+Prompt Evaluation 最小骨架：
+
+- `evals/analytics_slot_fallback_cases.jsonl`
+  - 经营分析 slot fallback 的离线验收用例；
+- `evals/analytics_react_planning_cases.jsonl`
+  - 经营分析局部 ReAct planning 的离线验收用例；
+- `scripts/eval_prompts.py`
+  - 当前使用 deterministic fake runner / Validator，不要求真实 LLM API Key。
+
 ---
 
 ## 2. 第一阶段代码分层原则
