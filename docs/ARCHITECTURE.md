@@ -1,32 +1,5 @@
 # 新疆能源集团知识与生产经营智能 Agent 平台 系统架构设计文档
 
-## 0. 中文导读与流程图入口
-
-如果你希望先用中文快速理解整套架构理念和主流程，建议先阅读：
-
-- `docs/ARCHITECTURE_FLOW_GUIDE_CN.md`
-
-这份导读文档用中文解释了：
-
-- 为什么本项目是企业级 Agent 平台，而不是普通 RAG Demo；
-- `Supervisor / LangGraph / MCP / A2A` 分别管什么；
-- 经营分析为什么采用 `StateGraph 受控主流程 + analytics_plan 局部 ReAct 子循环`；
-- SQL 为什么必须经过 `SQL Builder / SQL Guard / SQL Gateway`；
-- `task_run / slot_snapshot / clarification_event / workflow state / analytics_result_repository` 的持久化边界。
-
-核心流程可以先记住下面这张图：
-
-```mermaid
-flowchart LR
-    A["用户请求"] --> B["API / Service<br/>接收与校验"]
-    B --> C["Supervisor<br/>决定交给哪个业务专家"]
-    C --> D["业务 Agent<br/>LangGraph StateGraph 微观执行"]
-    D --> E["Tool / MCP / A2A<br/>统一能力调用"]
-    E --> F["数据与知识底座<br/>PostgreSQL / Milvus / 业务只读库"]
-    D --> G["治理与审计<br/>权限 / SQL Guard / Review / Trace"]
-    G --> H["结构化结果<br/>summary / tables / report / audit"]
-```
-
 ## 1. 文档说明
 
 本文档为 **新疆能源集团知识与生产经营智能 Agent 平台** 的当前唯一总架构文档。
@@ -298,104 +271,6 @@ RAG、Agent、SQL、合同审查、MCP 调用、A2A 委托、Human Review 触发
 - 当前不是只有代码里“写死一个 local_analytics”；
 - 也不是一上来就强依赖复杂配置中心；
 - 而是在“内置默认定义 + repository 覆盖”的方式下，先把一期真实数据源接入边界做稳。
-
-## 4.2 Analytics Workflow 的正式执行路径
-
-从当前这一轮开始，经营分析子 Agent 已经从“LangGraph-ready 样板”升级为 **StateGraph-first 正式执行路径**。
-
-当前稳定分层为：
-
-```text
-API
-  -> AnalyticsService
-  -> AnalyticsWorkflowAdapter
-  -> AnalyticsLangGraphWorkflow(StateGraph)
-  -> SQL Builder / SQL Guard / SQL Gateway / Repository
-```
-
-这意味着：
-
-- `Supervisor` 继续负责宏观调度；
-- `AnalyticsLangGraphWorkflow` 负责经营分析内部的微观状态流转；
-- fallback runner 不再作为生产默认路径。
-
-这样做的原因是：
-
-1. 经营分析已经是第一个真实接入 workflow-first 的业务专家；
-2. `StateGraph` 能把 `plan -> validate_slots -> clarify/build_sql -> guard_sql -> execute_sql -> summarize -> finish` 显式化；
-3. 生产主路径和测试主路径必须一致，不能长期保留“双执行引擎”。
-
-当前仍然 **不接 LangGraph checkpoint**。恢复执行继续由业务状态机承担：
-
-- `task_run`
-- `slot_snapshot`
-- `clarification_event`
-- `review_task`
-- `export_task`
-
-原因是当前经营分析恢复点相对固定，业务持久化层已经足够；如果此时引入 checkpoint，容易把微观执行大对象重新序列化进持久化链路。
-
-## 4.3 StateGraph 受控流程 + 局部 ReAct Planning
-
-当前项目不是纯 ReAct 架构。
-
-经营分析采用的是：
-
-```text
-StateGraph 受控流程
-  + analytics_plan 节点内部的局部 ReAct Planning 子循环
-```
-
-边界如下：
-
-- StateGraph 仍然是主流程，负责 `entry -> plan -> validate -> clarify/build_sql -> guard_sql -> execute_sql -> summarize -> finish`；
-- ReAct 只允许出现在 `analytics_plan` 阶段，用于复杂问题拆解、指标选择、维度选择和槽位候选生成；
-- ReAct 输出必须收敛为结构化 `AnalyticsPlan`；
-- ReAct 不允许生成最终 SQL，不允许执行 SQL，不允许绕过权限、SQL Guard、数据范围治理和 Human Review；
-- ReAct 输出进入 `AnalyticsPlan` 前必须经过 `ReactPlanValidator` 二次校验，只允许白名单 slots；
-- ReAct 工具只允许只读 planning 能力，禁止 `sql_execute / task_run_update / export / review`；
-- 后续执行继续由 `SQL Builder / SQL Guard / SQL Gateway` 串联完成。
-
-为什么不把全链路改成 ReAct：
-
-1. 经营分析涉及真实数据库、指标权限、部门范围过滤和敏感字段治理，必须保持确定性执行边界；
-2. SQL 生成和执行已经由 schema-aware Builder、SQL Guard、SQL MCP-compatible Gateway 控制；
-3. ReAct 更适合作为复杂 planning 的局部增强，而不是替代企业级工作流状态机。
-
-生产启用前必须配置统一 LLM Gateway；本地默认 `ANALYTICS_REACT_PLANNER_ENABLED=false`，单元测试通过 `MockLLMGateway` 覆盖结构化输出，不依赖真实外部模型服务。
-
-## 4.4 项目级 Prompt 工程治理
-
-从本阶段开始，项目内所有 LLM 调用统一遵循 Prompt 工程治理规则：
-
-```text
-PromptRegistry
-  -> PromptRenderer
-  -> LLMGateway
-  -> Pydantic Structured Output
-  -> Validator
-  -> 安全业务对象
-```
-
-关键边界：
-
-- 业务代码不得直接调用具体模型 SDK；
-- 业务代码不得散落大段 Prompt 字符串；
-- Prompt 模板统一放在 `core/prompts/templates/{domain}/{prompt_name}.j2`；
-- Prompt 清单统一登记在 `core/prompts/catalog.py`；
-- 影响业务决策的 LLM 输出必须先 Pydantic 化，再经过 Validator 二次校验；
-- LLM 不能直接生成 SQL、不能更新 task_run、不能触发 export/review。
-
-经营分析当前有两类 LLM 能力：
-
-| 能力 | 位置 | 作用 | 安全边界 |
-|---|---|---|---|
-| Slot fallback | `core/agent/control_plane/llm_analytics_planner.py` | 规则低置信时补强槽位 | `AnalyticsSlotFallbackOutput` + `AnalyticsSlotFallbackValidator` |
-| 局部 ReAct planning | `core/agent/workflows/analytics/react/` | 复杂问题拆解与 plan candidate | `ReactStepOutput` + `ReactPlanValidator` |
-
-两者都不能生成 SQL，后续执行仍必须经过 `SQL Builder -> SQL Guard -> SQL Gateway`。
-
-详细规范见：[PROMPT_ENGINEERING.md](PROMPT_ENGINEERING.md)。
 
 ### 4.1 为什么这样命名
 
@@ -727,7 +602,6 @@ flowchart TB
 
 - Task Router：任务路由器
 - Workflow Engine：工作流引擎
-- Supervisor Service：宏观调度服务
 - State Store：状态存储
 - Conversation Context Manager：会话上下文管理器
 - Slot Manager：槽位管理器
@@ -737,32 +611,6 @@ flowchart TB
 - Result Aggregator：结果汇总器
 - RiskController：风险控制器
 - HumanReviewInterruptor：审核中断控制器
-
-### 9.2.1 宏观调度与微观执行的边界
-
-从这一轮开始，项目明确采用混合架构：
-
-- **宏观层**：Supervisor / A2A Gateway / Event Bus
-- **微观层**：各业务专家内部 Workflow
-
-当前边界定义为：
-
-- A2A 不替代 LangGraph；
-- LangGraph 不替代 A2A；
-- A2A 管“谁来做”；
-- LangGraph 管“怎么做”。
-
-当前已经不只是“经营分析样板”：
-
-- `POST /api/v1/analytics/query` 可通过 `AnalyticsService -> AnalyticsWorkflowAdapter -> AnalyticsLangGraphWorkflow`
-  进入真实 workflow 执行路径；
-- `SupervisorService -> DelegationController` 也可通过本地 handler 调起同一条 workflow；
-- 其他业务专家继续保持现有实现，后续再按相同模式逐步迁移。
-
-详细说明见：
-
-- `docs/A2A_LANGGRAPH_MIXED_ARCHITECTURE.md`
-- `docs/SUPERVISOR_ANALYTICS_STATE_MACHINE.md`
 
 ### 9.3 好理解的说法
 
@@ -1306,27 +1154,6 @@ A2A 用于：
 
 A2A 更像“专家之间派单协作”，不是“拿一个函数来执行”。
 
-### 13.4 当前阶段与 LangGraph 的关系
-
-当前项目不采用“A2A 或 LangGraph 二选一”的架构，而是采用混合模式：
-
-1. **Supervisor / A2A Gateway** 负责跨业务专家的宏观调度；
-2. **业务专家内部 Workflow** 负责微观执行步骤；
-3. 当前经营分析已经通过 `Workflow Adapter` 接成真实 workflow 执行路径；
-4. 远程 transport 先保留 A2A-ready 边界，不急于一次性做成完整分布式生产版。
-
-### 13.5 Redis Streams 与 PostgreSQL 的职责边界
-
-当前对事件流和权威状态的边界定义如下：
-
-- Redis Streams：事件流总线 / 异步分发通道 / A2A-ready 事件媒介
-- PostgreSQL：权威状态存储 / 审计存储 / 恢复执行依据
-
-因此：
-
-- `task_submitted / task_finished / delegated` 这类轻事件适合进入 Streams；
-- `task_run / review / audit / clarification / analytics_result` 仍以 PostgreSQL 为准。
-
 ---
 
 ## 14. 知识与数据底座（Knowledge & Data Plane）
@@ -1579,28 +1406,6 @@ sequenceDiagram
 
 ### 17.3 经营分析流程（MCP SQL）
 
-> **V1 性能优化说明**：经营分析主链路已完成性能优化，核心变更包括：
-> - output_snapshot 轻量化：重内容单独存储到 analytics_result_repository，轻快照保留在 task_run.output_snapshot；
-> - analytics_results 持久化：重结果优先落 PostgreSQL `analytics_results` 表，本地无库时回退到内存仓储；
-> - query 响应分级：支持 lite / standard / full 三级输出，默认 lite；
-> - export 真异步化：POST 只创建任务返回 export_id，后台 AsyncTaskRunner 异步渲染；
-> - insight / report 延迟生成：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
-> - registry / schema / cache 常驻缓存：高频只读对象通过 RegistryCache 进程内缓存。
->
-> 对应的验收与慢点复盘文档见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
->
-> 持久化边界进一步收紧后的分层说明见：`docs/SUPERVISOR_ANALYTICS_PERSISTENCE_BOUNDARY.md`。
-> 当前项目明确区分：
-> - `task_run`：权威运行态；
-> - `slot_snapshot / clarification_event`：恢复执行态；
-> - `analytics_result_repository / analytics_results`：重结果态；
-> - `AnalyticsWorkflowState`：微观临时态。
-> - `AnalyticsSnapshotBuilder`：上游轻量快照构造层。
->
-> 额外约束：
-> - Repository sanitize 只是最后兜底；
-> - `AnalyticsService / workflow nodes` 上游写入点本身也必须主动只写轻量 snapshot。
-
 ```mermaid
 sequenceDiagram
     participant User as 用户
@@ -1612,9 +1417,8 @@ sequenceDiagram
     participant MCP as SQL MCP 服务
     participant DB as 业务数据库
     participant Trace as 审计服务
-    participant ResultRepo as 结果仓储
 
-    User->>API: 输入经营分析问题(output_mode=lite)
+    User->>API: 输入经营分析问题
     API->>APP: 调用 AnalyticsService
     APP->>Control: 创建分析任务
     Control->>Analytics: 路由到经营分析专家
@@ -1624,11 +1428,9 @@ sequenceDiagram
     DB-->>MCP: 返回查询结果
     MCP-->>Fabric: 返回标准化结果
     Fabric-->>Analytics: 返回数据与口径信息
-    Analytics->>Analytics: 按 output_mode 延迟生成 insight/report
-    Analytics->>ResultRepo: 重内容写入 analytics_result_repository / analytics_results
-    Analytics->>Control: 轻快照写入 output_snapshot
-    Control->>Trace: 记录 SQL Audit / MCP Trace / timing_breakdown
-    Control-->>APP: 按 output_mode 返回分级视图
+    Analytics-->>Control: 生成分析结论与报告草稿
+    Control->>Trace: 记录 SQL Audit / MCP Trace
+    Control-->>APP: 返回分析结果
     APP-->>API: 返回响应
 ```
 
@@ -2126,10 +1928,8 @@ GET /api/v1/contracts/reviews/{review_id}
 ### 20.7 经营分析
 
 ```http
-POST /api/v1/analytics/query?output_mode=lite|standard|full
-GET  /api/v1/analytics/runs/{run_id}?output_mode=full
-POST /api/v1/analytics/runs/{run_id}/export
-GET  /api/v1/analytics/exports/{export_id}
+POST /api/v1/analytics/query
+POST /api/v1/analytics/explain-sql
 ```
 
 ### 20.8 报告生成

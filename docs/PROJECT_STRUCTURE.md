@@ -18,41 +18,6 @@
 
 这份文档的目标不是讲概念，而是让你可以开始真正搭项目。
 
-如果需要先用中文理解整体架构和流程图，请先看：
-
-- `docs/ARCHITECTURE_FLOW_GUIDE_CN.md`
-
-代码目录与架构理念的对应关系可以这样理解：
-
-```mermaid
-flowchart LR
-    A["apps/api<br/>接口入口"] --> B["core/services<br/>业务编排"]
-    B --> C["core/agent/supervisor<br/>宏观调度"]
-    C --> D["core/agent/workflows<br/>业务专家微观工作流"]
-    D --> E["core/tools<br/>Tool / MCP / A2A 能力边界"]
-    B --> F["core/repositories<br/>权威状态与业务数据访问"]
-    D --> G["core/llm + core/prompts<br/>LLM Gateway 与 Prompt Registry"]
-```
-
-其中 `core/llm + core/prompts` 是项目级 Prompt 工程治理边界：
-
-- `core/llm/gateway.py`：统一模型访问入口，业务代码不得直接调用具体模型 SDK；
-- `core/prompts/registry.py`：统一加载文件化 Prompt；
-- `core/prompts/renderer.py`：统一渲染模板变量；
-- `core/prompts/catalog.py`：登记 Prompt 名称、用途、输入变量、输出 Schema 和风险等级；
-- `core/prompts/templates/{domain}/`：按业务域管理 Prompt 模板。
-
-详细规范见 `docs/PROMPT_ENGINEERING.md`。
-
-Prompt Evaluation 最小骨架：
-
-- `evals/analytics_slot_fallback_cases.jsonl`
-  - 经营分析 slot fallback 的离线验收用例；
-- `evals/analytics_react_planning_cases.jsonl`
-  - 经营分析局部 ReAct planning 的离线验收用例；
-- `scripts/eval_prompts.py`
-  - 当前使用 deterministic fake runner / Validator，不要求真实 LLM API Key。
-
 ---
 
 ## 2. 第一阶段代码分层原则
@@ -107,35 +72,6 @@ Agent 层负责：
 - 恢复执行
 - 专家调度
 
-从这一轮开始，Agent 层进一步拆成两层：
-
-- `core/agent/supervisor/`
-  - 宏观调度层；
-  - 负责 Supervisor、委托、结果汇总、A2A-ready 边界；
-  - `status.py` 负责定义宏观状态机；
-
-- `core/agent/workflows/`
-  - 微观执行层；
-  - 负责单个业务专家内部的 workflow；
-  - 当前先落地 `analytics/`，并通过 `adapter.py` 作为真实接入层；
-  - `status_mapper.py` 负责微观状态到宏观状态的映射。
-  - 从当前这一轮开始，`graph.py` 中的经营分析 workflow 已经正式长期跑在 `LangGraph StateGraph` 上；
-  - 当前不接 checkpoint，恢复继续由业务状态机承担。
-
-经营分析相关 LLM 能力必须继续遵守分层：
-
-```text
-AnalyticsService / Workflow Node
-  -> LLMAnalyticsPlannerGateway 或 AnalyticsReactPlanner
-  -> PromptRegistry / PromptRenderer
-  -> LLMGateway
-  -> Pydantic Structured Output
-  -> Validator
-  -> AnalyticsPlan / safe slots
-```
-
-这条链路的含义是：LLM 只能输出结构化候选，不能直接生成 SQL、不能写 task_run、不能触发 export/review。
-
 ### 2.5 Tool 层负责执行
 
 Tool / Capability 层负责：
@@ -146,19 +82,6 @@ Tool / Capability 层负责：
 - File MCP
 - Report MCP
 - A2A 调用
-
-当前 A2A 目录进一步拆成：
-
-- `core/tools/a2a/contracts/`
-  - 统一跨专家委托契约；
-- `core/tools/a2a/gateway/`
-  - A2A Gateway 最小实现；
-
-同时新增：
-
-- `core/runtime/events/`
-  - 事件总线抽象；
-  - 当前默认 in-memory，保留 Redis Streams-ready 边界。
 
 ---
 
@@ -211,9 +134,7 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── exceptions.py
 │   │   ├── ids.py
 │   │   ├── pagination.py
-│   │   ├── response.py
-│   │   ├── cache.py
-│   │   └── async_task_runner.py
+│   │   └── response.py
 │   ├── config/
 │   │   ├── settings.py
 │   │   └── logging.py
@@ -238,7 +159,6 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── conversation_repository.py
 │   │   ├── document_repository.py
 │   │   ├── task_run_repository.py
-│   │   ├── analytics_result_repository.py
 │   │   ├── review_repository.py
 │   │   ├── trace_repository.py
 │   │   └── audit_repository.py
@@ -249,22 +169,10 @@ enterprise-knowledge-agentic-rag/
 │   │   ├── document_service.py
 │   │   ├── contract_review_service.py
 │   │   ├── analytics_service.py
-│   │   ├── analytics_export_service.py
 │   │   ├── report_service.py
 │   │   ├── review_service.py
 │   │   ├── trace_service.py
 │   │   └── evaluation_service.py
-│   ├── llm/
-│   │   ├── gateway.py
-│   │   ├── models.py
-│   │   └── structured.py
-│   ├── prompts/
-│   │   ├── registry.py
-│   │   ├── renderer.py
-│   │   └── templates/
-│   │       └── analytics/
-│   │           ├── react_planner_system.j2
-│   │           └── react_planner_user.j2
 │   ├── agent/
 │   │   ├── control_plane/
 │   │   │   ├── task_router.py
@@ -273,23 +181,6 @@ enterprise-knowledge-agentic-rag/
 │   │   │   ├── clarification_manager.py
 │   │   │   ├── review_manager.py
 │   │   │   └── result_aggregator.py
-│   │   ├── supervisor/
-│   │   │   ├── supervisor_service.py
-│   │   │   ├── status.py
-│   │   │   └── delegation_controller.py
-│   │   ├── workflows/
-│   │   │   └── analytics/
-│   │   │       ├── adapter.py
-│   │   │       ├── status_mapper.py
-│   │   │       ├── state.py
-│   │   │       ├── nodes.py
-│   │   │       ├── graph.py
-│   │   │       └── react/
-│   │   │           ├── planner.py
-│   │   │           ├── policy.py
-│   │   │           ├── state.py
-│   │   │           ├── tools.py
-│   │   │           └── validator.py
 │   │   ├── mesh/
 │   │   │   ├── policy_agent.py
 │   │   │   ├── safety_agent.py
@@ -314,19 +205,12 @@ enterprise-knowledge-agentic-rag/
 │   │   │   ├── report_mcp_client.py
 │   │   │   └── api_mcp_client.py
 │   │   ├── a2a/
-│   │   │   ├── contracts/
-│   │   │   │   └── models.py
-│   │   │   └── gateway/
-│   │   │       └── a2a_gateway.py
+│   │   │   ├── a2a_client.py
+│   │   │   └── registry_client.py
 │   │   └── local/
 │   │       ├── parser.py
 │   │       ├── ocr.py
 │   │       └── exporter.py
-│   ├── runtime/
-│   │   └── events/
-│   │       ├── event_bus.py
-│   │       ├── in_memory_bus.py
-│   │       └── redis_stream_bus.py
 │   ├── review/
 │   │   ├── hooks.py
 │   │   ├── interruptor.py
@@ -346,9 +230,6 @@ enterprise-knowledge-agentic-rag/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── ANALYTICS_DATA_SOURCE.md
-│   ├── A2A_LANGGRAPH_MIXED_ARCHITECTURE.md
-│   ├── ANALYTICS_PERF_REVIEW_V1.md
-│   ├── SUPERVISOR_ANALYTICS_STATE_MACHINE.md
 │   ├── AGENT_WORKFLOW.md
 │   ├── DB_DESIGN.md
 │   ├── API_DESIGN.md
@@ -409,45 +290,6 @@ sql/analytics/
   - 一期核心索引与唯一索引建议；
   - 服务趋势查询、区域汇总、站点排名、部门过滤和治理校验。
 
-## 3.2 经营分析性能优化支撑目录说明
-
-本轮性能优化增加了几类“只为主链减重服务”的基础模块：
-
-- `core/common/cache.py`
-  - 进程内只读缓存；
-  - 用于 metric definitions、data source definitions、group_by rules、visible_fields 等高频只读对象。
-
-- `core/common/async_task_runner.py`
-  - 最小本地异步任务执行器；
-  - 当前用于 analytics export 真异步化，后续可平滑替换为 Celery worker。
-
-- `core/repositories/analytics_result_repository.py`
-  - 经营分析重结果仓储；
-  - 配合 `task_runs.output_snapshot` 轻快照工作，负责 tables / insight_cards / report_blocks / chart_spec 的独立存取。
-
-- `core/agent/workflows/analytics/snapshot_builder.py`
-  - 经营分析轻量快照构造层；
-  - 负责统一构造 `input_snapshot / output_snapshot / context_snapshot / slot_snapshot / clarification_event`
-    的轻量 payload，避免上游继续手写松散 dict。
-
-- `core/agent/workflows/analytics/graph.py`
-  - 经营分析 `StateGraph-first` 正式执行图；
-  - 当前不再把本地 fallback runner 作为生产默认路径；
-  - 如果运行环境缺少 `langgraph`，应直接清晰失败并提示检查正式依赖。
-
-- `tests/perf/test_analytics_perf_acceptance.py`
-  - 第18轮性能验收自动化测试；
-  - 用于验证 lite / standard / full 分级、轻快照瘦身、重结果拆分、异步导出和缓存复用是否真正生效。
-
-- `docs/ANALYTICS_PERF_REVIEW_V1.md`
-  - 第18轮性能验收与慢点复盘文档；
-  - 记录验收范围、方法、结果、当前瓶颈和下一轮优化建议。
-
-- `docs/SUPERVISOR_ANALYTICS_PERSISTENCE_BOUNDARY.md`
-  - Supervisor + Analytics 子 Agent 持久化边界说明文档；
-  - 用于说明 `task_run / slot_snapshot / clarification_event / analytics_result_repository / workflow state`
-    的职责分层，避免后续把微观大对象重新塞回权威运行态。
-
 ## 4.1 `apps/api/main.py`
 
 职责：
@@ -498,14 +340,8 @@ sql/analytics/
 ### `routers/analytics.py`
 负责：
 
-- `POST /api/v1/analytics/query`（支持 output_mode=lite/standard/full）
-- `GET /api/v1/analytics/runs/{run_id}`（支持 output_mode 参数）
-
-### `routers/analytics_exports.py`
-负责：
-
-- `POST /api/v1/analytics/runs/{run_id}/export`（V1 真异步化，只创建任务返回 export_id）
-- `GET /api/v1/analytics/exports/{export_id}`（轮询读取导出状态）
+- `POST /api/v1/analytics/query`
+- `GET /api/v1/analytics/runs/{run_id}`
 
 ### `routers/reviews.py`
 负责：

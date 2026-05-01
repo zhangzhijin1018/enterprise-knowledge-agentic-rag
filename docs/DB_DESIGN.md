@@ -734,10 +734,6 @@ COMMENT ON COLUMN clarification_events.resolved_at IS '解决时间';
 
 ## 5.14 task_runs
 
-> **V1 性能优化说明**：`output_snapshot` 已轻量化。重内容（tables / insight_cards / report_blocks / chart_spec）不再写入此字段，而是单独存储到 `analytics_results` 表。轻快照仅保留 summary、slots、sql_preview、row_count、latency_ms、compare_target、group_by、governance_decision（简版）、timing_breakdown。目的是减少 task_runs 的大 JSON 写入与读取压力。
->
-> 这套轻重分离设计的验收结果与慢点复盘见：`docs/ANALYTICS_PERF_REVIEW_V1.md`。
-
 ```sql
 CREATE TABLE task_runs (
     id BIGSERIAL PRIMARY KEY,
@@ -770,39 +766,32 @@ CREATE TABLE task_runs (
 
 COMMENT ON TABLE task_runs IS '任务运行表：存储工作流任务的主运行状态';
 
-COMMENT ON COLUMN task_runs.output_snapshot IS '输出轻快照：仅包含 summary、slots、sql_preview、row_count、latency_ms、compare_target、group_by、governance_decision（简版）、timing_breakdown。重内容存储到 analytics_results 表';
-```
-
----
-
-## 5.14.1 analytics_results（V1 性能优化新增）
-
-> 重内容单独存储表，与 task_runs.output_snapshot 轻快照配合使用。
-> 目的是将 tables、insight_cards、report_blocks、chart_spec 等大 JSON 从 task_runs 拆出，
-> 减少 task_runs 的大 JSON 写入与读取压力。
-
-```sql
-CREATE TABLE analytics_results (
-    id BIGSERIAL PRIMARY KEY,
-    run_id VARCHAR(128) NOT NULL UNIQUE REFERENCES task_runs(run_id),
-    tables JSONB NOT NULL DEFAULT '[]'::jsonb,
-    insight_cards JSONB NOT NULL DEFAULT '[]'::jsonb,
-    report_blocks JSONB NOT NULL DEFAULT '[]'::jsonb,
-    chart_spec JSONB NOT NULL DEFAULT '{}'::jsonb,
-    masking_result JSONB NOT NULL DEFAULT '{}'::jsonb,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-COMMENT ON TABLE analytics_results IS '经营分析重结果表：存储 tables、insight_cards、report_blocks、chart_spec 等大 JSON，与 task_runs.output_snapshot 轻快照配合';
-COMMENT ON COLUMN analytics_results.run_id IS '关联 task_runs.run_id';
-COMMENT ON COLUMN analytics_results.tables IS '结果表数据';
-COMMENT ON COLUMN analytics_results.insight_cards IS '洞察卡片';
-COMMENT ON COLUMN analytics_results.report_blocks IS '报告块';
-COMMENT ON COLUMN analytics_results.chart_spec IS '图表描述';
-COMMENT ON COLUMN analytics_results.masking_result IS '脱敏与字段可见性结果';
-COMMENT ON COLUMN analytics_results.metadata IS '重结果扩展元数据，例如 sql_explain、audit_info、timing_breakdown';
+COMMENT ON COLUMN task_runs.id IS '数据库内部主键';
+COMMENT ON COLUMN task_runs.run_id IS '任务运行唯一ID';
+COMMENT ON COLUMN task_runs.task_id IS '任务ID';
+COMMENT ON COLUMN task_runs.parent_task_id IS '父任务ID';
+COMMENT ON COLUMN task_runs.conversation_id IS '所属会话ID';
+COMMENT ON COLUMN task_runs.user_id IS '发起用户ID';
+COMMENT ON COLUMN task_runs.trace_id IS 'Trace标识';
+COMMENT ON COLUMN task_runs.task_type IS '任务类型';
+COMMENT ON COLUMN task_runs.route IS '路由结果';
+COMMENT ON COLUMN task_runs.selected_agent IS '选中的业务专家';
+COMMENT ON COLUMN task_runs.selected_capability IS '选中的能力或工具';
+COMMENT ON COLUMN task_runs.selected_remote_agent IS '选中的远程专家';
+COMMENT ON COLUMN task_runs.risk_level IS '风险等级';
+COMMENT ON COLUMN task_runs.review_status IS '审核状态';
+COMMENT ON COLUMN task_runs.status IS '任务主状态';
+COMMENT ON COLUMN task_runs.sub_status IS '任务子状态';
+COMMENT ON COLUMN task_runs.input_snapshot IS '输入快照';
+COMMENT ON COLUMN task_runs.output_snapshot IS '输出快照';
+COMMENT ON COLUMN task_runs.context_snapshot IS '上下文快照';
+COMMENT ON COLUMN task_runs.retry_count IS '重试次数';
+COMMENT ON COLUMN task_runs.error_code IS '错误码';
+COMMENT ON COLUMN task_runs.error_message IS '错误信息';
+COMMENT ON COLUMN task_runs.started_at IS '开始时间';
+COMMENT ON COLUMN task_runs.finished_at IS '完成时间';
+COMMENT ON COLUMN task_runs.created_at IS '创建时间';
+COMMENT ON COLUMN task_runs.updated_at IS '更新时间';
 ```
 
 ---
@@ -1000,7 +989,7 @@ class TaskRun(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True, comment="任务主状态")
     sub_status: Mapped[str | None] = mapped_column(String(64), comment="任务子状态")
     input_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False, comment="输入快照")
-    output_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False, comment="输出轻快照")
+    output_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False, comment="输出快照")
     context_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False, comment="上下文快照")
 ```
 

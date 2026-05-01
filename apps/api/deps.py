@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from functools import lru_cache
 
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
@@ -27,7 +26,6 @@ from core.analytics.report_templates import ReportTemplateEngine
 from core.agent.control_plane.llm_analytics_planner import LLMAnalyticsPlannerGateway
 from core.agent.control_plane.analytics_review_policy import AnalyticsReviewPolicy
 from core.agent.workflow import ChatWorkflowFacade
-from core.agent.workflows.analytics import AnalyticsWorkflowAdapter
 from core.agent.control_plane.analytics_planner import AnalyticsPlanner
 from core.agent.control_plane.sql_builder import SQLBuilder
 from core.agent.control_plane.sql_guard import SQLGuard
@@ -36,7 +34,6 @@ from core.database.session import get_db_session
 from core.embedding.gateway import EmbeddingGateway
 from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.analytics_export_repository import AnalyticsExportRepository
-from core.repositories.analytics_result_repository import AnalyticsResultRepository
 from core.repositories.analytics_review_repository import AnalyticsReviewRepository
 from core.repositories.document_chunk_repository import DocumentChunkRepository
 from core.repositories.document_repository import DocumentRepository
@@ -47,7 +44,6 @@ from core.security.auth import UserContext
 from core.security.auth import resolve_user_context_from_request
 from core.services.analytics_export_service import AnalyticsExportService
 from core.services.analytics_review_service import AnalyticsReviewService
-from core.services.analytics_clarification_service import AnalyticsClarificationService
 from core.services.analytics_service import AnalyticsService
 from core.services.chat_service import ChatService
 from core.services.clarification_service import ClarificationService
@@ -123,14 +119,6 @@ def get_analytics_export_repository(
     return AnalyticsExportRepository(session=session)
 
 
-def get_analytics_result_repository(
-    session: Session | None = Depends(get_session),
-) -> AnalyticsResultRepository:
-    """提供经营分析重结果 Repository 依赖。"""
-
-    return AnalyticsResultRepository(session=session)
-
-
 def get_analytics_review_repository(
     session: Session | None = Depends(get_session),
 ) -> AnalyticsReviewRepository:
@@ -176,7 +164,6 @@ def get_vector_store() -> MilvusStore:
     return MilvusStore(collection_name=settings.milvus_collection_name)
 
 
-@lru_cache(maxsize=1)
 def get_schema_registry() -> SchemaRegistry:
     """提供经营分析 Schema Registry 依赖。"""
 
@@ -215,9 +202,7 @@ def get_llm_analytics_planner_gateway() -> LLMAnalyticsPlannerGateway:
 
 def get_analytics_planner(
     metric_catalog: MetricCatalog = Depends(get_metric_catalog),
-    llm_planner_gateway: LLMAnalyticsPlannerGateway = Depends(
-        get_llm_analytics_planner_gateway
-    ),
+    llm_planner_gateway: LLMAnalyticsPlannerGateway = Depends(get_llm_analytics_planner_gateway),
 ) -> AnalyticsPlanner:
     """提供经营分析 Planner 依赖。"""
 
@@ -290,9 +275,7 @@ def get_analytics_review_policy() -> AnalyticsReviewPolicy:
 
 
 def get_chat_service(
-    conversation_repository: ConversationRepository = Depends(
-        get_conversation_repository
-    ),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
 ) -> ChatService:
     """提供 ChatService 依赖。"""
@@ -305,9 +288,7 @@ def get_chat_service(
 
 
 def get_conversation_service(
-    conversation_repository: ConversationRepository = Depends(
-        get_conversation_repository
-    ),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
 ) -> ConversationService:
     """提供 ConversationService 依赖。"""
 
@@ -315,9 +296,7 @@ def get_conversation_service(
 
 
 def get_clarification_service(
-    conversation_repository: ConversationRepository = Depends(
-        get_conversation_repository
-    ),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
 ) -> ClarificationService:
     """提供 ClarificationService 依赖。"""
@@ -330,9 +309,7 @@ def get_clarification_service(
 
 def get_document_service(
     document_repository: DocumentRepository = Depends(get_document_repository),
-    document_chunk_repository: DocumentChunkRepository = Depends(
-        get_document_chunk_repository
-    ),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
 ) -> DocumentService:
     """提供 DocumentService 依赖。"""
 
@@ -345,9 +322,7 @@ def get_document_service(
 
 def get_document_parse_service(
     document_repository: DocumentRepository = Depends(get_document_repository),
-    document_chunk_repository: DocumentChunkRepository = Depends(
-        get_document_chunk_repository
-    ),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
 ) -> DocumentParseService:
     """提供 DocumentParseService 依赖。"""
 
@@ -360,9 +335,7 @@ def get_document_parse_service(
 
 def get_document_ingestion_service(
     document_repository: DocumentRepository = Depends(get_document_repository),
-    document_chunk_repository: DocumentChunkRepository = Depends(
-        get_document_chunk_repository
-    ),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
     embedding_gateway: EmbeddingGateway = Depends(get_embedding_gateway),
     vector_store: MilvusStore = Depends(get_vector_store),
 ) -> DocumentIngestionService:
@@ -378,9 +351,7 @@ def get_document_ingestion_service(
 
 def get_retrieval_service(
     document_repository: DocumentRepository = Depends(get_document_repository),
-    document_chunk_repository: DocumentChunkRepository = Depends(
-        get_document_chunk_repository
-    ),
+    document_chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
     embedding_gateway: EmbeddingGateway = Depends(get_embedding_gateway),
     vector_store: MilvusStore = Depends(get_vector_store),
 ) -> RetrievalService:
@@ -396,9 +367,7 @@ def get_retrieval_service(
 
 
 def get_analytics_service(
-    conversation_repository: ConversationRepository = Depends(
-        get_conversation_repository
-    ),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
     sql_audit_repository: SQLAuditRepository = Depends(get_sql_audit_repository),
     analytics_planner: AnalyticsPlanner = Depends(get_analytics_planner),
@@ -408,14 +377,10 @@ def get_analytics_service(
     schema_registry: SchemaRegistry = Depends(get_schema_registry),
     metric_catalog: MetricCatalog = Depends(get_metric_catalog),
     data_source_registry: DataSourceRegistry = Depends(get_data_source_registry),
-    analytics_result_repository: AnalyticsResultRepository = Depends(
-        get_analytics_result_repository
-    ),
 ) -> AnalyticsService:
     """提供 AnalyticsService 依赖。"""
 
-    settings = get_settings()
-    analytics_service = AnalyticsService(
+    return AnalyticsService(
         conversation_repository=conversation_repository,
         task_run_repository=task_run_repository,
         sql_audit_repository=sql_audit_repository,
@@ -426,49 +391,19 @@ def get_analytics_service(
         schema_registry=schema_registry,
         metric_catalog=metric_catalog,
         data_source_registry=data_source_registry,
-        analytics_result_repository=analytics_result_repository,
-        use_workflow=settings.analytics_use_workflow,
-    )
-    analytics_service.bind_workflow_adapter(
-        AnalyticsWorkflowAdapter(analytics_service=analytics_service),
-        use_workflow=settings.analytics_use_workflow,
-    )
-    return analytics_service
-
-
-def get_analytics_clarification_service(
-    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
-    task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
-    analytics_service: AnalyticsService = Depends(get_analytics_service),
-) -> AnalyticsClarificationService:
-    """提供经营分析 clarification 恢复 Service 依赖。"""
-
-    return AnalyticsClarificationService(
-        conversation_repository=conversation_repository,
-        task_run_repository=task_run_repository,
-        analytics_service=analytics_service,
     )
 
 
 def get_analytics_export_service(
-    conversation_repository: ConversationRepository = Depends(
-        get_conversation_repository
-    ),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
-    analytics_export_repository: AnalyticsExportRepository = Depends(
-        get_analytics_export_repository
-    ),
-    analytics_review_repository: AnalyticsReviewRepository = Depends(
-        get_analytics_review_repository
-    ),
+    analytics_export_repository: AnalyticsExportRepository = Depends(get_analytics_export_repository),
+    analytics_review_repository: AnalyticsReviewRepository = Depends(get_analytics_review_repository),
     report_gateway: ReportGateway = Depends(get_report_gateway),
     review_policy: AnalyticsReviewPolicy = Depends(get_analytics_review_policy),
     data_source_registry: DataSourceRegistry = Depends(get_data_source_registry),
     report_template_engine: ReportTemplateEngine = Depends(get_report_template_engine),
     report_formatter: ReportFormatter = Depends(get_report_formatter),
-    analytics_result_repository: AnalyticsResultRepository = Depends(
-        get_analytics_result_repository
-    ),
 ) -> AnalyticsExportService:
     """提供经营分析导出 Service 依赖。"""
 
@@ -482,24 +417,15 @@ def get_analytics_export_service(
         data_source_registry=data_source_registry,
         report_template_engine=report_template_engine,
         report_formatter=report_formatter,
-        analytics_result_repository=analytics_result_repository,
     )
 
 
 def get_analytics_review_service(
-    conversation_repository: ConversationRepository = Depends(
-        get_conversation_repository
-    ),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
-    analytics_export_repository: AnalyticsExportRepository = Depends(
-        get_analytics_export_repository
-    ),
-    analytics_review_repository: AnalyticsReviewRepository = Depends(
-        get_analytics_review_repository
-    ),
-    analytics_export_service: AnalyticsExportService = Depends(
-        get_analytics_export_service
-    ),
+    analytics_export_repository: AnalyticsExportRepository = Depends(get_analytics_export_repository),
+    analytics_review_repository: AnalyticsReviewRepository = Depends(get_analytics_review_repository),
+    analytics_export_service: AnalyticsExportService = Depends(get_analytics_export_service),
 ) -> AnalyticsReviewService:
     """提供经营分析 Human Review Service 依赖。"""
 

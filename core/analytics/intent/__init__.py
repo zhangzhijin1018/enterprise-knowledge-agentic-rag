@@ -1,15 +1,8 @@
-"""经营分析模块包。
+"""AnalyticsIntent 模块。
 
-该目录未来用于承载 SQL 分析、结果解释和经营报告能力。
+导出统一的 Intent 模型和解析器。
 """
 
-from core.analytics.insight_builder import InsightBuilder
-from core.analytics.data_masking import DataMaskingResult, DataMaskingService
-from core.analytics.data_source_registry import DataSourceRegistry
-from core.analytics.metric_catalog import MetricCatalog, MetricDefinition
-from core.analytics.report_formatter import ReportFormatter
-from core.analytics.report_templates import ReportTemplateEngine
-from core.analytics.schema_registry import DataSourceDefinition, GroupByRule, SchemaRegistry, TableDefinition
 from core.analytics.intent.schema import (
     AnalyticsIntent,
     AnalyticsIntentComplexity,
@@ -33,19 +26,6 @@ from core.analytics.intent.schema import (
 RequiredQueryIntent = AnalyticsIntent
 
 __all__ = [
-    "DataMaskingResult",
-    "DataMaskingService",
-    "DataSourceRegistry",
-    "InsightBuilder",
-    "MetricCatalog",
-    "MetricDefinition",
-    "ReportFormatter",
-    "ReportTemplateEngine",
-    "SchemaRegistry",
-    "GroupByRule",
-    "TableDefinition",
-    "DataSourceDefinition",
-    # Intent 相关
     "AnalyticsIntent",
     "AnalyticsIntentComplexity",
     "AnalyticsIntentPlanningMode",
