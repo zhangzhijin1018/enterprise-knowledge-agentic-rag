@@ -3,6 +3,7 @@
 该目录未来用于承载 SQL 分析、结果解释和经营报告能力。
 """
 
+from core.analytics.analytics_result_model import AnalyticsResult
 from core.analytics.insight_builder import InsightBuilder
 from core.analytics.data_masking import DataMaskingResult, DataMaskingService
 from core.analytics.data_source_registry import DataSourceRegistry
@@ -10,29 +11,9 @@ from core.analytics.metric_catalog import MetricCatalog, MetricDefinition
 from core.analytics.report_formatter import ReportFormatter
 from core.analytics.report_templates import ReportTemplateEngine
 from core.analytics.schema_registry import DataSourceDefinition, GroupByRule, SchemaRegistry, TableDefinition
-from core.analytics.intent.schema import (
-    AnalyticsIntent,
-    AnalyticsIntentComplexity,
-    AnalyticsIntentPlanningMode,
-    AnalysisIntentType,
-    CompareTarget,
-    IntentConfidence,
-    IntentValidationResult,
-    MetricCandidate,
-    MetricIntent,
-    OrgCandidate,
-    OrgScopeIntent,
-    OrgScopeType,
-    PeriodRole,
-    SortDirection,
-    TimeRangeIntent,
-    TimeRangeType,
-)
-
-# 为向后兼容保留 RequiredQueryIntent 作为 AnalyticsIntent 的别名
-RequiredQueryIntent = AnalyticsIntent
 
 __all__ = [
+    "AnalyticsResult",
     "DataMaskingResult",
     "DataMaskingService",
     "DataSourceRegistry",
@@ -45,22 +26,4 @@ __all__ = [
     "GroupByRule",
     "TableDefinition",
     "DataSourceDefinition",
-    # Intent 相关
-    "AnalyticsIntent",
-    "AnalyticsIntentComplexity",
-    "AnalyticsIntentPlanningMode",
-    "AnalysisIntentType",
-    "CompareTarget",
-    "IntentConfidence",
-    "IntentValidationResult",
-    "MetricCandidate",
-    "MetricIntent",
-    "OrgCandidate",
-    "OrgScopeIntent",
-    "OrgScopeType",
-    "PeriodRole",
-    "RequiredQueryIntent",
-    "SortDirection",
-    "TimeRangeIntent",
-    "TimeRangeType",
 ]

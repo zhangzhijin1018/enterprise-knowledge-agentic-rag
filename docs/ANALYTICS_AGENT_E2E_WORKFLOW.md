@@ -1,922 +1,876 @@
-# 经营分析 Agent 完整链路文档（E2E 教程）
+# 经营分析 Agent 端到端链路文档
 
-> 本文档通过真实用户问句，一步步展示经营分析 Agent 从输入到输出的完整执行链路。
->
-> 目标读者：前端开发理解 API 契约与状态变化；后端开发理解模块边界；面试讲解用真实场景串起架构。
->
-> 所有示例基于新疆能源集团经营分析语境，使用合理化的 mock 经营数据。
+## 文档概述
 
----
+本文档详细描述经营分析 Agent 的完整执行链路，从用户问句到最终结果返回。
 
-## 目录
-
-1. [系统总览：一条请求的完整旅程](#一系统总览)
-2. [场景 1：简单明确查询](#场景-1简单明确查询)
-3. [场景 2：缺少指标，需要澄清](#场景-2缺少指标需要澄清)
-4. [场景 3：缺少时间，需要澄清](#场景-3缺少时间需要澄清)
-5. [场景 4：澄清后恢复执行](#场景-4澄清后恢复执行)
-6. [场景 5：复杂问题触发 ReAct Planning](#场景-5复杂问题触发-react-planning)
-7. [场景 6：规则低置信触发 LLM Slot Fallback](#场景-6规则低置信触发-llm-slot-fallback)
-8. [场景 7：SQL Guard 阻断](#场景-7sql-guard-阻断)
-9. [场景 8：SQL Gateway 临时失败重试](#场景-8sql-gateway-临时失败重试)
-10. [场景 9：图表、洞察、报告块降级](#场景-9图表洞察报告块降级)
-11. [场景 10：导出报告](#场景-10导出报告)
-12. [场景 11：高风险导出进入人工审核](#场景-11高风险导出进入人工审核)
-13. [附录：核心状态字典](#附录核心状态字典)
+核心设计理念：
+- **LLM 只负责语义理解**：识别用户想要什么指标
+- **本地负责业务映射**：指标代码 → 数据源/表/字段
+- **执行策略智能选择**：SINGLE / PARALLEL / JOIN
+- **歧义检测本地化**：不依赖 LLM
 
 ---
 
-## 一、系统总览
+## 一、架构总览
 
-### 1.1 一条经营分析请求的完整旅程
+### 1.1 执行策略
 
 ```
-用户输入
-  → API 路由（routers/analytics.py）
-    → AnalyticsService.submit_query() 编排主链路
-      → SemanticResolver 口语化语义补强 + 多轮上下文承接
-      → SlotValidator 校验必填槽位与冲突
-      → AnalyticsPlanner.plan() 整合规划结果
-      → 如果不满足最小可执行条件 → 返回澄清
-      → 如果满足 → 进入执行链路：
-        → SQLBuilder 构造 schema-aware SQL
-        → SQLGuard 安全检查
-        → SQLGateway 通过 SQL MCP 执行只读查询
-        → DataMaskingService 脱敏处理
-        → InsightBuilder 生成洞察卡片
-        → ReportFormatter 生成报告块
-        → 写入 output_snapshot（轻快照）/ analytics_result_repository（重结果）
-        → SQLAuditRepository 记录审计
-      → 返回分级响应（lite / standard / full）
+┌─────────────────────────────────────────────────────────────────┐
+│                     执行策略选择                                   │
+├─────────────────────────────────────────────────────────────────┤
+│ 同一数据源 + 多表    →  SQL JOIN（最优）                        │
+│ 同一数据源 + 同表    →  并行查询 → 应用层合并                  │
+│ 不同数据源           →  并行查询 → 应用层合并                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2 关键模块职责边界
+### 1.2 完整链路流程
 
-| 模块 | 职责 | 不负责 |
-|---|---|---|
-| SemanticResolver | 口语解析、多轮上下文继承、LLM fallback 补槽位 | 判断是否可执行 |
-| SlotValidator | 判断必填槽位是否齐全、是否存在冲突 | 补强槽位 |
-| ClarificationGenerator | 生成结构化澄清问题和建议选项 | 决定是否要澄清 |
-| SQLBuilder | 将结构化槽位转成 schema-aware SQL | 执行 SQL、安全检查 |
-| SQLGuard | 校验 SQL 只读性、表白名单、字段白名单、部门过滤、自动补 LIMIT | 生成 SQL |
-| SQLGateway | 通过 SQL MCP Server 执行只读查询 | 直接连数据库 |
-| DataMaskingService | 按字段级权限对结果做脱敏/隐藏 | 查权限 |
-| InsightBuilder | 基于规则生成洞察卡片 | LLM 自由分析 |
-| ReportFormatter | 将结果整理为结构化报告块 | 生成文件导出 |
-
-### 1.3 数据存储边界
-
-| 存储位置 | 存什么 | 不存什么 |
-|---|---|---|
-| task_run.output_snapshot（轻快照） | summary、slots、sql_preview、row_count、latency_ms、compare_target、group_by、governance_decision（简版）、timing_breakdown | tables、insight_cards、report_blocks、chart_spec |
-| analytics_result_repository（重结果） | tables、insight_cards、report_blocks、chart_spec、masking_result | 轻快照字段 |
-| slot_snapshot | required_slots、collected_slots、missing_slots、resume_step | SQL 结果、审计记录 |
-| clarification_event | question_text、target_slots、user_reply、resolved_slots、status | workflow 上下文 |
-
-> **为什么 output_snapshot 不能无限膨胀？**
->
-> task_run 是整个平台的任务运行主表，如果把 tables（可能是几百行大 JSON）、insight_cards、report_blocks、chart_spec 全部塞进同一行的 JSONB 字段：
-> 1. 单行写入和读取的 IO 压力陡增；
-> 2. PG 的 TOAST 机制虽然能存大 JSON，但查询 task_run 列表时会拖慢所有读取；
-> 3. 任务列表页每次列 20 条 task_run 就要加载 20 个大 JSON，成本过高。
->
-> **为什么拆轻快照与重结果？**
->
-> 轻快照保留"能不能答复用户、任务是否成功"的最小必读字段；重结果保留"需要展开分析、用于导出、用于下钻"的大对象。两者解耦后：主查询接口默认只返回 lite 视图（只读轻快照），payload 显著减小；导出和详情页再去 analytics_result_repository 按需拉取重结果；前端轮询 task_run 状态时不需要每次都加载完整结果。
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     用户问句                                      │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. LLM 意图解析                                                │
+│    - semantic_confidence: 语义置信度                           │
+│    - metric: {metric_code, candidates: [...]}                   │
+│    - required_queries: [{metric_code, period_role, ...}]       │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 2. 歧义检测（本地）                                            │
+│    if candidates.length >= 2:                                   │
+│        return ClarificationResponse                             │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 3. QueryPlanner（本地）                                          │
+│    MetricResolver.resolve(metric_code)                          │
+│    → 获取 data_source_key                                       │
+│    → 判断策略：SINGLE / PARALLEL / JOIN                         │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 4. QueryExecutor（执行）                                        │
+│    - asyncio.gather 并行执行所有查询                            │
+│    - JOIN 策略执行单条 SQL                                       │
+│    - PARALLEL 策略并行执行多条 SQL                               │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 5. 应用层合并                                                   │
+│    - 不同数据源结果合并                                         │
+│    - 不同时间周期结果合并                                        │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 6. 返回结果                                                     │
+│    - Summary: 摘要                                             │
+│    - Chart Spec: 图表描述                                      │
+│    - Insight Cards: 洞察卡片                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 场景 1：简单明确查询
+## 二、置信度体系
 
-> 用户问句：
->
-> **"查询新疆区域 2024 年 3 月的发电量"**
+### 2.1 置信度类型
 
-### 这个场景要解决什么问题
+| 置信度类型 | 字段 | 说明 | 阈值参考 |
+|-----------|------|------|---------|
+| 语义理解 | `semantic_confidence` | LLM 是否听懂用户 | >= 0.85 可执行 |
+| 指标选择 | `metric.confidence` | 是否选对指标 | >= 0.85 可执行 |
+| 时间范围 | `time_range.confidence` | 时间解析准确度 | >= 0.70 |
+| 执行可行性 | `confidence.execution` | 数据源是否可用 | 1.0 或 0.0 |
 
-用户给出了明确的三要素（指标+时间+范围），系统不需要追问任何信息，可以直接执行查询并返回结果。这是经营分析最常见的理想场景。
-
-### 系统执行步骤
+### 2.2 置信度阈值规则
 
 ```
-1. SemanticResolver 解析 → metric=发电量, time_range=2024年3月, org_scope=新疆区域
-2. SlotValidator 校验 → is_executable=true
-3. SQLBuilder 构造 schema-aware SQL
-4. SQLGuard 安全检查（只读校验、表白名单、部门过滤、自动补 LIMIT）
-5. SQLGateway 通过 SQL MCP Server 执行只读查询
-6. DataMaskingService 脱敏处理
-7. 生成 Summary / Chart Spec / Insight Cards / Report Blocks
-8. 写入 output_snapshot（轻快照）+ analytics_result_repository（重结果）
-9. 记录 SQL Audit
-10. 按 output_mode 返回分级视图
+| overall >= 0.85    | 可执行，无需澄清                                  |
+| 0.65 <= overall < 0.85 | 如无歧义可执行，否则澄清                  |
+| overall < 0.65     | 必须澄清                                        |
 ```
 
-### Planner 识别结果
+---
+
+## 三、用户问句场景覆盖
+
+### 场景 1：简单明确查询
+
+**用户问句**：`"查询新疆区域 2024 年 3 月发电量"`
+
+**场景说明**：用户明确指定了指标、时间范围和组织范围，无需歧义检测。
+
+**系统执行步骤**：
+
+```
+Step 1: LLM 意图解析
+┌─────────────────────────────────────────────────────────────┐
+│ AnalyticsIntent {                                          │
+│   original_query: "查询新疆区域 2024 年 3 月发电量",       │
+│   complexity: "simple",                                    │
+│   planning_mode: "direct",                                 │
+│   semantic_confidence: 0.95,                              │
+│   metric: {                                               │
+│     metric_code: "generation",                            │
+│     metric_name: "发电量",                                │
+│     confidence: 0.95                                       │
+│   },                                                       │
+│   time_range: {                                            │
+│     type: "absolute",                                      │
+│     value: "2024-03",                                     │
+│     start: "2024-03-01",                                 │
+│     end: "2024-03-31",                                   │
+│     confidence: 0.95                                       │
+│   },                                                       │
+│   org_scope: {                                            │
+│     type: "region",                                       │
+│     name: "新疆区域",                                      │
+│     confidence: 0.90                                       │
+│   },                                                       │
+│   compare_target: "none",                                  │
+│   need_clarification: false                              │
+│ }                                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Step 2: 歧义检测**
+- `candidates.length = 0`：无歧义
+- `need_clarification = false`：无需澄清
+
+**Step 3: QueryPlanner 生成执行计划**
+```
+┌─────────────────────────────────────────────────────────────┐
+│ ExecutionPlan {                                           │
+│   phases: [                                              │
+│     {                                                    │
+│       phase_id: "phase_0",                              │
+│       data_source_key: "enterprise_readonly",             │
+│       queries: ["q_simple"],                            │
+│       strategy: "single"                                 │
+│     }                                                    │
+│   ],                                                     │
+│   need_merge: false,                                     │
+│   total_queries: 1                                       │
+│ }                                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Step 4: QueryExecutor 执行**
+```
+SQL: SELECT station_name, SUM(metric_value) as generation
+     FROM analytics_metrics_daily
+     WHERE metric_code = 'generation'
+       AND biz_date >= '2024-03-01'
+       AND biz_date <= '2024-03-31'
+       AND region_name = '新疆区域'
+     GROUP BY station_name
+```
+
+**字段说明表**：
 
 | 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| metric | 发电量 | 用户要查询的经营指标 |
-| time_range.type | absolute_month | 时间范围类型：绝对月份 |
-| time_range.label | 2024年3月 | 时间的可读标签 |
-| time_range.start_date | 2024-03-01 | 查询开始日期 |
-| time_range.end_date | 2024-03-31 | 查询结束日期 |
-| org_scope.type | region | 组织范围类型：区域 |
-| org_scope.value | 新疆区域 | 组织范围具体值 |
-| planning_source | rule | 规划来源：规则匹配 |
-| confidence | 0.95 | 置信度：高 |
-| is_executable | true | 满足最小可执行条件 |
+|------|--------|---------|
+| original_query | 查询新疆区域 2024 年 3 月发电量 | 用户原始问句 |
+| complexity | simple | 问题复杂度：简单查询 |
+| planning_mode | direct | 规划模式：直接执行 |
+| semantic_confidence | 0.95 | 语义理解置信度 |
+| metric_code | generation | 指标代码 |
+| metric_name | 发电量 | 指标名称 |
+| time_range.value | 2024-03 | 时间范围值 |
+| time_range.start | 2024-03-01 | 时间范围起始日期 |
+| time_range.end | 2024-03-31 | 时间范围结束日期 |
+| org_scope.name | 新疆区域 | 组织范围名称 |
+| compare_target | none | 对比目标：无 |
+| need_clarification | false | 是否需要澄清 |
 
-### SQLBuilder 输出
+**最终返回**：
 
+| 字段 | 示例值 | 中文含义 |
+|------|--------|---------|
+| summary | 2024年3月新疆区域发电量为12800 MWh | 数据摘要 |
+| data | [{station: 哈密电站, value: 4200}, ...] | 查询结果 |
+| degraded | false | 是否降级 |
+
+---
+
+### 场景 2：指标歧义，需要澄清
+
+**用户问句**：`"新疆最近电量咋样"`
+
+**场景说明**：用户说"电量"可能指发电量、上网电量或售电量，需要澄清。
+
+**系统执行步骤**：
+
+**Step 1: LLM 意图解析**
 ```json
 {
-  "generated_sql": "SELECT station, SUM(power_generation) AS total_value FROM analytics_metrics_daily WHERE date >= '2024-03-01' AND date <= '2024-03-31' AND org_region = '新疆区域' AND department_code = 'analytics-center' GROUP BY station ORDER BY total_value DESC",
-  "data_source": "local_analytics",
-  "metric_scope": "发电量",
-  "builder_metadata": {
-    "effective_filters": {
-      "department_code": "analytics-center",
-      "date_range": "2024-03-01 ~ 2024-03-31",
-      "org_region": "新疆区域"
-    }
-  }
-}
-```
-
-| 字段 | 中文含义 |
-|---|---|
-| generated_sql | Schema-aware 受控模板生成的 SQL |
-| data_source | 数据源标识，决定去哪个数据库执行 |
-| metric_scope | 指标中文名，用于前端展示和审计 |
-| effective_filters | 实际生效的过滤条件（含部门治理字段） |
-
-### SQLGuard 校验通过
-
-SQLGuard 做 9 层校验全部 PASS，输出：
-
-```json
-{
-  "is_safe": true,
-  "checked_sql": "SELECT station, SUM(power_generation) AS total_value FROM analytics_metrics_daily WHERE ... LIMIT 500",
-  "blocked_reason": null
-}
-```
-
-### SQL MCP 执行结果（mock 业务数据）
-
-| station | total_value |
-|---|---|
-| 哈密电站 | 4200 MWh |
-| 吐鲁番电站 | 3100 MWh |
-| 北疆风电场 | 2900 MWh |
-| 南疆光伏站 | 2600 MWh |
-
-### Chart Spec（图表描述）
-
-```json
-{
-  "chart_type": "bar",
-  "title": "发电量station分布",
-  "x_field": "station",
-  "y_field": "total_value",
-  "series_field": null,
-  "dataset_ref": "main_result",
-  "data_mapping": {
-    "primary_series": "total_value",
-    "secondary_series": null
-  }
-}
-```
-
-| 字段 | 中文含义 |
-|---|---|
-| chart_type | 图表类型：bar=柱状图，line=折线图，pie=饼图，ranking_bar=排行榜柱状图 |
-| title | 图表标题 |
-| x_field / y_field | X/Y 轴对应字段 |
-| data_mapping.primary_series | 主数据系列字段名 |
-
-### Insight Cards（洞察卡片）
-
-```json
-[
-  {
-    "title": "发电量station排名洞察",
-    "type": "ranking",
-    "summary": "当前排名第一的是 哈密电站，数值为 4200。",
-    "evidence": {
-      "dimension": "哈密电站",
-      "value": 4200,
-      "row_count": 4
-    }
-  }
-]
-```
-
-| 字段 | 中文含义 |
-|---|---|
-| title | 洞察卡片标题 |
-| type | 洞察类型：ranking=排名，trend=趋势，comparison=对比，anomaly=异常提醒 |
-| summary | 洞察摘要，可直接展示给用户 |
-| evidence | 支撑洞察的证据数据 |
-
-### Report Blocks（报告块，部分示例）
-
-```json
-[
-  { "block_type": "overview", "title": "分析概览", "content": "已完成"发电量"在2024年3月范围内的排名查询..." },
-  { "block_type": "key_findings", "title": "关键发现", "content": [{"type": "ranking", "summary": "当前排名第一的是 哈密电站，数值为 4200。"}] },
-  { "block_type": "ranking", "title": "排名分析", "content": [...] },
-  { "block_type": "data_table", "title": "main_result", "content": {"columns": ["station","total_value"], "rows": [...]} },
-  { "block_type": "chart", "title": "发电量station分布", "content": {"chart_type": "bar", ...} },
-  { "block_type": "governance_note", "title": "治理说明", "content": {"masked_fields": ["station"], ...} },
-  { "block_type": "risk_note", "title": "风险提示", "content": "当前结果基于受控模板 SQL..." },
-  { "block_type": "recommendation", "title": "后续建议", "content": "如需更深入分析..." }
-]
-```
-
-| block_type | 中文含义 |
-|---|---|
-| overview | 分析概览 |
-| key_findings | 关键发现 |
-| ranking / trend | 排名/趋势分析 |
-| data_table | 数据表 |
-| chart | 图表 |
-| governance_note | 治理说明 |
-| risk_note | 风险提示 |
-| recommendation | 后续建议 |
-
-### 存储：轻快照 vs 重结果
-
-**轻快照写入 task_run.output_snapshot**：
-
-```json
-{
-  "summary": "已完成"发电量"在2024年3月范围内的排名查询，当前返回 4 行结果。",
-  "sql_preview": "SELECT station, SUM(power_generation) AS total_value FROM ... LIMIT 500",
-  "safety_check_result": {"is_safe": true},
-  "metric_scope": "发电量",
-  "data_source": "local_analytics",
-  "row_count": 4,
-  "latency_ms": 45,
-  "compare_target": null,
-  "group_by": "station",
-  "governance_decision": {"masked_fields": ["station"], "governance_action": "fields_masked"},
-  "slots": {"metric": "发电量", "time_range": {"label": "2024年3月"}, "org_scope": {"value": "新疆区域"}, "group_by": "station"},
-  "planning_source": "rule"
-}
-```
-
-**重内容写入 analytics_result_repository**：
-
-```json
-{
-  "tables": [{"name": "main_result", "columns": ["station", "total_value"], "rows": [["哈***站", 4200], ["吐***站", 3100], ...]}],
-  "insight_cards": [{"title": "发电量station排名洞察", "type": "ranking", "summary": "..."}],
-  "report_blocks": [...],
-  "chart_spec": {"chart_type": "bar", "title": "发电量station分布"},
-  "masking_result": {"masked_fields": ["station"], "governance_decision": "fields_masked"}
-}
-```
-
-### 任务状态变化
-
-| 阶段 | task_run.status | task_run.sub_status | 中文含义 |
-|---|---|---|---|
-| 创建任务 | executing | planning_query | 正在意图识别 |
-| 构造 SQL | executing | building_sql | 正在构造 SQL |
-| 安全检查 | executing | checking_sql | 正在 SQL Guard 校验 |
-| 执行查询 | executing | running_sql | 正在执行 SQL |
-| 生成结果 | succeeded | explaining_result | 正在生成摘要/图表 |
-| 最终状态 | succeeded | explaining_result | 执行成功 |
-
-### 最终返回（output_mode=full）
-
-```json
-{
-  "data": {
-    "run_id": "run_200", "trace_id": "tr_050",
-    "summary": "已完成"发电量"在2024年3月范围内的排名查询，当前返回 4 行结果。",
-    "row_count": 4, "latency_ms": 45,
-    "metric_scope": "发电量", "data_source": "local_analytics",
-    "compare_target": null, "group_by": "station",
-    "sql_preview": "SELECT station, SUM(power_generation) AS total_value FROM ... LIMIT 500",
-    "chart_spec": {"chart_type": "bar", "title": "发电量station分布"},
-    "insight_cards": [...], "tables": [...], "report_blocks": [...],
-    "safety_check_result": {"is_safe": true},
-    "audit_info": {"execution_status": "succeeded", "row_count": 4, "latency_ms": 45},
-    "masked_fields": ["station"],
-    "effective_filters": {"department_code": "analytics-center"},
-    "governance_decision": {"governance_action": "fields_masked"},
-    "timing_breakdown": {"planning_ms": 2.1, "sql_build_ms": 1.3, "sql_guard_ms": 0.5, "sql_execute_ms": 45.0, "masking_ms": 0.3, "insight_ms": 0.2, "report_ms": 0.4}
+  "original_query": "新疆最近电量咋样",
+  "complexity": "simple",
+  "planning_mode": "clarification",
+  "semantic_confidence": 0.70,
+  "metric": {
+    "raw_text": "电量",
+    "confidence": 0.50,
+    "candidates": [
+      {"metric_code": "generation", "metric_name": "发电量", "confidence": 0.40, "business_domain": "new_energy"},
+      {"metric_code": "online", "metric_name": "上网电量", "confidence": 0.30, "business_domain": "new_energy"},
+      {"metric_code": "sales", "metric_name": "售电量", "confidence": 0.30, "business_domain": "new_energy"}
+    ]
   },
-  "meta": {"conversation_id": "conv_200", "run_id": "run_200", "status": "succeeded", "is_async": false}
+  "time_range": {
+    "raw_text": "最近",
+    "type": "relative",
+    "value": "最近",
+    "confidence": 0.70
+  },
+  "org_scope": {
+    "type": "region",
+    "name": "新疆",
+    "confidence": 0.90
+  },
+  "need_clarification": true,
+  "clarification_type": "metric_ambiguity"
 }
 ```
 
-### output_mode 返回分级
+**Step 2: ClarificationManager 歧义检测**
+```
+检测结果：
+- metric.candidates.length = 3 >= 2
+- 触发澄清
+```
 
-| output_mode | 返回内容 |
-|---|---|
-| lite（默认） | summary、row_count、latency_ms、run_id、trace_id、metric_scope、data_source、compare_target、group_by |
-| standard | lite + sql_preview、chart_spec、insight_cards、masked_fields、effective_filters、governance_decision |
-| full | standard + tables、report_blocks、sql_explain、safety_check_result、permission_check_result、data_scope_result、audit_info、timing_breakdown |
+**返回给用户的澄清问题**：
+```
+您说的「电量」可能是：
+1. 发电量
+2. 上网电量
+3. 售电量
 
-### 本场景关键结论
+请回复选项编号或指标名称。
+```
 
-1. 用户给出明确三要素时，系统一次性执行成功，不依赖 LLM；
-2. SQL 不是自由生成的，而是 SQLBuilder 基于 schema 和槽位的受控模板；
-3. 每一层（构建→检查→执行→脱敏→解释）都有明确的边界；
-4. 重内容分离存储：轻快照写入 output_snapshot，重结果写入 analytics_result_repository；
-5. 前端可通过 output_mode 控制返回粒度：列表页用 lite，详情页用 full。
+**字段说明表**：
+
+| 字段 | 示例值 | 中文含义 |
+|------|--------|---------|
+| ambiguous_fields | ["metric"] | 存在歧义的字段 |
+| clarification_type | metric_ambiguity | 澄清类型：指标歧义 |
+| metric.raw_text | 电量 | 用户原始指标文本 |
+| metric.candidates | [{generation}, {online}, {sales}] | 指标候选列表 |
+| clarification_options | [...] | 澄清选项 |
 
 ---
 
-## 场景 2：缺少指标，需要澄清
+### 场景 3：指标缺失，需要澄清
 
-> 用户问句：
->
-> **"帮我看一下新疆区域上个月的情况"**
+**用户问句**：`"帮我看一下新疆区域上个月的情况"`
 
-### 这个场景要解决什么问题
+**场景说明**：用户没有明确指标，需要引导补充。
 
-用户表达了分析意图，也给出了组织范围和时间，但没有说明想看什么指标。系统不能替用户猜测——这是安全性和业务严谨性的底线。
+**系统执行步骤**：
 
-### 系统执行步骤
-
-```
-1. SemanticResolver 解析 → time_range=上个月, org_scope=新疆区域, metric=null
-2. SlotValidator 校验 → missing_slots=["metric"], is_executable=false
-3. ClarificationGenerator 生成澄清 → clarification_type="missing_required_slot"
-4. 创建 slot_snapshot（保存已收集槽位）
-5. 创建 clarification_event
-6. task_run.status = "awaiting_user_clarification"
-7. 返回澄清给用户
-```
-
-### 关键输入输出
-
-**SemanticResolver 解析结果**：
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| metric | null | 未识别到指标 |
-| time_range.type | relative_30_days | 时间范围：相对近 30 天 |
-| time_range.label | 近一个月 | 时间可读标签 |
-| org_scope.value | 新疆区域 | 组织范围 |
-| planning_source | rule | 规则匹配 |
-| confidence | 0.7 | 中等置信度 |
-
-**ClarificationGenerator 输出**：
-
+**Step 1: LLM 意图解析**
 ```json
 {
-  "clarification_type": "missing_required_slot",
-  "question": "当前分析范围已经基本确定，但还缺少主指标。你想看发电量、收入、成本、利润还是产量？",
-  "target_slots": ["metric"],
-  "reason": "缺少主指标，无法安全构造 SQL",
-  "suggested_options": ["发电量", "收入", "成本", "利润", "产量"]
+  "original_query": "帮我看一下新疆区域上个月的情况",
+  "metric": null,
+  "time_range": {
+    "raw_text": "上个月",
+    "type": "relative",
+    "value": "上月",
+    "confidence": 0.80
+  },
+  "org_scope": {
+    "type": "region",
+    "name": "新疆区域",
+    "confidence": 0.90
+  },
+  "need_clarification": true,
+  "clarification_type": "metric_missing",
+  "missing_fields": ["metric"]
 }
 ```
 
-**slot_snapshot**（保存已收集槽位，供恢复执行使用）：
+**返回给用户的澄清问题**：
+```
+请问您想查看哪个经营指标？
+1. 发电量
+2. 上网电量
+3. 收入
+4. 成本
+5. 利润
+```
+
+---
+
+### 场景 4：复杂归因分析（PARALLEL 策略）
+
+**用户问句**：`"分析新疆区域近三个月发电量下降的原因，并和去年同期对比，看哪些电站拖累最大"`
+
+**场景说明**：需要查询当前周期和去年同期数据，进行同比分析。
+
+**系统执行步骤**：
+
+**Step 1: LLM 意图解析**
+```json
+{
+  "original_query": "分析新疆区域近三个月发电量下降的原因，并和去年同期对比，看哪些电站拖累最大",
+  "complexity": "complex",
+  "planning_mode": "decomposed",
+  "analysis_intent": "decline_attribution",
+  "semantic_confidence": 0.92,
+  "metric": {
+    "metric_code": "generation",
+    "metric_name": "发电量",
+    "confidence": 0.95
+  },
+  "time_range": {
+    "raw_text": "近三个月",
+    "type": "relative",
+    "value": "近三个月",
+    "confidence": 0.90
+  },
+  "org_scope": {
+    "type": "region",
+    "name": "新疆区域",
+    "confidence": 0.90
+  },
+  "group_by": "station",
+  "compare_target": "yoy",
+  "sort_by": "decline_contribution",
+  "sort_direction": "desc",
+  "top_n": 10,
+  "required_queries": [
+    {
+      "query_id": "q_current",
+      "query_name": "current",
+      "purpose": "查询当前周期各电站发电量",
+      "metric_code": "generation",
+      "period_role": "current",
+      "group_by": "station"
+    },
+    {
+      "query_id": "q_yoy",
+      "query_name": "yoy_baseline",
+      "purpose": "查询去年同期各电站发电量",
+      "metric_code": "generation",
+      "period_role": "yoy_baseline",
+      "group_by": "station"
+    }
+  ]
+}
+```
+
+**Step 2: 歧义检测**
+- `candidates.length = 0`：无歧义
+- `missing_fields = []`：无缺失
+- `need_clarification = false`
+
+**Step 3: QueryPlanner 生成执行计划**
+```
+┌─────────────────────────────────────────────────────────────┐
+│ ExecutionPlan {                                           │
+│   phases: [                                              │
+│     {                                                    │
+│       phase_id: "phase_0",                              │
+│       data_source_key: "enterprise_readonly",             │
+│       queries: ["q_current", "q_yoy"],                 │
+│       strategy: "parallel"  ← 同一数据源、同表、不同时间 │
+│     }                                                    │
+│   ],                                                     │
+│   need_merge: false,  ← 同一数据源不需要应用层合并        │
+│   total_queries: 2                                       │
+│ }                                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Step 4: QueryExecutor 执行（并行）**
+```
+并行执行（asyncio.gather）：
+Task 1: SELECT station_name, SUM(metric_value)
+        FROM analytics_metrics_daily
+        WHERE metric_code = 'generation'
+          AND biz_date >= '2024-02-01'  -- 近三个月
+          AND biz_date <= '2024-04-30'
+          AND region_name = '新疆区域'
+        GROUP BY station_name
+
+Task 2: SELECT station_name, SUM(metric_value)
+        FROM analytics_metrics_daily
+        WHERE metric_code = 'generation'
+          AND biz_date >= '2023-02-01'  -- 去年同期
+          AND biz_date <= '2023-04-30'
+          AND region_name = '新疆区域'
+        GROUP BY station_name
+```
+
+**字段说明表**：
 
 | 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| run_id | run_201 | 关联的任务运行 ID |
-| collected_slots | {"time_range": {...}, "org_scope": {...}} | 已收集槽位 |
-| missing_slots | ["metric"] | 缺失槽位 |
-| awaiting_user_input | true | 等待用户补充 |
-| resume_step | resume_after_analytics_slot_fill | 恢复执行入口步骤 |
+|------|--------|---------|
+| analysis_intent | decline_attribution | 分析意图：下降归因 |
+| required_queries | [{current}, {yoy_baseline}] | 子查询列表 |
+| period_role | current / yoy_baseline | 时间周期角色 |
+| group_by | station | 分组维度：电站 |
+| compare_target | yoy | 对比目标：同比 |
+| sort_direction | desc | 排序方向：降序 |
+| top_n | 10 | 返回前10个 |
+| strategy | parallel | 执行策略：并行 |
 
-**clarification_event**：
+---
 
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| clarification_id | clr_200 | 澄清事件唯一 ID |
-| question_text | 当前分析范围已经基本确定... | 澄清问题文本 |
-| target_slots | ["metric"] | 期望用户补充的槽位 |
-| status | pending | 等待用户回复 |
+### 场景 5：跨数据源查询（PARALLEL 策略）
 
-### 状态变化
+**用户问句**：`"对比一下聚乙烯销量和发电量的变化趋势"`
+
+**场景说明**：涉及化工贸易和新能源两个数据源，需要分别查询后应用层合并。
+
+**系统执行步骤**：
+
+**Step 1: LLM 意图解析**
+```json
+{
+  "original_query": "对比一下聚乙烯销量和发电量的变化趋势",
+  "complexity": "complex",
+  "planning_mode": "decomposed",
+  "analysis_intent": "comparison",
+  "semantic_confidence": 0.88,
+  "metric": {
+    "raw_text": "销量和发电量",
+    "confidence": 0.90,
+    "candidates": [
+      {"metric_code": "generation", "metric_name": "发电量", "confidence": 0.45, "business_domain": "new_energy"},
+      {"metric_code": "chemical_sales_volume", "metric_name": "化工产品销售量", "confidence": 0.45, "business_domain": "chemical"}
+    ]
+  },
+  "time_range": {
+    "raw_text": "变化趋势",
+    "type": "relative",
+    "value": "最近",
+    "confidence": 0.60
+  },
+  "compare_target": "yoy",
+  "required_queries": [
+    {
+      "query_id": "q_gen",
+      "query_name": "generation_trend",
+      "purpose": "查询发电量趋势",
+      "metric_code": "generation",
+      "period_role": "current",
+      "group_by": "month"
+    },
+    {
+      "query_id": "q_sales",
+      "query_name": "sales_trend",
+      "purpose": "查询聚乙烯销量趋势",
+      "metric_code": "chemical_sales_volume",
+      "period_role": "current",
+      "group_by": "month"
+    }
+  ]
+}
+```
+
+**Step 2: 歧义检测**
+- 用户明确说了两个指标，无需澄清
+
+**Step 3: QueryPlanner 生成执行计划**
+```
+┌─────────────────────────────────────────────────────────────┐
+│ ExecutionPlan {                                           │
+│   phases: [                                              │
+│     {                                                    │
+│       phase_id: "phase_0",                              │
+│       data_source_key: "enterprise_readonly",  ← 发电量   │
+│       queries: ["q_gen"],                               │
+│       strategy: "single"                                 │
+│     },                                                   │
+│     {                                                    │
+│       phase_id: "phase_1",                              │
+│       data_source_key: "enterprise_trade",    ← 聚乙烯   │
+│       queries: ["q_sales"],                             │
+│       strategy: "single"                                 │
+│     }                                                    │
+│   ],                                                     │
+│   need_merge: true,  ← 不同数据源需要应用层合并          │
+│   total_queries: 2                                       │
+│ }                                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Step 4: QueryExecutor 执行（并行）**
+```
+所有阶段并行执行（asyncio.gather）：
+
+Phase 0 (enterprise_readonly):
+SQL: SELECT month, SUM(metric_value) as generation
+     FROM analytics_metrics_daily
+     WHERE metric_code = 'generation'
+       AND biz_date >= '2024-01-01'
+     GROUP BY month
+     ORDER BY month
+
+Phase 1 (enterprise_trade):
+SQL: SELECT month, SUM(sales_volume) as sales_volume
+     FROM chemical_product_sales_daily
+     WHERE product_type = '聚乙烯'
+       AND biz_date >= '2024-01-01'
+     GROUP BY month
+     ORDER BY month
+```
+
+**Step 5: 应用层合并**
+```
+合并策略：按 month 字段关联
+结果：
+[
+  {month: "2024-01", generation: 1200, sales_volume: 500},
+  {month: "2024-02", generation: 1350, sales_volume: 520},
+  {month: "2024-03", generation: 1280, sales_volume: 480},
+]
+```
+
+---
+
+### 场景 6：同一数据源多表查询（JOIN 策略）
+
+**用户问句**：`"查询各电站的发电量和上网电量"`
+
+**场景说明**：同一数据源需要关联发电量和上网电量两张表。
+
+**系统执行步骤**：
+
+**Step 1: LLM 意图解析**
+```json
+{
+  "original_query": "查询各电站的发电量和上网电量",
+  "complexity": "complex",
+  "planning_mode": "decomposed",
+  "analysis_intent": "simple_query",
+  "metric": {
+    "confidence": 0.90,
+    "candidates": [
+      {"metric_code": "generation", "metric_name": "发电量"},
+      {"metric_code": "online", "metric_name": "上网电量"}
+    ]
+  },
+  "required_queries": [
+    {
+      "query_id": "q_gen",
+      "metric_code": "generation",
+      "join_with": "q_online",
+      "join_type": "left"
+    },
+    {
+      "query_id": "q_online",
+      "metric_code": "online",
+      "join_with": "q_gen",
+      "join_type": "left"
+    }
+  ]
+}
+```
+
+**Step 3: QueryPlanner 生成执行计划**
+```
+┌─────────────────────────────────────────────────────────────┐
+│ ExecutionPlan {                                           │
+│   phases: [                                              │
+│     {                                                    │
+│       phase_id: "phase_0",                              │
+│       data_source_key: "enterprise_readonly",            │
+│       queries: ["q_gen", "q_online"],                   │
+│       strategy: "join"  ← 同一数据源、多表              │
+│     }                                                    │
+│   ],                                                     │
+│   need_merge: false,  ← JOIN 查询不需要应用层合并        │
+│   total_queries: 2                                       │
+│ }                                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Step 4: QueryExecutor 执行（JOIN）**
+```
+单条 JOIN SQL：
+SELECT
+    a.station_name,
+    a.generation,
+    b.online
+FROM (
+    SELECT station_name, SUM(metric_value) as generation
+    FROM analytics_metrics_daily
+    WHERE metric_code = 'generation'
+      AND biz_date >= '2024-03-01'
+      AND biz_date <= '2024-03-31'
+    GROUP BY station_name
+) a
+LEFT JOIN (
+    SELECT station_name, SUM(metric_value) as online
+    FROM analytics_metrics_daily
+    WHERE metric_code = 'online'
+      AND biz_date >= '2024-03-01'
+      AND biz_date <= '2024-03-31'
+    GROUP BY station_name
+) b ON a.station_name = b.station_name
+```
+
+---
+
+### 场景 7：澄清后恢复执行
+
+**接场景 2**
+
+用户补充：`"看发电量"`
+
+**系统执行步骤**：
+
+**Step 1: 读取澄清上下文**
+```json
+{
+  "clarification_id": "clar_001",
+  "original_query": "新疆最近电量咋样",
+  "confirmed_metric": null,
+  "confirmed_time_range": "最近"
+}
+```
+
+**Step 2: 应用澄清结果**
+```json
+{
+  "original_query": "新疆最近电量咋样",
+  "metric": {
+    "metric_code": "generation",
+    "metric_name": "发电量",
+    "confidence": 1.0  ← 用户确认后置信度为 1.0
+  },
+  "time_range": {
+    "type": "relative",
+    "value": "最近",
+    "confidence": 0.70
+  },
+  "need_clarification": false,
+  "clarification_type": null
+}
+```
+
+**Step 3: 重新进入执行流程**
+```
+ExecutionPlan:
+  phases: [
+    {
+      phase_id: "phase_0",
+      data_source_key: "enterprise_readonly",
+      queries: ["q_simple"],
+      strategy: "single"
+    }
+  ]
+```
+
+**状态变化表**：
 
 | 阶段 | task_run.status | 中文含义 |
-|---|---|---|
-| 创建任务 | executing（planning_query） | 开始分析 |
-| 发现缺槽位 | awaiting_user_clarification（awaiting_slot_fill） | 等待用户补充 |
-
-### API 返回
-
-```json
-{
-  "data": {
-    "clarification": {
-      "clarification_id": "clr_200",
-      "question": "当前分析范围已经基本确定，但还缺少主指标。你想看发电量、收入、成本、利润还是产量？",
-      "target_slots": ["metric"],
-      "clarification_type": "missing_required_slot",
-      "reason": "缺少主指标，无法安全构造 SQL",
-      "suggested_options": ["发电量", "收入", "成本", "利润", "产量"]
-    }
-  },
-  "meta": {
-    "conversation_id": "conv_200", "run_id": "run_201",
-    "status": "awaiting_user_clarification", "need_clarification": true
-  }
-}
-```
-
-| 字段 | 中文含义 |
-|---|---|
-| need_clarification | 是否需要用户补充信息 |
-| clarification_id | 澄清事件 ID，后续回复时使用 |
-| question | 返回给用户的追问文本 |
-| target_slots | 本次期望用户补充的槽位名称 |
-| clarification_type | missing_required_slot=缺必填槽位, slot_conflict=槽位冲突 |
-| suggested_options | 候选选项，前端可渲染为快捷选择按钮 |
-
-### 本场景关键结论
-
-1. 系统缺必填槽位时，绝不自行猜测，必须结构化澄清；
-2. 已收集的槽位保存到 slot_snapshot，用户补充后不需重新输入；
-3. 澄清由 SlotValidator 规则决定，不是 LLM 决定。
+|------|-----------------|---------|
+| 初次询问 | awaiting_user_clarification | 等待用户补充信息 |
+| 用户补充后 | executing | 重新进入执行中 |
+| 查询完成 | succeeded | 执行成功 |
 
 ---
 
-## 场景 3：缺少时间，需要澄清
+### 场景 8：SQL Guard 阻断
 
-> 用户问句：
->
-> **"查询新疆区域发电量"**
+**用户问句**：`"查询所有区域所有用户明细"`
 
-### 系统执行步骤
+**场景说明**：查询缺少必要的过滤条件，可能存在数据泄露风险。
 
-规则识别出 metric=发电量、org_scope=新疆区域，但 time_range 未匹配 → SlotValidator 判断 missing_slots=["time_range"] → 返回澄清。
+**系统执行步骤**：
 
-### 澄清输出
-
-```json
-{
-  "clarification_type": "missing_required_slot",
-  "question": "你想看哪个时间范围？例如上个月、本月、2024年3月。",
-  "target_slots": ["time_range"],
-  "reason": "缺少时间范围，无法安全构造 SQL",
-  "suggested_options": ["上个月", "本月", "近一个月", "2024年3月"]
-}
-```
-
-### 本场景关键结论
-
-metric 和 time_range 是两个必填槽位，缺一不可。不同缺槽位场景给出不同的 suggested_options。
-
----
-
-## 场景 4：澄清后恢复执行
-
-> 承场景 2，用户回答澄清：
->
-> **"看发电量"**
-
-### 恢复机制说明
-
-澄清恢复不是重新发起一次全新 API，而是：
-1. 根据 `clarification_id` 找到之前的澄清事件；
-2. 读取 `slot_snapshot` 中保存的已收集槽位；
-3. 将用户补充的新槽位与已有槽位合并；
-4. 重新做 SlotValidator 校验；
-5. 满足条件后重新进入执行链路。
-
-> "恢复 workflow 不是恢复原来的 Python 线程，而是根据 run_id、clarification_id、slot_snapshot 重新构造状态，并重新进入 StateGraph 执行。"
-
-### 系统执行步骤
-
-```
-1. POST /api/v1/clarifications/clr_200/reply {"reply": "看发电量"}
-2. ClarificationService 读取 clarification_event → 获取 run_id=run_201
-3. 读取 slot_snapshot → 获取 time_range、org_scope
-4. 合并槽位 → metric="看发电量", time_range=已有值, org_scope=已有值
-5. 更新 clarification_event → status="resolved"
-6. 更新 slot_snapshot → awaiting_user_input=false
-7. task_run.status → "succeeded"（当前阶段最小 mock）
-```
-
-### 状态变化表
-
-| 阶段 | task_run.status | clarification_event.status | slot_snapshot.awaiting_user_input | 中文含义 |
-|---|---|---|---|---|
-| 初次缺槽位 | awaiting_user_clarification | pending | true | 等待用户补充 |
-| 用户补充后 | succeeded | resolved | false | 已补充，恢复执行 |
-| 完成 | succeeded | resolved | false | 执行成功 |
-
-### API 返回
-
-```json
-{
-  "data": {"message": "已收到补充信息，任务继续执行"},
-  "meta": {
-    "conversation_id": "conv_200", "run_id": "run_201",
-    "status": "succeeded", "sub_status": "resumed_after_clarification",
-    "need_clarification": false
-  }
-}
-```
-
-### 本场景关键结论
-
-1. 澄清回复只需 clarification_id，不需重新传 conversation_id；
-2. 已收集的槽位不会因等待而丢失——slot_snapshot 保存了中间态；
-3. 当前为最小 mock 实现，后续接入真实 workflow 恢复（重新进入 _execute_analytics_plan）。
-
----
-
-## 场景 5：复杂问题触发 ReAct Planning
-
-> 用户问句：
->
-> **"分析新疆区域近三个月发电量下降的原因，并和去年同期对比，看哪些电站拖累最大"**
-
-### 为什么是复杂问题
-
-这个问句包含多种分析诉求：趋势分析（近三个月）、同比对比、排名分析（拖累最大意味着 sort_direction=asc）、原因分析。单一规则难以准确处理，需要 ReAct Planning 多步推理。
-
-### ReAct 的边界
-
-- ReAct 只在 analytics_plan 节点内部运行；
-- ReAct 不生成 SQL、不执行 SQL、不绕过 SQL Guard；
-- ReAct 输出必须是结构化槽位（AnalyticsPlan），不是 SQL；
-- ReAct 输出必须经过 ReactPlanValidator。
-
-> 简单说：**ReAct 负责"想清楚要查什么"，不负责"怎么查"。**
-
-### ReAct Step 1
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| thought | 用户问题包含趋势、同比和电站排名，需要确认指标和维度 | 模型的规划思考摘要 |
-| action | metric_catalog_lookup | 只读工具：查询指标目录 |
-| action_input | {"query": "发电量"} | 工具输入参数 |
-
-**Observation**：
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| matched | true | 匹配到指标 |
-| metric | 发电量 | 指标名称 |
-| metric_code | power_generation | 指标编码 |
-| sensitivity_level | medium | 敏感级别 |
-
-### ReAct Step 2
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| thought | 需要确认可用表结构和维度字段 | 思考 |
-| action | schema_registry_lookup | 只读工具：查询 schema |
-| action_input | {"data_source": "local_analytics", "table": "analytics_metrics_daily"} | 工具输入 |
-
-**Observation**：
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| database_type | sqlite | 数据库类型 |
-| columns | ["date","station","power_generation","org_region",...] | 可用字段 |
-| available_dimensions | ["month", "station", "region"] | 可用维度 |
-
-### ReAct Final Plan Candidate
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| metric | 发电量 | 主指标 |
-| time_range | 近三个月 | 时间范围 |
-| org_scope | 新疆区域 | 组织范围 |
-| group_by | station | 按电站分组 |
-| compare_target | yoy | 同比 |
-| sort_direction | asc | 升序（拖累最大的排前面） |
-| top_n | 5 | 返回前 5 |
-| confidence | 0.86 | ReAct 对规划结果的置信度 |
-
-### 本场景关键结论
-
-1. 复杂多诉求问句通过 ReAct 多步推理完成槽位补全；
-2. ReAct 只规划"怎么查"，不负责执行 SQL；
-3. 后续仍然走 SQLBuilder → SQLGuard → SQLGateway 标准流程。
-
----
-
-## 场景 6：规则低置信触发 LLM Slot Fallback
-
-> 用户问句：
->
-> **"新疆那边最近电量咋样"**
-
-### 为什么需要 LLM Fallback
-
-规则能识别 `org_scope=新疆区域`、`time_range=近一个月`，但"电量"是否为"发电量"置信度较低。LLM Slot Fallback 只做槽位补强，不生成 SQL，不越权判断可执行性。
-
-### LLM Slot Fallback 输出
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| metric | 发电量 | LLM 补强的指标 |
-| time_range | 近一个月 | 规则/LLM 识别的时间 |
-| org_scope | 新疆区域 | 组织范围 |
-| confidence | 0.78 | 置信度 |
-| should_use | true | 是否建议使用此次补强 |
-| reason | 用户口语中的"电量"在经营分析语境中通常对应发电量 | LLM 给出的简短原因 |
-
-### LLM Fallback 的边界
-
-- 它不是 ReAct（不会多步循环）；
-- 它不生成 SQL；
-- 它的输出必须经过 AnalyticsSlotFallbackValidator；
-- SlotValidator 仍然决定 is_executable，LLM 不能越权。
-
----
-
-## 场景 7：SQL Guard 阻断
-
-> 用户问句/系统构造出的 SQL：
->
-> **"查询所有区域所有用户明细"** → 生成的 SQL 缺少部门过滤条件
-
-### 详细阻断过程
-
-假设因某种原因 SQLBuilder 生成了这条 SQL：
-
-```sql
-SELECT * FROM analytics_metrics_daily WHERE date >= '2024-03-01'
-```
-
-SQLGuard 校验流程：
-
-```
-校验 1：非空检查 → PASS
-校验 2：只读检查（以 SELECT 开头）→ PASS
-校验 3：多语句检查 → PASS
-校验 4：注释检查 → PASS
-校验 5：危险关键字检查 → PASS
-校验 6：表白名单检查（analytics_metrics_daily ✓）→ PASS
-校验 7：字段白名单检查（预留）→ PASS
-校验 8：部门过滤检查 → FAIL
-  原因：缺少 department_code = 'analytics-center' 过滤条件
-```
-
-### SQL Guard 阻断结果
-
-```json
-{
-  "is_safe": false,
-  "checked_sql": null,
-  "blocked_reason": "缺少必需的数据范围过滤：department_code",
-  "governance_detail": {
-    "stage": "data_scope_check",
-    "required_filter_column": "department_code",
-    "required_filter_value": "analytics-center"
-  }
-}
-```
-
-### 关于重试
-
-SQL Guard blocked **不能重试**。这与 SQL Gateway timeout（场景 8）有本质区别：
-- SQL Guard blocked：治理规则层面拒绝，重试也不会通过；
-- SQL Gateway timeout：临时网络/负载问题，可以重试；
-- 权限失败：也不可重试。
-
-### API 返回
-
+**SQL Guard 检查结果**：
 ```json
 {
   "success": false,
   "error_code": "SQL_GUARD_BLOCKED",
   "message": "SQL 安全检查未通过",
-  "detail": {
-    "blocked_reason": "缺少必需的数据范围过滤：department_code"
-  }
+  "blocked_reason": "缺少部门过滤条件或访问了非白名单表",
+  "can_retry": false
 }
 ```
 
-### 任务状态变化
+**字段说明表**：
 
-| 阶段 | task_run.status | 中文含义 |
-|---|---|---|
-| 构造 SQL | executing（building_sql） | 正在构造 |
-| SQL Guard 阻断 | failed（checking_sql） | 安全检查失败，任务终止 |
+| 字段 | 示例值 | 中文含义 |
+|------|--------|---------|
+| success | false | 请求是否成功 |
+| error_code | SQL_GUARD_BLOCKED | SQL 安全检查失败错误码 |
+| message | SQL 安全检查未通过 | 给用户展示的错误信息 |
+| blocked_reason | 缺少部门过滤条件 | 被阻断的原因 |
+| can_retry | false | 是否可重试：不可重试 |
+
+**说明**：
+- SQL Guard blocked 不可重试
+- 不能通过 ReAct 或 LLM 绕过
+- task_run.status 变成 failed
 
 ---
 
-## 场景 8：SQL Gateway 临时失败重试
+### 场景 9：SQL Gateway 临时失败重试
 
-> 用户问句：
->
-> **"查询新疆区域 2024 年 3 月发电量"**
+**用户问句**：`"查询新疆区域 2024 年 3 月发电量"`
 
-### 重试模拟
+**系统执行步骤**：
 
-SQL Gateway 第一次调用因网络超时失败，系统判断这是临时错误，发起重试。
+```
+第一次尝试：
+  SQL Gateway Timeout
+  retry_count: 1
+  → 可重试
+
+第二次尝试：
+  SQL 执行成功
+  retry_count: 1
+```
 
 **retry_history 字段说明**：
 
 | 字段 | 示例值 | 中文含义 |
-|---|---|---|
+|------|--------|---------|
 | node_name | analytics_execute_sql | 发生重试的节点 |
 | attempt | 1 | 第几次尝试 |
 | error_type | TimeoutError | 错误类型 |
 | error_message | SQL Gateway 请求超时 | 错误信息 |
 
-### 重试策略
+**重试策略说明**：
 
-- SQL Gateway 超时：可重试一次；
-- SQL Guard blocked：不可重试；
-- 权限失败：不可重试。
-
-### 最终任务状态
-
-task_run.status = succeeded，retry_count = 1（在 metadata 中记录重试历史）。
+| 错误类型 | 是否可重试 |
+|---------|-----------|
+| TimeoutError | 可重试 |
+| ConnectionError | 可重试 |
+| SQL_GUARD_BLOCKED | 不可重试 |
+| PermissionError | 不可重试 |
 
 ---
 
-## 场景 9：图表、洞察、报告块降级
+### 场景 10：图表、洞察、报告块降级
 
-> 用户问句：
->
-> **"生成新疆区域 2024 年 3 月发电量的完整分析"**
+**用户问句**：`"生成新疆区域 2024 年 3 月发电量的完整分析"`
 
-### 降级模拟
+**系统执行步骤**：
 
-SQL 执行成功，但 Chart Spec 生成失败（例如数据不满足图表条件）、Report Blocks 部分生成失败。系统容忍这些非关键组件失败，主查询仍然成功。
+```
+Step 1: SQL 执行成功
+Step 2: Summary 生成成功
+Step 3: Chart Spec 生成失败（降级）
+Step 4: Insight Cards 生成成功
+Step 5: Report Blocks 生成失败（降级）
+```
 
-### 降级原则
-
-> - 图表、洞察、报告块可以降级；
-> - SQL 执行失败不能降级成成功；
-> - 系统不能编造查询结果。
-
-### 最终返回
+**最终返回**：
 
 | 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| summary | 2024年3月新疆区域发电量为 12800 MWh | 摘要 |
+|------|--------|---------|
+| summary | 2024年3月新疆区域发电量为12800 MWh | 摘要 |
 | degraded | true | 是否发生降级 |
-| degraded_features | chart_spec, report_blocks | 降级的功能列表 |
+| degraded_features | ["chart_spec", "report_blocks"] | 发生降级的功能 |
 | row_count | 4 | 查询结果行数 |
 
----
-
-## 场景 10：导出报告
-
-> 用户操作：
->
-> **"把这次分析导出成 PDF"**
-
-### 导出数据来源
-
-- task_run.output_snapshot 不保存完整 rows
-- 完整表格、图表、洞察、报告块从 analytics_result_repository 读取
-- 导出不是重新查询数据库，而是基于已保存结果生成报告
-
-### 系统执行步骤
-
-```
-1. POST /api/v1/analytics/runs/run_200/export {"export_type": "pdf"}
-2. 校验 run status = succeeded
-3. 读取 output_snapshot（轻快照）
-4. 读取 analytics_result_repository（重结果：tables/insight_cards/report_blocks/chart_spec）
-5. ReviewPolicy 评估：result_count < 100、非正式导出格式 → review_required=false
-6. 创建 export_task，状态 = "running"
-7. Report MCP 生成 PDF 文件
-8. 更新 export_task 状态 = "succeeded"
-```
-
-### export_task 返回
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| export_id | export_001 | 导出任务 ID |
-| run_id | run_001 | 对应的经营分析任务 ID |
-| format | pdf | 导出格式 |
-| status | succeeded | 导出任务状态 |
-| review_required | false | 是否需要人工审核 |
-| filename | analytics_run_001_report.pdf | 生成的文件名 |
-| artifact_path | /storage/exports/export_001.pdf | 文件存储路径 |
+**降级规则说明**：
+- 图表、洞察、报告块可以降级
+- SQL 执行失败不能降级成成功
+- 系统不能编造查询结果
 
 ---
 
-## 场景 11：高风险导出进入人工审核
+## 四、组件职责
 
-> 用户操作：
->
-> **"导出包含敏感经营指标的完整报告"**
+### 4.1 组件列表
 
-### Review Policy 判断逻辑
+| 组件 | 文件路径 | 职责 |
+|------|---------|------|
+| LLMAnalyticsIntentParser | core/analytics/intent/parser.py | LLM 意图解析 |
+| MetricResolver | core/analytics/metric_resolver.py | 指标 → 数据源映射 |
+| ClarificationManager | core/analytics/intent/clarification_manager.py | 歧义检测与澄清 |
+| QueryPlanner | core/analytics/intent/query_planner.py | 子查询规划（策略选择） |
+| QueryExecutor | core/analytics/intent/query_executor.py | SQL 执行（并行/串行） |
 
-Review Policy 评估规则（确定性本地规则，非 LLM）：
+### 4.2 组件关系图
 
-1. 导出格式为正式格式（pdf/docx）→ 触发审核，review_level=high；
-2. 结果包含敏感字段 → 触发审核；
-3. 结果包含脱敏字段 → 触发审核；
-4. 数据源非 local_analytics → 触发审核。
-
-### review_task 字段说明
-
-| 字段 | 示例值 | 中文含义 |
-|---|---|---|
-| review_id | review_001 | 审核任务 ID |
-| subject_type | analytics_export | 审核对象类型 |
-| subject_id | export_001 | 被审核的导出任务 ID |
-| review_status | pending | 审核状态：等待审核 |
-| review_level | high | 审核级别 |
-| review_reason | 正式导出类型需要人工复核；结果包含敏感字段治理或脱敏处理 | 审核原因 |
-
-### 状态流转
-
-```json
-{
-  "export_id": "export_001",
-  "status": "awaiting_human_review",
-  "review_required": true,
-  "review_status": "pending"
-}
 ```
-
-### 审核通过示例
-
-```json
-{
-  "review_status": "approved",
-  "reviewer_name": "经营管理部审核员",
-  "review_comment": "允许导出，仅限内部使用"
-}
+┌─────────────────────────────────────────────────────────────────┐
+│                     LLMAnalyticsIntentParser                      │
+│                     （意图解析 + 歧义候选）                       │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     ClarificationManager                         │
+│                     （歧义检测 + 澄清生成）                       │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     MetricResolver                              │
+│                     （指标 → 数据源映射）                         │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     QueryPlanner                                 │
+│                     （策略选择：SINGLE/PARALLEL/JOIN）           │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     QueryExecutor                               │
+│                     （执行：asyncio.gather 并行）                 │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     SQL Gateway                                  │
+│                     （数据库访问）                               │
+└─────────────────────────────────────────────────────────────────┘
 ```
-
-### 审核拒绝示例
-
-```json
-{
-  "review_status": "rejected",
-  "reviewer_name": "经营管理部审核员",
-  "review_comment": "导出范围过大，请缩小区域或时间范围"
-}
-```
-
-### 审核通过后恢复导出
-
-系统调用 `resume_export_after_review(export_id)`，校验 review_status=approved 后，继续执行 `_render_export_task` 完成文件生成。
 
 ---
 
-## 附录：核心状态字典
+## 五、状态机
 
-### task_run.status
+### 5.1 task_run 状态
 
 | 状态值 | 中文含义 | 说明 |
-|---|---|---|
-| executing | 执行中 | 任务正在运行 |
-| succeeded | 执行成功 | 任务正常完成 |
-| failed | 执行失败 | 任务异常终止 |
-| awaiting_user_clarification | 等待用户补充信息 | 需要用户回复澄清问题 |
-| cancelled | 已取消 | 用户主动取消 |
+|-------|---------|------|
+| pending | 待处理 | 任务刚创建 |
+| executing | 执行中 | 正在执行 |
+| awaiting_user_clarification | 等待用户补充信息 | 需要澄清 |
+| succeeded | 执行成功 | 任务完成 |
+| failed | 执行失败 | 任务失败 |
+| awaiting_human_review | 等待人工审核 | 需要人工审核 |
 
-### task_run.sub_status（部分常用值）
+### 5.2 clarification_event 状态
 
-| 子状态值 | 中文含义 |
-|---|---|
-| planning_query | 正在进行意图识别与槽位提取 |
-| building_sql | 正在构造 SQL |
-| checking_sql | 正在进行 SQL Guard 安全检查 |
-| running_sql | 正在通过 SQL MCP 执行查询 |
-| explaining_result | 正在生成摘要/图表/洞察 |
-| awaiting_slot_fill | 等待用户补充槽位 |
-| resumed_after_clarification | 澄清后恢复执行成功 |
-
-### export_task.status
-
-| 状态值 | 中文含义 |
-|---|---|
-| pending | 等待执行 |
-| running | 正在导出 |
-| succeeded | 导出成功 |
-| failed | 导出失败 |
-| awaiting_human_review | 等待人工审核 |
-
-### clarification_event.status
-
-| 状态值 | 中文含义 |
-|---|---|
-| pending | 等待用户回复 |
-| resolved | 用户已回复，澄清已解决 |
-
-### 错误码速查
-
-| 错误码 | 中文含义 |
-|---|---|
-| SQL_GUARD_BLOCKED | SQL 安全检查未通过 |
-| ANALYTICS_METRIC_PERMISSION_DENIED | 指标权限不足 |
-| ANALYTICS_DATA_SOURCE_PERMISSION_DENIED | 数据源权限不足 |
-| ANALYTICS_DATA_SCOPE_DENIED | 数据范围权限不足 |
-| ANALYTICS_RUN_NOT_FOUND | 经营分析任务不存在 |
-| ANALYTICS_EXPORT_FAILED | 导出失败 |
-| ANALYTICS_REVIEW_INVALID_STATUS | 审核状态不合法 |
+| 状态值 | 中文含义 | 说明 |
+|-------|---------|------|
+| pending | 待回复 | 等待用户回复 |
+| resolved | 已解决 | 用户已回复并确认 |
+| expired | 已过期 | 超过有效期 |
+| cancelled | 已取消 | 用户取消 |
 
 ---
 
-> 本文档基于当前仓库实际代码编写，覆盖了经营分析 Agent 从用户输入到结果返回的 11 个核心场景。
-> 所有英文状态值均配有中文解释，所有示例均基于新疆能源集团经营分析业务语境。
+## 六、后续阅读建议
+
+1. **理解执行策略**：先看"一、架构总览"理解 SINGLE/PARALLEL/JOIN 的选择逻辑
+2. **理解置信度体系**：再看"二、置信度体系"理解何时需要澄清
+3. **理解完整链路**：通过"三、用户问句场景覆盖"的 10 个场景理解完整流程
+4. **理解组件职责**：通过"四、组件职责"理解各组件的边界

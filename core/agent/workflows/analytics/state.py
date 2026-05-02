@@ -3,8 +3,12 @@
 为什么要单独定义结构化 state：
 1. LangGraph 的核心价值就是显式状态流转；
 2. 当前项目已经有 `task_run / slot_snapshot / clarification / sql_audit` 等权威状态对象，
-   这里不再重复造一套数据库，而是把“微观执行上下文”结构化；
+   这里不再重复造一套数据库，而是把"微观执行上下文"结构化；
 3. 后续无论是 workflow 恢复执行、状态映射还是可观测性埋点，都需要稳定字段名。
+
+重要变更（v2 链路收敛）：
+本轮重构后，analytics_plan 节点统一使用 LLMAnalyticsIntentParser 生成 AnalyticsIntent，
+不再使用本地规则先判断 simple/complex。ReAct 作为可选 repair/replan 能力预留。
 """
 
 from __future__ import annotations
@@ -14,13 +18,14 @@ from typing import Any, TypedDict
 
 from core.agent.control_plane.analytics_planner import AnalyticsPlan
 from core.analytics.analytics_result_model import AnalyticsResult
+from core.analytics.intent.schema import AnalyticsIntent
 from core.security.auth import UserContext
 
 
 class AnalyticsWorkflowStage(str, Enum):
     """经营分析子 Agent 的微观执行阶段。
 
-    这些值只描述“经营分析内部当前走到哪个节点”，
+    这些值只描述"经营分析内部当前走到哪个节点"，
     不应该直接暴露给 Supervisor 当作宏观生命周期状态。
     """
 
@@ -28,6 +33,7 @@ class AnalyticsWorkflowStage(str, Enum):
     ANALYTICS_ENTRY = "analytics_entry"
 
     # 规划节点：做意图识别、槽位抽取、语义补强。
+    # 本轮重构后，统一使用 LLMAnalyticsIntentParser 生成 AnalyticsIntent。
     ANALYTICS_PLAN = "analytics_plan"
 
     # 槽位校验节点：判断是否满足最小可执行条件。
@@ -39,7 +45,7 @@ class AnalyticsWorkflowStage(str, Enum):
     # SQL 构造节点：生成 schema-aware 受控 SQL。
     ANALYTICS_BUILD_SQL = "analytics_build_sql"
 
-    # SQL Guard 节点：做只读限制、白名单、范围过滤。
+    # SQL Guard 节点：做只读限制，白名单、范围过滤。
     ANALYTICS_GUARD_SQL = "analytics_guard_sql"
 
     # SQL 执行节点：调 SQL Gateway 执行只读查询。
@@ -55,7 +61,7 @@ class AnalyticsWorkflowStage(str, Enum):
 class AnalyticsWorkflowOutcome(str, Enum):
     """经营分析子 Agent 的微观结果方向。
 
-    它表达的是“当前节点之后，workflow 应该往哪个方向继续走”。
+    它表达的是"当前节点之后，workflow 应该往哪个方向继续走"。
     """
 
     # 当前节点处理完成，workflow 应继续向下执行。
@@ -81,6 +87,11 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     1. 输入态字段：来自 API / Supervisor / Adapter；
     2. 中间态字段：只在 workflow 节点之间流转；
     3. 输出态字段：用于最终响应、状态映射和性能观测。
+
+    新增 AnalyticsIntent 相关字段（本轮重构）：
+    - intent：LLM 统一解析生成的 AnalyticsIntent
+    - intent_validation_result：意图校验结果
+    - planning_source：规划来源（llm_parser / rule_fallback）
     """
 
     # -------------------------
@@ -159,14 +170,35 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # 需要持久化的多轮记忆仍应回到 conversation memory / slot_snapshot 等专属位置。
     conversation_memory: dict
 
-    # 结构化分析计划。
+    # -------------------------
+    # AnalyticsIntent 相关字段（本轮重构新增）
+    # -------------------------
+
+    # LLM 统一解析生成的 AnalyticsIntent。
+    # 这是新版主链路的结构化意图对象。
+    intent: AnalyticsIntent
+
+    # 意图校验结果。
+    # Validator 输出的校验结果，包含是否通过、是否需要澄清等信息。
+    intent_validation_result: dict | None
+
+    # 规划来源。
+    # - llm_parser：LLM 统一解析
+    # - rule_fallback：规则 Planner 回退
+    planning_source: str
+
+    # -------------------------
+    # 旧版 AnalyticsPlan 字段（兼容保留）
+    # -------------------------
+
+    # 结构化分析计划（旧版，兼容保留）。
     # 包含 slots、clarification、data_source 等结果。
     # 这是 Planner 的微观执行产物，通常不直接全量写入 task_run，
     # 只会把其中少量摘要（例如 slots / planning_source / confidence）写入轻快照。
     plan: AnalyticsPlan
 
     # clarification 恢复时预先构造好的 plan。
-    # 它是“恢复执行态 -> 微观执行态”的桥接对象，
+    # 它是"恢复执行态 -> 微观执行态"的桥接对象，
     # 只在本次恢复 workflow 中使用，不直接作为权威持久化对象落库。
     recovered_plan: AnalyticsPlan
 
@@ -227,6 +259,7 @@ class AnalyticsWorkflowState(TypedDict, total=False):
 
     # 是否在 analytics_plan 节点使用了局部 ReAct planning。
     # 这是微观执行调试字段，不是权威运行态；不能把完整 ReAct trace 写入 task_run。
+    # 注意：本轮重构后，ReAct 只作为可选 repair/replan 能力预留，不是默认主链路。
     react_used: bool
 
     # ReAct 子循环的轻量步骤摘要。
@@ -271,7 +304,7 @@ class AnalyticsWorkflowState(TypedDict, total=False):
     # 用于排查慢点和瞬时失败，不直接替代权威审计日志。
     retry_history: list[dict[str, Any]]
 
-    # 当前 workflow 是否发生了“可接受降级”。
+    # 当前 workflow 是否发生了"可接受降级"。
     # 例如 insight/chart/report 失败后退回 summary/table 模式时会置为 True。
     degraded: bool
 

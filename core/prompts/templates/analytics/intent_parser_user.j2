@@ -1,0 +1,257 @@
+## 用户问题
+
+{{ query }}
+
+## 会话上下文（可选）
+
+{% if conversation_memory and (conversation_memory.last_metric or conversation_memory.last_time_range or conversation_memory.last_org_scope) %}
+当前会话最近的分析上下文：
+{% if conversation_memory.last_metric %}- 最近分析的指标：{{ conversation_memory.last_metric }}{% endif %}
+{% if conversation_memory.last_time_range %}- 最近分析的时间范围：{{ conversation_memory.last_time_range }}{% endif %}
+{% if conversation_memory.last_org_scope %}- 最近分析的组织范围：{{ conversation_memory.last_org_scope }}{% endif %}
+{% if conversation_memory.short_term_memory %}
+  {% if conversation_memory.short_term_memory.last_group_by %}- 最近使用的分组维度：{{ conversation_memory.short_term_memory.last_group_by }}{% endif %}
+  {% if conversation_memory.short_term_memory.last_compare_target %}- 最近使用的对比目标：{{ conversation_memory.short_term_memory.last_compare_target }}{% endif %}
+{% endif %}
+{% else %}
+当前会话无历史上下文。
+{% endif %}
+
+## 可用指标目录
+
+{% if metric_catalog_summary %}
+{{ metric_catalog_summary }}
+{% else %}
+### 新能源
+- 发电量（代码：generation）
+- 上网电量（代码：online）
+- 售电量（代码：sales）
+
+### 化工贸易
+- 化工产品销售量（代码：chemical_sales_volume）
+- 化工产品销售收入（代码：chemical_sales_revenue）
+
+### 财务
+- 收入（代码：revenue）
+- 成本（代码：cost）
+- 利润（代码：profit）
+{% endif %}
+
+## 分组维度
+
+支持分组维度：region（区域）、station（电站）、month（月份）
+
+## 对比目标
+
+支持对比目标：yoy（同比）、mom（环比）
+
+## 输出要求
+
+请将用户问题解析为结构化 AnalyticsIntent JSON。
+
+### 示例 1：简单查询
+
+用户输入："查询新疆区域 2024 年 3 月发电量"
+期望输出：
+```json
+{
+  "task_type": "analytics_query",
+  "complexity": "simple",
+  "planning_mode": "direct",
+  "analysis_intent": "simple_query",
+  "metric": {
+    "raw_text": "发电量",
+    "metric_code": "generation",
+    "metric_name": "发电量",
+    "confidence": 0.95
+  },
+  "time_range": {
+    "raw_text": "2024年3月",
+    "type": "absolute",
+    "value": "2024-03",
+    "start": "2024-03-01",
+    "end": "2024-03-31",
+    "confidence": 0.95
+  },
+  "org_scope": {
+    "raw_text": "新疆区域",
+    "type": "region",
+    "name": "新疆区域",
+    "confidence": 0.9
+  },
+  "compare_target": "none",
+  "confidence": {"overall": 0.9, "metric": 0.95, "time_range": 0.95, "org_scope": 0.9},
+  "need_clarification": false,
+  "missing_fields": [],
+  "ambiguous_fields": []
+}
+```
+
+### 示例 2：缺指标
+
+用户输入："帮我看一下新疆区域上个月的情况"
+期望输出：
+```json
+{
+  "task_type": "analytics_query",
+  "complexity": "simple",
+  "planning_mode": "clarification",
+  "analysis_intent": "simple_query",
+  "metric": null,
+  "time_range": {
+    "raw_text": "上个月",
+    "type": "relative",
+    "value": "上个月",
+    "confidence": 0.8
+  },
+  "org_scope": {
+    "raw_text": "新疆区域",
+    "type": "region",
+    "name": "新疆区域",
+    "confidence": 0.9
+  },
+  "compare_target": "none",
+  "confidence": {"overall": 0.5, "metric": 0.1, "time_range": 0.8, "org_scope": 0.9},
+  "need_clarification": true,
+  "clarification_question": "你想查看哪个经营指标？例如：发电量、收入、成本、利润。",
+  "missing_fields": ["metric"],
+  "ambiguous_fields": []
+}
+```
+
+### 示例 3：指标歧义
+
+用户输入："新疆最近电量咋样"
+期望输出：
+```json
+{
+  "task_type": "analytics_query",
+  "complexity": "simple",
+  "planning_mode": "clarification",
+  "analysis_intent": "simple_query",
+  "metric": {
+    "raw_text": "电量",
+    "confidence": 0.4,
+    "candidates": [
+      {"metric_code": "generation", "metric_name": "发电量", "confidence": 0.4},
+      {"metric_code": "online", "metric_name": "上网电量", "confidence": 0.3},
+      {"metric_code": "sales", "metric_name": "售电量", "confidence": 0.3}
+    ]
+  },
+  "time_range": {
+    "raw_text": "最近",
+    "type": "relative",
+    "value": "最近",
+    "confidence": 0.7
+  },
+  "org_scope": {
+    "raw_text": "新疆",
+    "type": "region",
+    "name": "新疆",
+    "confidence": 0.9
+  },
+  "compare_target": "none",
+  "confidence": {"overall": 0.55, "metric": 0.4, "time_range": 0.7, "org_scope": 0.9},
+  "need_clarification": true,
+  "clarification_question": "你说的「电量」想看哪个口径？例如：发电量、上网电量、售电量。",
+  "missing_fields": [],
+  "ambiguous_fields": ["metric"]
+}
+```
+
+### 示例 4：化工产品查询
+
+用户输入："聚乙烯的销售情况"
+期望输出：
+```json
+{
+  "task_type": "analytics_query",
+  "complexity": "simple",
+  "planning_mode": "direct",
+  "analysis_intent": "simple_query",
+  "metric": {
+    "raw_text": "销售情况",
+    "confidence": 0.85,
+    "candidates": [
+      {"metric_code": "chemical_sales_volume", "metric_name": "化工产品销售量", "confidence": 0.5},
+      {"metric_code": "chemical_sales_revenue", "metric_name": "化工产品销售收入", "confidence": 0.35}
+    ]
+  },
+  "time_range": null,
+  "org_scope": null,
+  "compare_target": "none",
+  "confidence": {"overall": 0.7, "metric": 0.85, "time_range": null, "org_scope": null},
+  "need_clarification": true,
+  "clarification_question": "您想看聚乙烯的哪个指标？1) 销售量（吨）2) 销售收入（万元）",
+  "missing_fields": [],
+  "ambiguous_fields": ["metric"]
+}
+```
+
+### 示例 5：复杂同比拖累分析
+
+用户输入："分析新疆区域近三个月发电量下降的原因，并和去年同期对比，看哪些电站拖累最大"
+期望输出：
+```json
+{
+  "task_type": "analytics_query",
+  "complexity": "complex",
+  "planning_mode": "decomposed",
+  "analysis_intent": "decline_attribution",
+  "metric": {
+    "raw_text": "发电量",
+    "metric_code": "generation",
+    "metric_name": "发电量",
+    "confidence": 0.95
+  },
+  "time_range": {
+    "raw_text": "近三个月",
+    "type": "relative",
+    "value": "近三个月",
+    "confidence": 0.9
+  },
+  "org_scope": {
+    "raw_text": "新疆区域",
+    "type": "region",
+    "name": "新疆区域",
+    "confidence": 0.9
+  },
+  "group_by": "station",
+  "compare_target": "yoy",
+  "sort_by": "decline_contribution",
+  "sort_direction": "desc",
+  "top_n": 10,
+  "required_queries": [
+    {
+      "query_name": "current",
+      "purpose": "查询当前周期各电站发电量",
+      "metric_code": "generation",
+      "period_role": "current",
+      "group_by": "station",
+      "filters": {}
+    },
+    {
+      "query_name": "yoy_baseline",
+      "purpose": "查询去年同期各电站发电量作为基准",
+      "metric_code": "generation",
+      "period_role": "yoy_baseline",
+      "group_by": "station",
+      "filters": {}
+    }
+  ],
+  "confidence": {"overall": 0.92, "metric": 0.95, "time_range": 0.9, "org_scope": 0.9, "group_by": 0.95, "compare_target": 0.95, "analysis_intent": 0.9},
+  "need_clarification": false,
+  "missing_fields": [],
+  "ambiguous_fields": []
+}
+```
+
+## 注意事项
+
+1. **严格禁止输出 SQL**：不要包含 raw_sql、generated_sql、sql_text 等字段
+2. **置信度阈值**：
+   - overall >= 0.85：可执行
+   - 0.65 <= overall < 0.85：如无歧义可执行，否则澄清
+   - overall < 0.65：澄清
+3. **指标歧义时必须澄清**：当 ambiguous_fields 非空且 overall < 0.85 时必须 need_clarification=true
+4. **缺失核心槽位时必须澄清**：当 missing_fields 包含 metric/time_range 时必须 need_clarification=true
