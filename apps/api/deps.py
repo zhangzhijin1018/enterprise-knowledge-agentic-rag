@@ -370,28 +370,35 @@ def get_analytics_service(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
     sql_audit_repository: SQLAuditRepository = Depends(get_sql_audit_repository),
-    analytics_planner: AnalyticsPlanner = Depends(get_analytics_planner),
-    sql_builder: SQLBuilder = Depends(get_sql_builder),
     sql_guard: SQLGuard = Depends(get_sql_guard),
     sql_gateway: SQLGateway = Depends(get_sql_gateway),
     schema_registry: SchemaRegistry = Depends(get_schema_registry),
     metric_catalog: MetricCatalog = Depends(get_metric_catalog),
     data_source_registry: DataSourceRegistry = Depends(get_data_source_registry),
 ) -> AnalyticsService:
-    """提供 AnalyticsService 依赖。"""
+    """提供 AnalyticsService 依赖（v2 纯 Workflow 链路）。
 
-    return AnalyticsService(
+    本版本移除 use_workflow 开关，只走 LangGraph Workflow：
+    - LLMAnalyticsIntentParser 解析意图
+    - AnalyticsIntentValidator 校验槽位
+    - AnalyticsIntentSQLBuilder 构建 SQL
+    - SQL Guard 安全校验
+    - SQL Gateway 执行查询
+    - Summary / Chart / Insight / Report 生成
+    """
+
+    # 直接创建 Service（内部会绑定 workflow adapter）
+    service = AnalyticsService(
         conversation_repository=conversation_repository,
         task_run_repository=task_run_repository,
         sql_audit_repository=sql_audit_repository,
-        analytics_planner=analytics_planner,
-        sql_builder=sql_builder,
         sql_guard=sql_guard,
         sql_gateway=sql_gateway,
         schema_registry=schema_registry,
         metric_catalog=metric_catalog,
         data_source_registry=data_source_registry,
     )
+    return service
 
 
 def get_analytics_export_service(

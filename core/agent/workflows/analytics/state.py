@@ -1,14 +1,12 @@
-"""经营分析 LangGraph 微观执行状态。
+"""经营分析 LangGraph 微观执行状态（v2 纯 Workflow 链路）。
 
-为什么要单独定义结构化 state：
-1. LangGraph 的核心价值就是显式状态流转；
-2. 当前项目已经有 `task_run / slot_snapshot / clarification / sql_audit` 等权威状态对象，
-   这里不再重复造一套数据库，而是把"微观执行上下文"结构化；
-3. 后续无论是 workflow 恢复执行、状态映射还是可观测性埋点，都需要稳定字段名。
+v2 变更：
+- 移除旧版 AnalyticsPlan 依赖
+- 使用 AnalyticsIntent 作为主链路意图对象
 
-重要变更（v2 链路收敛）：
-本轮重构后，analytics_plan 节点统一使用 LLMAnalyticsIntentParser 生成 AnalyticsIntent，
-不再使用本地规则先判断 simple/complex。ReAct 作为可选 repair/replan 能力预留。
+设计原则：
+- LangGraph StateDict 用于结构化微观执行上下文
+- 不重复造数据库，依赖 task_run / slot_snapshot / clarification 等权威状态对象
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, TypedDict
 
-from core.agent.control_plane.analytics_planner import AnalyticsPlan
 from core.analytics.analytics_result_model import AnalyticsResult
 from core.analytics.intent.schema import AnalyticsIntent
 from core.security.auth import UserContext
@@ -184,23 +181,9 @@ class AnalyticsWorkflowState(TypedDict, total=False):
 
     # 规划来源。
     # - llm_parser：LLM 统一解析
-    # - rule_fallback：规则 Planner 回退
     planning_source: str
 
-    # -------------------------
-    # 旧版 AnalyticsPlan 字段（兼容保留）
-    # -------------------------
-
-    # 结构化分析计划（旧版，兼容保留）。
-    # 包含 slots、clarification、data_source 等结果。
-    # 这是 Planner 的微观执行产物，通常不直接全量写入 task_run，
-    # 只会把其中少量摘要（例如 slots / planning_source / confidence）写入轻快照。
-    plan: AnalyticsPlan
-
-    # clarification 恢复时预先构造好的 plan。
-    # 它是"恢复执行态 -> 微观执行态"的桥接对象，
-    # 只在本次恢复 workflow 中使用，不直接作为权威持久化对象落库。
-    recovered_plan: AnalyticsPlan
+    # v2：已移除旧版 AnalyticsPlan，统一使用 intent
 
     # 当前 task_run 快照。
     # 这是权威运行态对象在 workflow 中的引用。

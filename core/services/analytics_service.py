@@ -1,38 +1,25 @@
-"""经营分析主链路 Service。
+"""经营分析主链路 Service（v2 纯 Workflow 链路）。
 
-本 Service 的职责不是做最终版 BI / 自由 NL2SQL，
-而是把当前阶段企业经营分析的稳定主链路编排清楚：
+本版本移除了旧链路代码，只走 LangGraph Workflow：
 
 用户问题
--> Planner 做意图识别与槽位提取
+-> LLMAnalyticsIntentParser 解析意图（生成 AnalyticsIntent）
+-> AnalyticsIntentValidator 校验槽位
 -> 缺槽位则澄清
--> 满足最小条件后构造 schema-aware SQL
--> SQL Guard 做安全检查与治理
--> 通过 SQL Gateway / SQL MCP-compatible server 执行只读查询
--> 按 output_mode 分级生成结果（lite / standard / full）
+-> AnalyticsIntentSQLBuilder 构建 SQL
+-> SQL Guard 安全校验
+-> SQL Gateway 执行查询
+-> Summary / Chart / Insight / Report 生成
 -> 记录 SQL Audit
-
-V1 性能优化要点：
-1. output_snapshot 轻量化：重内容拆到 analytics_result_repository，轻快照只保留摘要；
-2. query 响应分级：lite / standard / full 三种输出模式，默认 lite；
-3. insight / report 延迟生成：按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
-4. 统一结果对象：AnalyticsResult 作为唯一结果载体，减少重复拷贝；
-5. 可观测性增强：记录关键阶段耗时到 timing_breakdown；
-6. registry/schema 缓存：高频只读对象通过 RegistryCache 常驻缓存。
 """
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from core.agent.control_plane.analytics_planner import AnalyticsPlan, AnalyticsPlanner
-from core.agent.control_plane.sql_builder import SQLBuilder
-from core.agent.control_plane.sql_guard import SQLGuard
 from core.agent.workflows.analytics.snapshot_builder import AnalyticsSnapshotBuilder
 from core.analytics.analytics_result_model import AnalyticsResult
-from core.analytics.data_masking import DataMaskingResult, DataMaskingService
+from core.analytics.data_masking import DataMaskingService
 from core.analytics.data_source_registry import DataSourceRegistry
 from core.analytics.insight_builder import InsightBuilder
 from core.analytics.metric_catalog import MetricCatalog
@@ -47,28 +34,32 @@ from core.repositories.conversation_repository import ConversationRepository
 from core.repositories.sql_audit_repository import SQLAuditRepository
 from core.repositories.task_run_repository import TaskRunRepository
 from core.security.auth import UserContext
-from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 from core.tools.sql.sql_gateway import SQLGateway
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
+    from core.agent.control_plane.sql_guard import SQLGuard
     from core.agent.workflows.analytics.adapter import AnalyticsWorkflowAdapter
-    from core.agent.workflows.analytics.react.planner import AnalyticsReactPlanner
-    from core.agent.workflows.analytics.react.policy import AnalyticsReactPlanningPolicy
 
 VALID_OUTPUT_MODES = {"lite", "standard", "full"}
 DEFAULT_OUTPUT_MODE = "lite"
 
 
 class AnalyticsService:
-    """经营分析应用编排层。"""
+    """经营分析应用编排层（v2 纯 Workflow 链路）。
+
+    职责：
+    - 持有 Repository 层依赖（会话、任务、SQL审计、结果）
+    - 持有 Workflow Adapter（负责编排 LangGraph 节点）
+    - 持有辅助组件（指标目录、Schema、数据脱敏等），供 Workflow 节点复用
+    - 对外暴露 submit_query / get_run_detail 等稳定业务接口
+    - 不直接执行 SQL，不直接调用 LLM，不直接操作 LangGraph 状态
+    """
 
     def __init__(
         self,
         conversation_repository: ConversationRepository,
         task_run_repository: TaskRunRepository,
         sql_audit_repository: SQLAuditRepository,
-        analytics_planner: AnalyticsPlanner,
-        sql_builder: SQLBuilder,
         sql_guard: SQLGuard,
         sql_gateway: SQLGateway,
         schema_registry: SchemaRegistry,
@@ -80,56 +71,39 @@ class AnalyticsService:
         analytics_result_repository: AnalyticsResultRepository | None = None,
         registry_cache: RegistryCache | None = None,
         snapshot_builder: AnalyticsSnapshotBuilder | None = None,
-        use_workflow: bool = False,
-        workflow_adapter: AnalyticsWorkflowAdapter | None = None,
-        analytics_react_planner: AnalyticsReactPlanner | None = None,
-        analytics_react_policy: AnalyticsReactPlanningPolicy | None = None,
     ) -> None:
+        # Repository 层依赖
         self.conversation_repository = conversation_repository
         self.task_run_repository = task_run_repository
         self.sql_audit_repository = sql_audit_repository
-        self.analytics_planner = analytics_planner
-        self.sql_builder = sql_builder
+        self.analytics_result_repository = analytics_result_repository or AnalyticsResultRepository()
+
+        # SQL 执行链路依赖
         self.sql_guard = sql_guard
         self.sql_gateway = sql_gateway
+
+        # Registry 层依赖（供 Workflow 节点复用）
         self.schema_registry = schema_registry
         self.metric_catalog = metric_catalog
         self.data_source_registry = data_source_registry
+
+        # 辅助组件
         self.data_masking_service = data_masking_service or DataMaskingService()
         self.insight_builder = insight_builder or InsightBuilder()
         self.report_formatter = report_formatter or ReportFormatter()
-        self.analytics_result_repository = analytics_result_repository or AnalyticsResultRepository()
         self.registry_cache = registry_cache or get_global_cache()
-        # Snapshot Builder 是“上游主动收口”的关键层。
-        # Repository sanitize 仍然保留，但这里优先保证上游写入本身就是轻量、边界正确的快照。
         self.snapshot_builder = snapshot_builder or AnalyticsSnapshotBuilder()
-        # 当前阶段保留“兼容直连模式”，原因是：
-        # 1. 已有 analytics/export/review/测试链路都还依赖现有 Service；
-        # 2. workflow-first 是本轮新主路径，但不能一次性把所有调用方都强制改完；
-        # 3. 因此通过 use_workflow 开关渐进切换，风险最小。
-        self.use_workflow = use_workflow
-        self.workflow_adapter = workflow_adapter
-        # 局部 ReAct planner 只允许挂在 analytics_plan 节点内部。
-        # Service 这里只持有可选依赖，避免 API / Service 直接操作 ReAct 子循环细节。
-        self.analytics_react_planner = analytics_react_planner
-        self.analytics_react_policy = analytics_react_policy
 
-    def bind_workflow_adapter(
-        self,
-        workflow_adapter: AnalyticsWorkflowAdapter,
-        *,
-        use_workflow: bool | None = None,
-    ) -> None:
-        """绑定经营分析 workflow adapter。
+        # v2：延迟创建 Workflow Adapter（避免循环导入）
+        self._workflow_adapter: "AnalyticsWorkflowAdapter | None" = None
 
-        这里使用显式绑定而不是在 `__init__` 里直接 new adapter，
-        是为了避免 Service -> Adapter -> Workflow -> Service 的构造循环，
-        同时让依赖注入层可以决定当前实例是否启用 workflow-first。
-        """
-
-        self.workflow_adapter = workflow_adapter
-        if use_workflow is not None:
-            self.use_workflow = use_workflow
+    @property
+    def workflow_adapter(self) -> "AnalyticsWorkflowAdapter":
+        """获取 Workflow Adapter（懒加载）。"""
+        if self._workflow_adapter is None:
+            from core.agent.workflows.analytics.adapter import AnalyticsWorkflowAdapter
+            self._workflow_adapter = AnalyticsWorkflowAdapter(analytics_service=self)
+        return self._workflow_adapter
 
     def submit_query(
         self,
@@ -140,16 +114,10 @@ class AnalyticsService:
         need_sql_explain: bool,
         user_context: UserContext,
     ) -> dict:
-        """提交经营分析请求。"""
+        """提交经营分析请求（v2 纯 Workflow 链路）。
 
-        if self.use_workflow and self.workflow_adapter is not None:
-            return self.workflow_adapter.execute_query(
-                query=query,
-                conversation_id=conversation_id,
-                output_mode=output_mode,
-                need_sql_explain=need_sql_explain,
-                user_context=user_context,
-            )
+        直接委托给 Workflow Adapter 执行，不做额外处理。
+        """
 
         normalized_query = query.strip()
         if not normalized_query:
@@ -160,82 +128,22 @@ class AnalyticsService:
                 detail={},
             )
 
-        normalized_output_mode = self._normalize_output_mode(output_mode)
-
-        conversation = self._get_or_create_conversation(
+        # 直接调用 Workflow Adapter
+        return self.workflow_adapter.execute_query(
+            query=normalized_query,
             conversation_id=conversation_id,
-            query=normalized_query,
-            user_context=user_context,
-        )
-        memory = self.conversation_repository.get_memory(conversation["conversation_id"])
-
-        self.conversation_repository.add_message(
-            conversation_id=conversation["conversation_id"],
-            role="user",
-            message_type="analytics_query",
-            content=normalized_query,
-            related_run_id=None,
-            structured_content={"output_mode": normalized_output_mode},
-        )
-
-        plan = self.analytics_planner.plan(
-            query=normalized_query,
-            conversation_memory=memory,
-        )
-
-        task_run = self.task_run_repository.create_task_run(
-            conversation_id=conversation["conversation_id"],
-            user_id=user_context.user_id,
-            task_type="analytics",
-            route="business_analysis",
-            status="executing",
-            sub_status="planning_query",
-            # 这里只写“权威运行态”的轻量输入快照。
-            # plan/sql_bundle/workflow_state 之类的微观对象不应该进入 task_run。
-            input_snapshot=self.snapshot_builder.build_input_snapshot(
-                query=normalized_query,
-                conversation_id=conversation["conversation_id"],
-                output_mode=normalized_output_mode,
-                need_sql_explain=need_sql_explain,
-                user_context=user_context,
-                planner_slots=plan.slots,
-                planning_source=plan.planning_source,
-                confidence=plan.confidence,
-            ),
-            risk_level="medium",
-            review_status="not_required",
-        )
-        self.conversation_repository.update_conversation(
-            conversation["conversation_id"],
-            current_route="analytics",
-            current_status="active",
-            last_run_id=task_run["run_id"],
-        )
-
-        # slot_snapshot 是“恢复执行态”，这里只写补槽恢复的必要字段。
-        self.task_run_repository.create_slot_snapshot(
-            run_id=task_run["run_id"],
-            task_type="analytics",
-            **self.snapshot_builder.build_slot_snapshot_payload(plan=plan),
-        )
-
-        if not plan.is_executable:
-            return self._build_clarification_response(
-                conversation_id=conversation["conversation_id"],
-                task_run=task_run,
-                plan=plan,
-            )
-
-        return self._execute_analytics_plan(
-            conversation_id=conversation["conversation_id"],
-            task_run=task_run,
-            plan=plan,
-            output_mode=normalized_output_mode,
+            output_mode=output_mode,
             need_sql_explain=need_sql_explain,
             user_context=user_context,
         )
 
-    def get_run_detail(self, *, run_id: str, output_mode: str = "full", user_context: UserContext) -> dict:
+    def get_run_detail(
+        self,
+        *,
+        run_id: str,
+        output_mode: str = "full",
+        user_context: UserContext,
+    ) -> dict:
         """读取经营分析运行详情。
 
         支持 output_mode 分级返回：
@@ -352,70 +260,6 @@ class AnalyticsService:
             return "standard"
         return DEFAULT_OUTPUT_MODE
 
-    def _build_clarification_response(
-        self,
-        *,
-        conversation_id: str,
-        task_run: dict,
-        plan: AnalyticsPlan,
-    ) -> dict:
-        """构造经营分析澄清响应。"""
-
-        # clarification_event 是“可审计的交互事件”，这里只写问题文本和目标槽位。
-        clarification = self.task_run_repository.create_clarification_event(
-            run_id=task_run["run_id"],
-            conversation_id=conversation_id,
-            **self.snapshot_builder.build_clarification_event_payload(plan=plan),
-        )
-        # context_snapshot 只保留恢复执行所需的轻量上下文摘要，
-        # 明确不写 plan/sql_bundle/execution_result 等微观临时态。
-        self.task_run_repository.update_task_run(
-            task_run["run_id"],
-            status="awaiting_user_clarification",
-            sub_status="awaiting_slot_fill",
-            context_snapshot=self.snapshot_builder.build_context_snapshot(
-                slots=plan.slots,
-                missing_slots=plan.missing_slots,
-                conflict_slots=plan.conflict_slots,
-                clarification_type=plan.clarification_type,
-                resume_step="resume_after_analytics_slot_fill",
-            ),
-        )
-        self.conversation_repository.add_message(
-            conversation_id=conversation_id,
-            role="assistant",
-            message_type="clarification",
-            content=clarification["question_text"],
-            related_run_id=task_run["run_id"],
-            structured_content={
-                "clarification_id": clarification["clarification_id"],
-                "target_slots": clarification["target_slots"],
-                "clarification_type": plan.clarification_type,
-                "reason": plan.clarification_reason,
-                "suggested_options": plan.clarification_suggested_options,
-            },
-        )
-        return {
-            "data": {
-                "clarification": {
-                    "clarification_id": clarification["clarification_id"],
-                    "question": clarification["question_text"],
-                    "target_slots": clarification["target_slots"],
-                    "clarification_type": plan.clarification_type,
-                    "reason": plan.clarification_reason,
-                    "suggested_options": plan.clarification_suggested_options,
-                }
-            },
-            "meta": build_response_meta(
-                conversation_id=conversation_id,
-                run_id=task_run["run_id"],
-                status="awaiting_user_clarification",
-                sub_status="awaiting_slot_fill",
-                need_clarification=True,
-                is_async=False,
-            ),
-        }
-
     def _get_or_create_conversation(
         self,
         *,
@@ -423,7 +267,7 @@ class AnalyticsService:
         query: str,
         user_context: UserContext,
     ) -> dict:
-        """读取已有会话或创建新会话。"""
+        """读取已有会话或创建新会话（供 Workflow 节点调用）。"""
 
         if conversation_id:
             conversation = self.conversation_repository.get_conversation(conversation_id)
@@ -454,418 +298,13 @@ class AnalyticsService:
             current_status="active",
         )
 
-    def _execute_analytics_plan(
-        self,
-        *,
-        conversation_id: str,
-        task_run: dict,
-        plan: AnalyticsPlan,
-        output_mode: str,
-        need_sql_explain: bool,
-        user_context: UserContext,
-    ) -> dict:
-        """执行经营分析主链路。
-
-        V1 性能优化：
-        1. 按 output_mode 决定是否生成 chart_spec / insight_cards / report_blocks；
-        2. 轻快照写入 output_snapshot，重内容写入 analytics_result_repository；
-        3. 记录关键阶段耗时到 timing_breakdown。
-        """
-
-        timing: dict[str, float] = {}
-
-        metric_definition = self._get_cached_metric(plan.slots.get("metric"))
-        if metric_definition is None:
-            raise AppException(
-                error_code=error_codes.ANALYTICS_QUERY_FAILED,
-                message="未识别到可执行指标",
-                status_code=400,
-                detail={"metric": plan.slots.get("metric")},
-            )
-
-        data_source_definition = (
-            self.data_source_registry.get_data_source(plan.data_source)
-            if self.data_source_registry is not None
-            else self.schema_registry.get_data_source(plan.data_source)
-        )
-        table_definition = self.schema_registry.get_table_definition(
-            table_name=metric_definition.table_name,
-            data_source=data_source_definition.key,
-        )
-
-        permission_check_result = self._assert_metric_permission(
-            metric_definition=metric_definition,
-            user_context=user_context,
-        )
-        data_source_permission_result = self._assert_data_source_permission(
-            data_source_definition=data_source_definition,
-            user_context=user_context,
-        )
-        permission_check_result["data_source"] = data_source_permission_result
-        data_scope_result = self._build_data_scope_result(
-            table_definition=table_definition,
-            user_context=user_context,
-        )
-
-        try:
-            t0 = time.monotonic()
-
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                sub_status="building_sql",
-                # 这里只写权威运行态需要的轻量上下文摘要，不写 plan/sql_bundle 全量对象。
-                context_snapshot=self.snapshot_builder.build_context_snapshot(
-                    slots=plan.slots,
-                    planning_source=plan.planning_source,
-                    confidence=plan.confidence,
-                    resume_step="run_sql_pipeline",
-                ),
-            )
-            sql_bundle = self.sql_builder.build(
-                plan.slots,
-                department_code=user_context.department_code,
-            )
-            timing["sql_build_ms"] = round((time.monotonic() - t0) * 1000, 1)
-
-            t1 = time.monotonic()
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                sub_status="checking_sql",
-            )
-            guard_result = self.sql_guard.validate(
-                sql_bundle["generated_sql"],
-                allowed_tables=self._get_cached_allowed_tables(sql_bundle["data_source"]),
-                required_filter_column=table_definition.department_filter_column,
-                required_filter_value=user_context.department_code if table_definition.department_filter_column else None,
-            )
-            timing["sql_guard_ms"] = round((time.monotonic() - t1) * 1000, 1)
-
-            if not guard_result.is_safe or not guard_result.checked_sql:
-                blocked_audit = self.sql_audit_repository.create_audit(
-                    run_id=task_run["run_id"],
-                    user_id=user_context.user_id,
-                    db_type=data_source_definition.db_type,
-                    metric_scope=sql_bundle["metric_scope"],
-                    generated_sql=sql_bundle["generated_sql"],
-                    checked_sql=guard_result.checked_sql,
-                    is_safe=False,
-                    blocked_reason=guard_result.blocked_reason,
-                    execution_status="blocked",
-                    row_count=None,
-                    latency_ms=None,
-                    metadata={
-                        **sql_bundle["builder_metadata"],
-                        "data_source": sql_bundle["data_source"],
-                    },
-                )
-                self.task_run_repository.update_task_run(
-                    task_run["run_id"],
-                    status="failed",
-                    sub_status="checking_sql",
-                    error_code=error_codes.SQL_GUARD_BLOCKED,
-                    error_message=guard_result.blocked_reason,
-                    finished_at=datetime.now(timezone.utc),
-                )
-                raise AppException(
-                    error_code=error_codes.SQL_GUARD_BLOCKED,
-                    message="SQL 安全检查未通过",
-                    status_code=400,
-                    detail={
-                        "blocked_reason": guard_result.blocked_reason,
-                        "audit_info": self._build_audit_info(blocked_audit),
-                        "governance_detail": guard_result.governance_detail,
-                    },
-                )
-
-            t2 = time.monotonic()
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                status="executing",
-                sub_status="running_sql",
-            )
-            execution_result = self.sql_gateway.execute_readonly_query(
-                SQLReadQueryRequest(
-                    data_source=sql_bundle["data_source"],
-                    sql=guard_result.checked_sql,
-                    timeout_ms=3000,
-                    row_limit=500,
-                    trace_id=task_run["trace_id"],
-                    run_id=task_run["run_id"],
-                    metadata={
-                        "planning_source": plan.planning_source,
-                        "confidence": plan.confidence,
-                    },
-                )
-            )
-            timing["sql_execute_ms"] = round((time.monotonic() - t2) * 1000, 1)
-
-            audit_record = self.sql_audit_repository.create_audit(
-                run_id=task_run["run_id"],
-                user_id=user_context.user_id,
-                db_type=execution_result.db_type,
-                metric_scope=sql_bundle["metric_scope"],
-                generated_sql=sql_bundle["generated_sql"],
-                checked_sql=guard_result.checked_sql,
-                is_safe=True,
-                blocked_reason=None,
-                execution_status="succeeded",
-                row_count=execution_result.row_count,
-                latency_ms=execution_result.latency_ms,
-                metadata={
-                    **sql_bundle["builder_metadata"],
-                    "data_source": execution_result.data_source,
-                    "department_filter_column": table_definition.department_filter_column,
-                    "sensitive_fields": table_definition.sensitive_fields,
-                    "permission_check_result": permission_check_result,
-                    "data_scope_result": data_scope_result,
-                },
-            )
-
-            t3 = time.monotonic()
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                sub_status="explaining_result",
-            )
-            masking_result = self.data_masking_service.apply(
-                rows=execution_result.rows,
-                columns=execution_result.columns,
-                visible_fields=self._get_cached_visible_fields(
-                    table_name=table_definition.name,
-                    data_source=execution_result.data_source,
-                ),
-                sensitive_fields=self._get_cached_sensitive_fields(
-                    table_name=table_definition.name,
-                    data_source=execution_result.data_source,
-                ),
-                masked_fields=self._get_cached_masked_fields(
-                    table_name=table_definition.name,
-                    data_source=execution_result.data_source,
-                ),
-                user_permissions=user_context.permissions,
-            )
-            timing["masking_ms"] = round((time.monotonic() - t3) * 1000, 1)
-
-            summary = self._build_summary(plan.slots, execution_result)
-
-            sql_explain = None
-            if need_sql_explain:
-                sql_explain = (
-                    "当前阶段采用 schema-aware 受控模板 SQL。"
-                    f"主指标={plan.slots['metric']}，时间范围={plan.slots['time_range'].get('label')}，"
-                    f"group_by={plan.slots.get('group_by') or 'none'}，"
-                    f"compare_target={plan.slots.get('compare_target') or 'none'}，"
-                    f"data_source={execution_result.data_source}。"
-                )
-
-            effective_filters = sql_bundle["builder_metadata"].get("effective_filters", {})
-            governance_decision = {
-                "permission_check_result": permission_check_result,
-                "data_scope_result": data_scope_result,
-                "masked_fields": masking_result.masked_fields,
-                "visible_fields": masking_result.visible_fields,
-                "sensitive_fields": masking_result.sensitive_fields,
-                "governance_action": masking_result.governance_decision,
-                "effective_filters": effective_filters,
-            }
-            audit_info = self._build_audit_info(
-                audit_record,
-                permission_check_result=permission_check_result,
-                data_scope_result=data_scope_result,
-                masking_result=masking_result,
-                effective_filters=effective_filters,
-                guard_result=guard_result,
-            )
-
-            # 按 output_mode 延迟生成 chart_spec / insight_cards / report_blocks
-            chart_spec = None
-            insight_cards: list[dict] = []
-            report_blocks: list[dict] = []
-
-            if output_mode in {"standard", "full"}:
-                t4 = time.monotonic()
-                chart_spec = self._build_chart_spec(
-                    slots=plan.slots,
-                    execution_result=execution_result,
-                    metric_name=plan.slots["metric"],
-                )
-                insight_cards = self.insight_builder.build(
-                    slots=plan.slots,
-                    rows=masking_result.rows,
-                    row_count=execution_result.row_count,
-                )
-                timing["insight_ms"] = round((time.monotonic() - t4) * 1000, 1)
-
-            if output_mode == "full":
-                t5 = time.monotonic()
-                report_blocks = self.report_formatter.build(
-                    summary=summary,
-                    insight_cards=insight_cards,
-                    tables=[
-                        {
-                            "name": "main_result",
-                            "columns": masking_result.columns,
-                            "rows": [list(row.values()) for row in masking_result.rows],
-                        }
-                    ],
-                    chart_spec=chart_spec,
-                    governance_note={
-                        "audit_info": audit_info,
-                        "permission_check_result": permission_check_result,
-                        "data_scope_result": data_scope_result,
-                        "masked_fields": masking_result.masked_fields,
-                        "effective_filters": effective_filters,
-                        "governance_action": masking_result.governance_decision,
-                    },
-                )
-                timing["report_ms"] = round((time.monotonic() - t5) * 1000, 1)
-
-            # 构造统一结果对象
-            analytics_result = AnalyticsResult(
-                run_id=task_run["run_id"],
-                trace_id=task_run["trace_id"],
-                summary=summary,
-                sql_preview=guard_result.checked_sql,
-                row_count=execution_result.row_count,
-                latency_ms=execution_result.latency_ms,
-                data_source=execution_result.data_source,
-                metric_scope=sql_bundle["metric_scope"],
-                compare_target=plan.slots.get("compare_target"),
-                group_by=plan.slots.get("group_by"),
-                slots=plan.slots,
-                planning_source=plan.planning_source,
-                columns=execution_result.columns,
-                rows=execution_result.rows,
-                masked_columns=masking_result.columns,
-                masked_rows=masking_result.rows,
-                visible_fields=masking_result.visible_fields,
-                sensitive_fields=masking_result.sensitive_fields,
-                masked_fields=masking_result.masked_fields,
-                hidden_fields=masking_result.hidden_fields,
-                governance_decision=masking_result.governance_decision,
-                chart_spec=chart_spec,
-                insight_cards=insight_cards,
-                report_blocks=report_blocks,
-                safety_check_result={
-                    "is_safe": guard_result.is_safe,
-                    "blocked_reason": guard_result.blocked_reason,
-                    "table_whitelist": self._get_cached_allowed_tables(sql_bundle["data_source"]),
-                    "field_whitelist_reserved": self._get_cached_field_whitelist(
-                        table_name=metric_definition.table_name,
-                        data_source=sql_bundle["data_source"],
-                    ),
-                    "governance_detail": guard_result.governance_detail,
-                },
-                permission_check_result=permission_check_result,
-                data_scope_result=data_scope_result,
-                effective_filters=effective_filters,
-                audit_info=audit_info,
-                sql_explain=sql_explain,
-                timing_breakdown=timing,
-            )
-
-            # 轻快照写入 output_snapshot。
-            # 这里明确通过 Snapshot Builder 收口，避免上游直接把 tables / chart_spec / insight_cards
-            # 等重对象写回 task_run。
-            lightweight_snapshot = self.snapshot_builder.build_output_snapshot(
-                analytics_result=analytics_result,
-            )
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                status="succeeded",
-                sub_status="explaining_result",
-                output_snapshot=lightweight_snapshot,
-                finished_at=datetime.now(timezone.utc),
-            )
-
-            # 重内容写入 analytics_result_repository
-            self.analytics_result_repository.save_heavy_result(
-                run_id=task_run["run_id"],
-                heavy_result=analytics_result.to_heavy_result(),
-            )
-
-            self.conversation_repository.add_message(
-                conversation_id=conversation_id,
-                role="assistant",
-                message_type="analytics_answer",
-                content=summary,
-                related_run_id=task_run["run_id"],
-                structured_content={
-                    "sql_preview": guard_result.checked_sql,
-                    "chart_spec": chart_spec,
-                },
-            )
-            self.conversation_repository.upsert_memory(
-                conversation_id,
-                last_route="analytics",
-                last_metric=plan.slots.get("metric"),
-                last_time_range=plan.slots.get("time_range") or {},
-                last_org_scope=plan.slots.get("org_scope") or {},
-                short_term_memory={
-                    "last_analytics_run_id": task_run["run_id"],
-                    "last_group_by": plan.slots.get("group_by"),
-                    "last_compare_target": plan.slots.get("compare_target"),
-                    "last_top_n": plan.slots.get("top_n"),
-                    "last_sort_direction": plan.slots.get("sort_direction"),
-                },
-            )
-
-            # 按 output_mode 返回分级视图
-            if output_mode == "lite":
-                response_data = analytics_result.to_lite_view()
-            elif output_mode == "standard":
-                response_data = analytics_result.to_standard_view()
-            else:
-                response_data = analytics_result.to_full_view()
-
-            return {
-                "data": response_data,
-                "meta": build_response_meta(
-                    conversation_id=conversation_id,
-                    run_id=task_run["run_id"],
-                    status="succeeded",
-                    sub_status="explaining_result",
-                    is_async=False,
-                    need_clarification=False,
-                ),
-            }
-        except AppException:
-            raise
-        except Exception as exc:  # pragma: no cover - 作为兜底保护
-            self.sql_audit_repository.create_audit(
-                run_id=task_run["run_id"],
-                user_id=user_context.user_id,
-                db_type=data_source_definition.db_type,
-                metric_scope=plan.slots.get("metric"),
-                generated_sql="",
-                checked_sql=None,
-                is_safe=False,
-                blocked_reason=str(exc),
-                execution_status="failed",
-                row_count=None,
-                latency_ms=None,
-                metadata={
-                    "stage": "analytics_service_runtime",
-                    "data_source": plan.data_source,
-                },
-            )
-            self.task_run_repository.update_task_run(
-                task_run["run_id"],
-                status="failed",
-                sub_status="running_sql",
-                error_code=error_codes.SQL_EXECUTION_FAILED,
-                error_message=str(exc),
-                finished_at=datetime.now(timezone.utc),
-            )
-            raise AppException(
-                error_code=error_codes.SQL_EXECUTION_FAILED,
-                message="经营分析执行失败",
-                status_code=500,
-                detail={"reason": str(exc)},
-            ) from exc
+    # 以下是保留的辅助方法，供 Workflow 节点复用
 
     def _get_cached_metric(self, metric_name: str | None):
-        """通过缓存获取指标定义。"""
+        """通过缓存获取指标定义（供 Workflow 节点调用）。"""
 
+        if metric_name is None:
+            return None
         cache_key = f"metric:{metric_name}"
         return self.registry_cache.get_or_compute(
             cache_key,
@@ -873,7 +312,7 @@ class AnalyticsService:
         )
 
     def _get_cached_allowed_tables(self, data_source: str) -> list[str]:
-        """通过缓存获取表白名单。"""
+        """通过缓存获取表白名单（供 Workflow 节点调用）。"""
 
         cache_key = f"allowed_tables:{data_source}"
         return self.registry_cache.get_or_compute(
@@ -882,43 +321,55 @@ class AnalyticsService:
         )
 
     def _get_cached_visible_fields(self, table_name: str, data_source: str) -> list[str]:
-        """通过缓存获取可见字段。"""
+        """通过缓存获取可见字段（供 Workflow 节点调用）。"""
 
         cache_key = f"visible_fields:{data_source}:{table_name}"
         return self.registry_cache.get_or_compute(
             cache_key,
-            lambda: self.schema_registry.get_table_visible_fields(table_name=table_name, data_source=data_source),
+            lambda: self.schema_registry.get_table_visible_fields(
+                table_name=table_name,
+                data_source=data_source,
+            ),
         )
 
     def _get_cached_sensitive_fields(self, table_name: str, data_source: str) -> list[str]:
-        """通过缓存获取敏感字段。"""
+        """通过缓存获取敏感字段（供 Workflow 节点调用）。"""
 
         cache_key = f"sensitive_fields:{data_source}:{table_name}"
         return self.registry_cache.get_or_compute(
             cache_key,
-            lambda: self.schema_registry.get_table_sensitive_fields(table_name=table_name, data_source=data_source),
+            lambda: self.schema_registry.get_table_sensitive_fields(
+                table_name=table_name,
+                data_source=data_source,
+            ),
         )
 
     def _get_cached_masked_fields(self, table_name: str, data_source: str) -> list[str]:
-        """通过缓存获取脱敏字段。"""
+        """通过缓存获取脱敏字段（供 Workflow 节点调用）。"""
 
         cache_key = f"masked_fields:{data_source}:{table_name}"
         return self.registry_cache.get_or_compute(
             cache_key,
-            lambda: self.schema_registry.get_table_masked_fields(table_name=table_name, data_source=data_source),
+            lambda: self.schema_registry.get_table_masked_fields(
+                table_name=table_name,
+                data_source=data_source,
+            ),
         )
 
     def _get_cached_field_whitelist(self, table_name: str, data_source: str) -> list[str]:
-        """通过缓存获取字段白名单。"""
+        """通过缓存获取字段白名单（供 Workflow 节点调用）。"""
 
         cache_key = f"field_whitelist:{data_source}:{table_name}"
         return self.registry_cache.get_or_compute(
             cache_key,
-            lambda: self.schema_registry.get_table_field_whitelist(table_name=table_name, data_source=data_source),
+            lambda: self.schema_registry.get_table_field_whitelist(
+                table_name=table_name,
+                data_source=data_source,
+            ),
         )
 
     def _assert_metric_permission(self, *, metric_definition, user_context: UserContext) -> dict:
-        """执行最小指标级权限校验。"""
+        """断言指标权限（供 Workflow 节点调用）。"""
 
         required_permissions = metric_definition.required_permissions or ["analytics:query"]
         if not self._has_all_permissions(user_context.permissions, required_permissions):
@@ -967,11 +418,11 @@ class AnalyticsService:
             "required_permissions": required_permissions,
             "allowed_roles": metric_definition.allowed_roles,
             "allowed_departments": metric_definition.allowed_departments,
-            "sensitivity_level": metric_definition.sensitivity_level,
+            "sensitivity_level": getattr(metric_definition, "sensitivity_level", None),
         }
 
     def _assert_data_source_permission(self, *, data_source_definition, user_context: UserContext) -> dict:
-        """执行最小数据源级权限校验。"""
+        """断言数据源权限（供 Workflow 节点调用）。"""
 
         required_permissions = data_source_definition.required_permissions
         if required_permissions and not self._has_all_permissions(
@@ -1008,7 +459,7 @@ class AnalyticsService:
         }
 
     def _build_data_scope_result(self, *, table_definition, user_context: UserContext) -> dict:
-        """构造当前经营分析的数据范围治理结果。"""
+        """构建数据范围结果（供 Workflow 节点调用）。"""
 
         if table_definition.department_filter_column and not user_context.department_code:
             raise AppException(
@@ -1027,32 +478,16 @@ class AnalyticsService:
             "enforced": bool(table_definition.department_filter_column),
         }
 
-    def _has_any_permission(self, user_permissions: list[str], required_permissions: list[str]) -> bool:
-        """判断用户是否至少满足一项权限。"""
-
-        if not required_permissions:
-            return True
-        permission_set = set(user_permissions or [])
-        return any(permission in permission_set for permission in required_permissions)
-
-    def _has_all_permissions(self, user_permissions: list[str], required_permissions: list[str]) -> bool:
-        """判断用户是否满足全部权限。"""
-
-        if not required_permissions:
-            return True
-        permission_set = set(user_permissions or [])
-        return all(permission in permission_set for permission in required_permissions)
-
     def _build_summary(self, slots: dict, execution_result) -> str:
-        """把结构化查询结果转换成最小业务解释文本。"""
+        """构建摘要文本（供 Workflow 节点调用）。"""
 
-        metric = slots["metric"]
-        time_label = slots["time_range"].get("label", "目标时间范围")
+        metric = slots.get("metric", "未知指标")
+        time_label = slots.get("time_range", {}).get("label", "目标时间范围")
         org_scope = slots.get("org_scope")
         group_by = slots.get("group_by")
         rows = execution_result.rows
 
-        scope_text = org_scope["value"] if org_scope else "全部范围"
+        scope_text = org_scope.get("value", "全部范围") if isinstance(org_scope, dict) else "全部范围"
         if not rows:
             return f'在{time_label}的{scope_text}范围内，未查询到与"{metric}"相关的数据。'
 
@@ -1076,7 +511,7 @@ class AnalyticsService:
         return f"{time_label}{scope_text}的{metric}汇总值为 {total_value}。"
 
     def _build_chart_spec(self, *, slots: dict, execution_result, metric_name: str) -> dict | None:
-        """生成前端可直接消费的最小图表描述。"""
+        """构建图表规格（供 Workflow 节点调用）。"""
 
         rows = execution_result.rows
         if not rows:
@@ -1092,10 +527,6 @@ class AnalyticsService:
                 "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
                 "series_field": None,
                 "dataset_ref": "main_result",
-                "data_mapping": {
-                    "primary_series": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
-                    "secondary_series": "compare_value" if compare_target in {"mom", "yoy"} else None,
-                },
             }
         if group_by in {"region", "station"}:
             return {
@@ -1105,10 +536,6 @@ class AnalyticsService:
                 "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
                 "series_field": None,
                 "dataset_ref": "main_result",
-                "data_mapping": {
-                    "primary_series": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
-                    "secondary_series": "compare_value" if compare_target in {"mom", "yoy"} else None,
-                },
             }
         return {
             "chart_type": "pie" if execution_result.row_count > 1 else "stacked_bar",
@@ -1117,10 +544,6 @@ class AnalyticsService:
             "y_field": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
             "series_field": None,
             "dataset_ref": "main_result",
-            "data_mapping": {
-                "primary_series": "current_value" if compare_target in {"mom", "yoy"} else "total_value",
-                "secondary_series": "compare_value" if compare_target in {"mom", "yoy"} else None,
-            },
         }
 
     def _build_audit_info(
@@ -1129,11 +552,11 @@ class AnalyticsService:
         *,
         permission_check_result: dict | None = None,
         data_scope_result: dict | None = None,
-        masking_result: DataMaskingResult | None = None,
+        masking_result=None,
         effective_filters: dict | None = None,
         guard_result=None,
     ) -> dict | None:
-        """构造前端可展示的最小审计摘要。"""
+        """构建审计信息（供 Workflow 节点调用）。"""
 
         if audit_record is None:
             return None
@@ -1146,10 +569,19 @@ class AnalyticsService:
             "blocked_reason": audit_record.get("blocked_reason"),
             "permission_check_result": permission_check_result,
             "data_scope_result": data_scope_result,
-            "masked_fields": masking_result.masked_fields if masking_result is not None else [],
+            "masked_fields": getattr(masking_result, "masked_fields", []) if masking_result else [],
             "effective_filters": effective_filters or {},
             "governance_decision": {
-                "action": masking_result.governance_decision if masking_result is not None else "no_masking_needed",
-                "guard_stage": getattr(guard_result, "governance_detail", None),
+                "action": getattr(masking_result, "governance_decision", "no_masking_needed") if masking_result else "no_masking_needed",
+                "guard_stage": getattr(guard_result, "governance_detail", None) if guard_result else None,
             },
         }
+
+    def _has_all_permissions(self, user_permissions: list[str], required_permissions: list[str]) -> bool:
+        """判断用户是否满足全部权限。"""
+
+        if not required_permissions:
+            return True
+        permission_set = set(user_permissions or [])
+        return all(permission in permission_set for permission in required_permissions)
+

@@ -22,7 +22,7 @@ from datetime import datetime
 from core.analytics.intent.schema import (
     AnalyticsIntent,
     CompareTarget,
-    RequiredQueryIntent,
+    RequiredQuery,
 )
 from core.analytics.metric_catalog import MetricCatalog
 from core.analytics.schema_registry import SchemaRegistry

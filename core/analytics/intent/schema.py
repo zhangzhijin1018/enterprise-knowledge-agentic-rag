@@ -402,3 +402,43 @@ class ClarificationResponse(BaseModel):
                 "partial_intent": intent.model_dump(exclude={"execution_plan"}),
             },
         )
+
+
+class IntentValidationResult(BaseModel):
+    """意图校验结果结构。
+
+    这是 AnalyticsIntentValidator 的输出，描述意图是否通过校验。
+
+    字段说明：
+    - valid：意图是否有效
+    - need_clarification：是否需要用户澄清
+    - missing_fields：缺失的字段列表
+    - ambiguous_fields：存在歧义的字段列表
+    - clarification_question：澄清问题
+    - errors：校验错误列表
+    - sanitized_intent：清洗后的意图（仅当 valid=True 时）
+    """
+
+    valid: bool = Field(description="意图是否通过校验")
+    need_clarification: bool = Field(description="是否需要用户澄清")
+    missing_fields: list[str] = Field(
+        default_factory=list,
+        description="缺失的必需字段列表"
+    )
+    ambiguous_fields: list[str] = Field(
+        default_factory=list,
+        description="存在歧义的字段列表"
+    )
+    clarification_question: str | None = Field(
+        default=None,
+        description="澄清问题（仅当 need_clarification=True 时）"
+    )
+    errors: list[str] = Field(
+        default_factory=list,
+        description="校验错误列表"
+    )
+    sanitized_intent: AnalyticsIntent | None = Field(
+        default=None,
+        description="清洗后的意图（仅当 valid=True 时）"
+    )
+

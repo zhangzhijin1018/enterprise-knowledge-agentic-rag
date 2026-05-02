@@ -1,11 +1,9 @@
-"""经营分析轻量快照构造层。
+"""经营分析轻量快照构造层（v2 纯 Workflow 链路）。
 
-为什么需要单独的 Snapshot Builder：
-1. 当前项目已经把 `task_run / slot_snapshot / clarification_event / analytics_result_repository`
-   的职责分开了，但如果上游继续到处手写 dict，边界仍然会慢慢变松；
-2. Repository sanitize 只是最后兜底，不能替代上游主动遵守边界；
-3. 因此这里提供一组统一 builder，让 Service 和 Workflow Nodes 在写入前就只构造
-   “轻量、必要、可恢复”的快照内容。
+v2 变更：
+- 移除对旧版 AnalyticsPlan 的依赖
+- 新增基于 AnalyticsIntent 的快照构造方法
+- build_slot_snapshot_payload 和 build_clarification_event_payload 改为接受 intent 参数
 
 设计原则：
 1. `task_run.input_snapshot` 只承载轻量输入摘要；
@@ -21,16 +19,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from core.agent.control_plane.analytics_planner import AnalyticsPlan
 from core.analytics.analytics_result_model import AnalyticsResult
+from core.analytics.intent.schema import AnalyticsIntent
 from core.security.auth import UserContext
 
 
 @dataclass(slots=True)
 class AnalyticsSnapshotBuilder:
-    """经营分析快照构造器。
+    """经营分析快照构造器（v2 纯 Workflow 链路）。
 
-    这层不负责真正落库，只负责在上游把 payload 先收紧成“边界正确的轻量快照”。
+    这层不负责真正落库，只负责在上游把 payload 先收紧成"边界正确的轻量快照"。
     """
 
     def build_input_snapshot(
@@ -41,23 +39,47 @@ class AnalyticsSnapshotBuilder:
         output_mode: str,
         need_sql_explain: bool,
         user_context: UserContext,
-        planner_slots: dict | None = None,
-        planning_source: str | None = None,
-        confidence: float | None = None,
+        intent: AnalyticsIntent | None = None,
     ) -> dict:
         """构造 task_run.input_snapshot。
 
-        这是“权威运行态”的轻量输入快照，只保存：
+        这是"权威运行态"的轻量输入快照，只保存：
         - 用户问了什么；
         - 请求希望返回什么粒度；
         - 谁在发起请求；
-        - Planner 产出的轻量槽位摘要。
+        - Intent 产出的轻量槽位摘要。
 
-        为什么不写重对象：
-        - `plan` 全量对象属于微观临时态；
-        - `sql_bundle / execution_result` 此时还不存在，也不应提前占位；
-        - 完整 `user_context.permissions` 体量大且变化频繁，因此只保留摘要。
+        v2 变更：planner_slots / planning_source / confidence 改为从 intent 提取。
         """
+
+        # 从 intent 提取槽位摘要
+        planner_slots = {}
+        if intent:
+            if intent.metric:
+                planner_slots["metric"] = intent.metric.metric_name or intent.metric.raw_text
+            if intent.time_range:
+                planner_slots["time_range"] = {
+                    "raw_text": intent.time_range.raw_text,
+                    "type": intent.time_range.type.value if hasattr(intent.time_range.type, "value") else intent.time_range.type,
+                    "value": intent.time_range.value,
+                }
+            if intent.org_scope:
+                planner_slots["org_scope"] = {
+                    "raw_text": intent.org_scope.raw_text,
+                    "type": intent.org_scope.type.value if hasattr(intent.org_scope.type, "value") else intent.org_scope.type,
+                    "name": intent.org_scope.name,
+                    "code": intent.org_scope.code,
+                    "value": intent.org_scope.name,  # 兼容旧格式
+                }
+            if intent.group_by:
+                planner_slots["group_by"] = intent.group_by
+            if intent.compare_target:
+                planner_slots["compare_target"] = (
+                    intent.compare_target.value if hasattr(intent.compare_target, "value") else intent.compare_target
+                )
+
+        planning_source = "llm_parser"
+        confidence = intent.confidence.overall if intent and intent.confidence else None
 
         return {
             "query": query,
@@ -65,7 +87,7 @@ class AnalyticsSnapshotBuilder:
             "output_mode": output_mode,
             "need_sql_explain": need_sql_explain,
             "user_context_summary": self._build_user_context_summary(user_context),
-            "planner_slots": planner_slots or {},
+            "planner_slots": planner_slots,
             "planning_source": planning_source,
             "confidence": confidence,
         }
@@ -73,7 +95,7 @@ class AnalyticsSnapshotBuilder:
     def build_output_snapshot(self, *, analytics_result: AnalyticsResult) -> dict:
         """构造 task_run.output_snapshot。
 
-        这是“权威运行态”的轻量输出快照。
+        这是"权威运行态"的轻量输出快照。
 
         为什么只接受 `AnalyticsResult` 而不是随便传 dict：
         - 统一结果对象已经明确区分了轻结果和重结果；
@@ -97,13 +119,13 @@ class AnalyticsSnapshotBuilder:
     ) -> dict:
         """构造 task_run.context_snapshot。
 
-        这是“权威运行态”的轻量上下文摘要，主要服务：
+        这是"权威运行态"的轻量上下文摘要，主要服务：
         - clarification 恢复；
         - run detail 排查；
         - 宏观层理解当前缺什么、下一步准备做什么。
 
         为什么不写 workflow 临时大对象：
-        - `plan / sql_bundle / execution_result / workflow_stage` 都属于微观临时态；
+        - `sql_bundle / execution_result / workflow_stage` 都属于微观临时态；
         - 它们对跨请求恢复并不是必需字段；
         - 如果把这些对象放进 context_snapshot，会再次把 task_run 变成微观状态垃圾桶。
         """
@@ -119,36 +141,49 @@ class AnalyticsSnapshotBuilder:
         }
         return {key: value for key, value in snapshot.items() if value not in (None, [], {})}
 
-    def build_slot_snapshot_payload(self, *, plan: AnalyticsPlan) -> dict:
-        """构造 slot_snapshot 写入载荷。
+    def build_slot_snapshot_payload(self, *, intent: AnalyticsIntent) -> dict:
+        """构造 slot_snapshot 写入载荷（v2 基于 AnalyticsIntent）。
 
-        这是“恢复执行态”，只保存补槽所需的最小字段。
+        这是"恢复执行态"，只保存补槽所需的最小字段。
         """
 
+        # 从 intent 提取槽位
+        collected_slots = {}
+        if intent.metric:
+            collected_slots["metric"] = intent.metric.metric_name or intent.metric.raw_text
+        if intent.time_range:
+            collected_slots["time_range"] = intent.time_range.raw_text
+        if intent.org_scope:
+            collected_slots["org_scope"] = intent.org_scope.raw_text
+        if intent.group_by:
+            collected_slots["group_by"] = intent.group_by
+        if intent.compare_target:
+            collected_slots["compare_target"] = (
+                intent.compare_target.value if hasattr(intent.compare_target, "value") else intent.compare_target
+            )
+
+        is_executable = not intent.need_clarification
+
         return {
-            "required_slots": plan.required_slots,
-            "collected_slots": plan.slots,
-            "missing_slots": plan.missing_slots,
-            "min_executable_satisfied": plan.is_executable,
-            "awaiting_user_input": not plan.is_executable,
-            "resume_step": "resume_after_analytics_slot_fill" if not plan.is_executable else "run_sql_pipeline",
+            "required_slots": ["metric", "time_range"],
+            "collected_slots": collected_slots,
+            "missing_slots": intent.missing_fields or [],
+            "min_executable_satisfied": is_executable,
+            "awaiting_user_input": intent.need_clarification,
+            "resume_step": "resume_after_analytics_slot_fill" if intent.need_clarification else "run_sql_pipeline",
         }
 
-    def build_clarification_event_payload(self, *, plan: AnalyticsPlan) -> dict:
-        """构造 clarification_event 写入载荷。
+    def build_clarification_event_payload(self, *, intent: AnalyticsIntent) -> dict:
+        """构造 clarification_event 写入载荷（v2 基于 AnalyticsIntent）。
 
-        这是“可审计的交互事件”，只保存：
+        这是"可审计的交互事件"，只保存：
         - 本轮追问文本；
         - 要补齐哪些槽位。
-
-        为什么不写 resolved_slots / user_reply：
-        - 这两类字段属于事件后续更新结果；
-        - 创建事件时不应预填执行期临时数据。
         """
 
         return {
-            "question_text": plan.clarification_question or "请补充经营分析关键条件",
-            "target_slots": plan.clarification_target_slots,
+            "question_text": intent.clarification_question or "请补充经营分析关键条件",
+            "target_slots": intent.missing_fields or [],
         }
 
     def _build_user_context_summary(self, user_context: UserContext) -> dict[str, Any]:
@@ -163,7 +198,7 @@ class AnalyticsSnapshotBuilder:
         为什么不把完整权限列表写进 input_snapshot：
         - 完整权限集合可能较大；
         - 权限真值以当前 `user_context` 和鉴权层为准；
-        - 这里更适合保留“当时请求是谁发起的”轻量摘要。
+        - 这里更适合保留"当时请求是谁发起的"轻量摘要。
         """
 
         return {

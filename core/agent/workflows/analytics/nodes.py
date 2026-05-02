@@ -1,17 +1,14 @@
-"""经营分析 LangGraph 样板节点（v2 重构版）。
+"""经营分析 LangGraph 样板节点（v2 纯 Workflow 链路）。
 
 重要变更（v2 链路收敛）：
-本轮重构后，统一主链路改造为：
-用户问句 -> LLMAnalyticsIntentParser 生成 AnalyticsIntent -> AnalyticsIntentValidator 校验
--> Clarification or SQL Builder -> SQL Guard -> SQL Gateway -> Summary / Chart / Insight / Report
-
-ReAct 不再作为默认主链路，只作为可选 repair/replan 能力预留。
+- 统一主链路：LLMAnalyticsIntentParser -> AnalyticsIntentValidator -> SQL Builder -> SQL Guard -> SQL Gateway -> Summary / Chart / Insight / Report
+- ReAct 已删除，不再作为可选能力
+- 移除了 _intent_to_plan / _plan_to_intent 转换函数
 
 设计原则：
 - 节点职责单一；
-- 优先复用现有 AnalyticsService 的稳定逻辑，不推翻已有实现；
-- 当前已经通过 Workflow Adapter 接入真实经营分析主链，
-  但仍然保留对既有 Service 内部稳定逻辑的复用，避免一次性重写。
+- 复用 AnalyticsService 的辅助组件（缓存、Registry等）
+- 不再依赖旧版 AnalyticsPlan
 """
 
 from __future__ import annotations
@@ -27,11 +24,7 @@ from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
 from core.config.settings import get_settings
-from core.agent.control_plane.analytics_planner import AnalyticsPlan
 from core.agent.workflows.analytics.degradation import AnalyticsWorkflowDegradationController
-from core.agent.workflows.analytics.react.planner import AnalyticsReactPlanner
-from core.agent.workflows.analytics.react.policy import AnalyticsReactPlanningPolicy
-from core.agent.workflows.analytics.react.tools import AnalyticsReactToolRegistry
 from core.agent.workflows.analytics.retry_policy import AnalyticsWorkflowRetryController
 from core.agent.workflows.analytics.state import AnalyticsWorkflowOutcome, AnalyticsWorkflowStage
 from core.services.analytics_service import AnalyticsService
@@ -40,7 +33,19 @@ from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
 
 
 class AnalyticsWorkflowNodes:
-    """经营分析微观工作流节点集合（v2 重构版）。"""
+    """经营分析微观工作流节点集合（v2 纯 Workflow 链路）。
+
+    主链路：
+    1. analytics_entry：入口校验、创建会话
+    2. analytics_plan：调用 LLMAnalyticsIntentParser 生成 AnalyticsIntent
+    3. analytics_validate_slots：校验意图是否满足执行条件
+    4. analytics_clarify：触发澄清
+    5. analytics_build_sql：构建 SQL
+    6. analytics_guard_sql：安全校验
+    7. analytics_execute_sql：执行查询
+    8. analytics_summarize：生成结果
+    9. analytics_finish：结束
+    """
 
     def __init__(self, analytics_service: AnalyticsService) -> None:
         self.analytics_service = analytics_service
@@ -48,31 +53,14 @@ class AnalyticsWorkflowNodes:
         self.degradation_controller = AnalyticsWorkflowDegradationController()
         self.settings = get_settings()
 
-        # 新版统一意图解析器和校验器
+        # v2：统一意图解析器（使用 MetricResolver）
         self.intent_parser = LLMAnalyticsIntentParser(
             settings=self.settings,
-            metric_catalog=analytics_service.metric_catalog,
-            schema_registry=analytics_service.schema_registry,
         )
         self.intent_validator = AnalyticsIntentValidator(
             metric_catalog=analytics_service.metric_catalog,
             schema_registry=analytics_service.schema_registry,
         )
-
-        # 旧版 ReAct Planner（保留作为可选 repair/replan 能力）
-        self.react_policy = analytics_service.analytics_react_policy or AnalyticsReactPlanningPolicy(
-            settings=self.settings,
-        )
-        self.react_planner = analytics_service.analytics_react_planner
-        if self.react_planner is None and self.settings.analytics_react_planner_enabled:
-            self.react_planner = AnalyticsReactPlanner(
-                base_planner=analytics_service.analytics_planner,
-                tool_registry=AnalyticsReactToolRegistry(
-                    metric_catalog=analytics_service.metric_catalog,
-                    schema_registry=analytics_service.schema_registry,
-                ),
-                settings=self.settings,
-            )
 
     def analytics_entry(self, state: dict) -> dict:
         """工作流入口节点。
@@ -143,205 +131,44 @@ class AnalyticsWorkflowNodes:
         return state
 
     def analytics_plan(self, state: dict) -> dict:
-        """规划节点（新版统一主链路）。
+        """规划节点（v2 纯 Workflow 链路）。
 
         核心职责：
         - 调用 LLMAnalyticsIntentParser 生成结构化 AnalyticsIntent；
-        - 不再由本地规则先判断 simple/complex；
-        - simple / complex / required_queries 由 LLM 在 AnalyticsIntent 中输出；
         - LLM 只生成结构化 AnalyticsIntent，不生成 SQL。
-
-        ReAct 作为可选 repair/replan 能力预留，本轮不作为默认主链路。
         """
 
-        if state.get("recovered_plan") is not None:
-            plan = state["recovered_plan"]
-            intent = self._plan_to_intent(plan)
-        else:
-            # 调用新版统一意图解析器
-            parser_result = self.intent_parser.parse(
-                query=state["query"],
-                conversation_memory=state.get("conversation_memory"),
-                trace_id=state.get("trace_id"),
-                run_id=state.get("run_id"),
-            )
+        # 调用新版统一意图解析器
+        parser_result = self.intent_parser.parse(
+            query=state["query"],
+            conversation_memory=state.get("conversation_memory"),
+            trace_id=state.get("trace_id"),
+            run_id=state.get("run_id"),
+        )
 
-            intent = parser_result.intent
-            state["planning_source"] = parser_result.planning_source
-
-            # 将 AnalyticsIntent 转换为旧版 AnalyticsPlan（兼容保留）
-            plan = self._intent_to_plan(intent)
-            state["plan"] = plan
+        intent = parser_result.intent
+        state["planning_source"] = parser_result.planning_source
 
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_PLAN
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         state["intent"] = intent
         return state
 
-    def _plan_to_intent(self, plan: AnalyticsPlan) -> AnalyticsIntent:
-        """将旧版 AnalyticsPlan 转换为新版 AnalyticsIntent（兼容转换）。"""
-
-        from core.analytics.intent.schema import (
-            ComplexityType,
-            IntentConfidence,
-            MetricIntent,
-            OrgScopeIntent,
-            PlanningMode,
-            TimeRangeIntent,
-        )
-
-        metric_intent = None
-        if plan.slots.get("metric"):
-            metric_def = self.analytics_service.metric_catalog.resolve_metric(plan.slots["metric"])
-            metric_intent = MetricIntent(
-                raw_text=plan.slots["metric"],
-                metric_code=metric_def.metric_code if metric_def else None,
-                metric_name=metric_def.name if metric_def else None,
-                confidence=0.8,
-            )
-
-        time_range_intent = None
-        if plan.slots.get("time_range"):
-            time_range_data = plan.slots["time_range"]
-            if isinstance(time_range_data, dict):
-                time_range_intent = TimeRangeIntent(**time_range_data)
-
-        org_scope_intent = None
-        if plan.slots.get("org_scope"):
-            org_scope_data = plan.slots["org_scope"]
-            if isinstance(org_scope_data, dict):
-                org_scope_intent = OrgScopeIntent(**org_scope_data)
-
-        return AnalyticsIntent(
-            task_type="analytics_query",
-            complexity=ComplexityType.SIMPLE,
-            planning_mode=PlanningMode.CLARIFICATION if not plan.is_executable else PlanningMode.DIRECT,
-            analysis_intent="simple_query",
-            metric=metric_intent,
-            time_range=time_range_intent,
-            org_scope=org_scope_intent,
-            group_by=plan.slots.get("group_by"),
-            compare_target=plan.slots.get("compare_target", "none"),
-            confidence=IntentConfidence(
-                overall=plan.confidence,
-                metric=0.8 if plan.slots.get("metric") else None,
-                time_range=0.8 if plan.slots.get("time_range") else None,
-            ),
-            need_clarification=not plan.is_executable,
-            clarification_question=plan.clarification_question,
-            missing_fields=plan.missing_slots,
-            ambiguous_fields=[],
-        )
-
-    def _intent_to_plan(self, intent: AnalyticsIntent) -> AnalyticsPlan:
-        """将新版 AnalyticsIntent 转换为旧版 AnalyticsPlan（兼容保留）。
-
-        重要：这个转换必须确保 slots 格式与 SQL Builder 的期望格式完全匹配。
-        SQL Builder 期望：
-        - time_range: {start_date, end_date, label}
-        - org_scope: {type, value, name}
-        """
-
-        slots = {}
-
-        # 处理 metric
-        if intent.metric:
-            slots["metric"] = intent.metric.metric_name or intent.metric.raw_text
-
-        # 处理 time_range（必须转换为 SQL Builder 期望的格式）
-        if intent.time_range:
-            time_range_dict = {
-                "raw_text": intent.time_range.raw_text,
-                "type": (
-                    intent.time_range.type.value
-                    if hasattr(intent.time_range.type, "value")
-                    else intent.time_range.type
-                ),
-            }
-            # 如果有绝对时间范围，提供 start_date 和 end_date
-            if intent.time_range.start:
-                time_range_dict["start_date"] = intent.time_range.start
-            if intent.time_range.end:
-                time_range_dict["end_date"] = intent.time_range.end
-            if intent.time_range.value:
-                time_range_dict["label"] = intent.time_range.value
-            slots["time_range"] = time_range_dict
-
-        # 处理 org_scope（转换为 SQL Builder 期望的格式）
-        if intent.org_scope:
-            org_scope_dict = {
-                "raw_text": intent.org_scope.raw_text,
-            }
-            if intent.org_scope.type:
-                org_scope_dict["type"] = (
-                    intent.org_scope.type.value
-                    if hasattr(intent.org_scope.type, "value")
-                    else intent.org_scope.type
-                )
-            if intent.org_scope.name:
-                org_scope_dict["name"] = intent.org_scope.name
-                org_scope_dict["value"] = intent.org_scope.name  # SQL Builder 用 value
-            if intent.org_scope.code:
-                org_scope_dict["code"] = intent.org_scope.code
-            slots["org_scope"] = org_scope_dict
-
-        # 处理其他字段
-        if intent.group_by:
-            slots["group_by"] = intent.group_by
-        if intent.compare_target:
-            slots["compare_target"] = (
-                intent.compare_target.value
-                if hasattr(intent.compare_target, "value")
-                else intent.compare_target
-            )
-        if intent.sort_by:
-            slots["sort_by"] = intent.sort_by
-        if intent.sort_direction:
-            slots["sort_direction"] = (
-                intent.sort_direction.value
-                if hasattr(intent.sort_direction, "value")
-                else intent.sort_direction
-            )
-        if intent.top_n:
-            slots["top_n"] = intent.top_n
-
-        return AnalyticsPlan(
-            intent="business_analysis",
-            slots=slots,
-            required_slots=["metric", "time_range"],
-            missing_slots=intent.missing_fields,
-            conflict_slots=[],
-            is_executable=not intent.need_clarification,
-            clarification_question=intent.clarification_question,
-            clarification_target_slots=intent.missing_fields,
-            clarification_type="missing_slots" if intent.missing_fields else None,
-            clarification_reason=None,
-            clarification_suggested_options=[],
-            data_source="local_analytics",
-            planning_source="llm_parser",
-            confidence=intent.confidence.overall if intent.confidence else 0.5,
-            validation_reason="intent_parser_output",
-        )
-
     def analytics_validate_slots(self, state: dict) -> dict:
-        """槽位验证节点（新版适配 AnalyticsIntentValidator）。
+        """槽位验证节点（v2 纯 Workflow 链路）。
 
         职责：
         - 创建 task_run；
         - 保存 slot snapshot；
         - 调用 AnalyticsIntentValidator 进行校验；
         - 判断进入 clarify 还是继续 SQL 执行。
-
-        本轮重构后，校验逻辑从本地 SlotValidator 升级为 AnalyticsIntentValidator，
-        Validator 是硬边界，决定 AnalyticsIntent 能否进入 SQL Builder。
         """
 
         intent = state.get("intent")
-        plan = state["plan"]
         conversation = state["conversation"]
         user_context = state["user_context"]
 
-        # 调用新版意图校验器
+        # 调用意图校验器
         validation_result = self.intent_validator.validate(
             intent=intent,
             user_context=user_context,
@@ -368,9 +195,7 @@ class AnalyticsWorkflowNodes:
                     output_mode=state["output_mode"],
                     need_sql_explain=state.get("need_sql_explain", False),
                     user_context=user_context,
-                    planner_slots=plan.slots,
-                    planning_source=state.get("planning_source", plan.planning_source),
-                    confidence=plan.confidence,
+                    intent=intent,
                 ),
                 risk_level="medium",
                 review_status="not_required",
@@ -390,12 +215,13 @@ class AnalyticsWorkflowNodes:
             self.analytics_service.task_run_repository.create_slot_snapshot(
                 run_id=task_run["run_id"],
                 task_type="analytics",
-                **self.analytics_service.snapshot_builder.build_slot_snapshot_payload(plan=plan),
+                **self.analytics_service.snapshot_builder.build_slot_snapshot_payload(intent=intent),
             )
         state["task_run"] = task_run
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_VALIDATE_SLOTS
 
         # 根据 Validator 结果决定 workflow 走向
+        # v2：直接使用 intent.need_clarification
         if validation_result and not validation_result.valid:
             if validation_result.need_clarification:
                 state["clarification_needed"] = True
@@ -404,8 +230,9 @@ class AnalyticsWorkflowNodes:
             else:
                 state["workflow_outcome"] = AnalyticsWorkflowOutcome.FAIL
         else:
-            state["clarification_needed"] = not plan.is_executable
-            if not plan.is_executable:
+            need_clarify = intent.need_clarification if intent else False
+            state["clarification_needed"] = need_clarify
+            if need_clarify:
                 state["workflow_outcome"] = AnalyticsWorkflowOutcome.CLARIFY
                 state["next_step"] = "analytics_clarify"
             else:
@@ -415,18 +242,64 @@ class AnalyticsWorkflowNodes:
         return state
 
     def analytics_clarify(self, state: dict) -> dict:
-        """澄清节点。
+        """澄清节点（v2 纯 Workflow 链路）。
 
         职责：
         - 当最小可执行条件不满足时，生成结构化 clarification 响应；
-        - 当前阶段仍复用现有 AnalyticsService 的澄清落库和返回格式。
+        - 复用 snapshot_builder 构建澄清事件。
         """
 
-        state["final_response"] = self.analytics_service._build_clarification_response(
+        intent = state.get("intent")
+
+        # 构建澄清事件
+        clarification = self.analytics_service.task_run_repository.create_clarification_event(
+            run_id=state["task_run"]["run_id"],
             conversation_id=state["conversation_id"],
-            task_run=state["task_run"],
-            plan=state["plan"],
+            **self.analytics_service.snapshot_builder.build_clarification_event_payload(intent=intent),
         )
+
+        # 更新 task_run 状态
+        self.analytics_service.task_run_repository.update_task_run(
+            state["task_run"]["run_id"],
+            status="awaiting_user_clarification",
+            sub_status="awaiting_slot_fill",
+            context_snapshot=self.analytics_service.snapshot_builder.build_context_snapshot(
+                slots=intent.missing_fields if intent else [],
+                missing_slots=intent.missing_fields if intent else [],
+                clarification_type="missing_slots" if intent and intent.missing_fields else None,
+                resume_step="resume_after_analytics_slot_fill",
+            ),
+        )
+
+        # 添加 assistant 消息
+        self.analytics_service.conversation_repository.add_message(
+            conversation_id=state["conversation_id"],
+            role="assistant",
+            message_type="clarification",
+            content=clarification["question_text"],
+            related_run_id=state["task_run"]["run_id"],
+            structured_content={
+                "clarification_id": clarification["clarification_id"],
+                "target_slots": clarification["target_slots"],
+            },
+        )
+
+        state["final_response"] = {
+            "data": {
+                "clarification": {
+                    "clarification_id": clarification["clarification_id"],
+                    "question": clarification["question_text"],
+                    "target_slots": clarification["target_slots"],
+                }
+            },
+            "meta": {
+                "status": "awaiting_user_clarification",
+                "sub_status": "awaiting_slot_fill",
+                "run_id": state["task_run"]["run_id"],
+                "trace_id": state["trace_id"],
+                "conversation_id": state["conversation_id"],
+            },
+        }
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_CLARIFY
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CLARIFY
         state["clarification_needed"] = True
@@ -442,14 +315,13 @@ class AnalyticsWorkflowNodes:
 
         新版适配：
         - 优先使用 state["intent"] 生成 SQL；
-        - 如果 intent 中缺少必要信息，回退到 plan.slots；
+        
         - 支持 simple 和 complex 两种模式。
         """
 
         t0 = time.monotonic()
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_BUILD_SQL
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
-        plan = state["plan"]
         intent = state.get("intent")
         task_run = state["task_run"]
         user_context = state["user_context"]
@@ -459,17 +331,10 @@ class AnalyticsWorkflowNodes:
             if intent is not None:
                 return self._build_sql_from_intent(
                     intent=intent,
-                    plan=plan,
                     user_context=user_context,
                     task_run=task_run,
                 )
-            else:
-                # 回退到旧的 plan.slots 方式
-                return self._build_sql_from_slots(
-                    plan=plan,
-                    user_context=user_context,
-                    task_run=task_run,
-                )
+            
 
         (
             metric_definition,
@@ -492,10 +357,52 @@ class AnalyticsWorkflowNodes:
         state["timing"]["sql_build_ms"] = round((time.monotonic() - t0) * 1000, 1)
         return state
 
+
+
+    def _intent_to_slots(self, intent: 'AnalyticsIntent') -> dict:
+        """从 AnalyticsIntent 提取 slots 字典（供下游复用）。"""
+        slots = {}
+        if intent.metric:
+            slots['metric'] = intent.metric.metric_name or intent.metric.raw_text
+        if intent.time_range:
+            time_range_data = {
+                'raw_text': intent.time_range.raw_text,
+                'type': intent.time_range.type.value if hasattr(intent.time_range.type, 'value') else intent.time_range.type,
+            }
+            if intent.time_range.value:
+                time_range_data['label'] = intent.time_range.value
+            if intent.time_range.start:
+                time_range_data['start_date'] = intent.time_range.start
+            if intent.time_range.end:
+                time_range_data['end_date'] = intent.time_range.end
+            slots['time_range'] = time_range_data
+        if intent.org_scope:
+            slots['org_scope'] = {
+                'raw_text': intent.org_scope.raw_text,
+                'type': intent.org_scope.type.value if hasattr(intent.org_scope.type, 'value') else intent.org_scope.type,
+                'name': intent.org_scope.name,
+                'code': intent.org_scope.code,
+                'value': intent.org_scope.name or intent.org_scope.raw_text,
+            }
+        if intent.group_by:
+            slots['group_by'] = intent.group_by
+        if intent.compare_target:
+            slots['compare_target'] = (
+                intent.compare_target.value if hasattr(intent.compare_target, 'value') else intent.compare_target
+            )
+        if intent.top_n:
+            slots['top_n'] = intent.top_n
+        if intent.sort_by:
+            slots['sort_by'] = intent.sort_by
+        if intent.sort_direction:
+            slots['sort_direction'] = (
+                intent.sort_direction.value if hasattr(intent.sort_direction, 'value') else intent.sort_direction
+            )
+        return slots
+
     def _build_sql_from_intent(
         self,
         intent: "AnalyticsIntent",
-        plan,
         user_context,
         task_run: dict,
     ) -> tuple:
@@ -561,9 +468,9 @@ class AnalyticsWorkflowNodes:
             task_run["run_id"],
             sub_status="building_sql",
             context_snapshot=self.analytics_service.snapshot_builder.build_context_snapshot(
-                slots=plan.slots if hasattr(plan, "slots") else {},
-                planning_source=getattr(plan, "planning_source", "intent_parser"),
-                confidence=getattr(plan, "confidence", 0.8),
+                slots=self._intent_to_slots(intent),
+                planning_source="llm_parser",
+                confidence=intent.confidence.overall if intent.confidence else 0.8,
                 resume_step="run_sql_pipeline",
             ),
         )
@@ -583,60 +490,6 @@ class AnalyticsWorkflowNodes:
             sql_bundle,
         )
 
-    def _build_sql_from_slots(self, plan, user_context, task_run: dict) -> tuple:
-        """从旧版 plan.slots 构建 SQL（兼容保留）。"""
-
-        metric_definition = self.analytics_service._get_cached_metric(plan.slots.get("metric"))
-        if metric_definition is None:
-            raise AppException(
-                error_code=error_codes.ANALYTICS_QUERY_FAILED,
-                message="未识别到可执行指标",
-                status_code=400,
-                detail={"metric": plan.slots.get("metric")},
-            )
-        data_source_definition = (
-            self.analytics_service.data_source_registry.get_data_source(plan.data_source)
-            if self.analytics_service.data_source_registry is not None
-            else self.analytics_service.schema_registry.get_data_source(plan.data_source)
-        )
-        table_definition = self.analytics_service.schema_registry.get_table_definition(
-            table_name=metric_definition.table_name,
-            data_source=data_source_definition.key,
-        )
-        permission_check_result = self.analytics_service._assert_metric_permission(
-            metric_definition=metric_definition,
-            user_context=user_context,
-        )
-        permission_check_result["data_source"] = self.analytics_service._assert_data_source_permission(
-            data_source_definition=data_source_definition,
-            user_context=user_context,
-        )
-        data_scope_result = self.analytics_service._build_data_scope_result(
-            table_definition=table_definition,
-            user_context=user_context,
-        )
-        self.analytics_service.task_run_repository.update_task_run(
-            task_run["run_id"],
-            sub_status="building_sql",
-            context_snapshot=self.analytics_service.snapshot_builder.build_context_snapshot(
-                slots=plan.slots,
-                planning_source=plan.planning_source,
-                confidence=plan.confidence,
-                resume_step="run_sql_pipeline",
-            ),
-        )
-        sql_bundle = self.analytics_service.sql_builder.build(
-            plan.slots,
-            department_code=user_context.department_code,
-        )
-        return (
-            metric_definition,
-            data_source_definition,
-            table_definition,
-            permission_check_result,
-            data_scope_result,
-            sql_bundle,
-        )
 
     def analytics_guard_sql(self, state: dict) -> dict:
         """SQL Guard 节点。
@@ -686,7 +539,6 @@ class AnalyticsWorkflowNodes:
 
         t2 = time.monotonic()
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_EXECUTE_SQL
-        plan = state["plan"]
         task_run = state["task_run"]
         user_context = state["user_context"]
         sql_bundle = state["sql_bundle"]
@@ -694,12 +546,14 @@ class AnalyticsWorkflowNodes:
         table_definition = state["table_definition"]
         permission_check_result = state["permission_check_result"]
         data_scope_result = state["data_scope_result"]
+        intent = state.get("intent")
 
         self.analytics_service.task_run_repository.update_task_run(
             task_run["run_id"],
             status="executing",
             sub_status="running_sql",
         )
+
         def _execute_sql():
             return self.analytics_service.sql_gateway.execute_readonly_query(
                 SQLReadQueryRequest(
@@ -710,8 +564,8 @@ class AnalyticsWorkflowNodes:
                     trace_id=task_run["trace_id"],
                     run_id=task_run["run_id"],
                     metadata={
-                        "planning_source": plan.planning_source,
-                        "confidence": plan.confidence,
+                        "planning_source": "llm_parser",
+                        "confidence": intent.confidence.overall if intent and intent.confidence else 0.8,
                     },
                 )
             )
@@ -799,10 +653,10 @@ class AnalyticsWorkflowNodes:
         - 构造统一 AnalyticsResult 对象。
         """
 
-        plan = state["plan"]
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_SUMMARIZE
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         output_mode = state["output_mode"]
+        intent = state.get("intent")
         execution_result = state["execution_result"]
         masking_result = state["masking_result"]
         audit_record = state["audit_record"]
@@ -812,15 +666,16 @@ class AnalyticsWorkflowNodes:
         data_scope_result = state["data_scope_result"]
         need_sql_explain = bool(state.get("need_sql_explain"))
 
-        summary = self.analytics_service._build_summary(plan.slots, execution_result)
+        slots = self._intent_to_slots(state["intent"])
+        summary = self.analytics_service._build_summary(slots, execution_result)
         state["summary"] = summary
         sql_explain = None
         if need_sql_explain:
             sql_explain = (
                 "当前阶段采用 schema-aware 受控模板 SQL。"
-                f"主指标={plan.slots['metric']}，时间范围={plan.slots['time_range'].get('label') if isinstance(plan.slots.get('time_range'), dict) else 'unknown'}，"
-                f"group_by={plan.slots.get('group_by') or 'none'}，"
-                f"compare_target={plan.slots.get('compare_target') or 'none'}，"
+                f"主指标={slots.get('metric') or 'unknown'}，时间范围={slots.get('time_range', {}).get('label', 'unknown')}，"
+                f"group_by={slots.get('group_by') or 'none'}，"
+                f"compare_target={slots.get('compare_target') or 'none'}，"
                 f"data_source={execution_result.data_source}。"
             )
 
@@ -857,9 +712,9 @@ class AnalyticsWorkflowNodes:
             t4 = time.monotonic()
             try:
                 chart_spec = self.analytics_service._build_chart_spec(
-                    slots=plan.slots,
+                    slots=self._intent_to_slots(intent),
                     execution_result=execution_result,
-                    metric_name=plan.slots["metric"],
+                    metric_name=self._intent_to_slots(intent).get("metric"),
                 )
             except Exception as exc:  # pragma: no cover - 降级保护
                 self.degradation_controller.mark_degraded(
@@ -873,7 +728,7 @@ class AnalyticsWorkflowNodes:
                     node_name="analytics_summarize",
                     state=state,
                     action=lambda: self.analytics_service.insight_builder.build(
-                        slots=plan.slots,
+                        slots=self._intent_to_slots(intent),
                         rows=masking_result.rows,
                         row_count=execution_result.row_count,
                     ),
@@ -939,10 +794,10 @@ class AnalyticsWorkflowNodes:
             latency_ms=execution_result.latency_ms,
             data_source=execution_result.data_source,
             metric_scope=sql_bundle["metric_scope"],
-            compare_target=plan.slots.get("compare_target"),
-            group_by=plan.slots.get("group_by"),
-            slots=plan.slots,
-            planning_source=plan.planning_source,
+            compare_target=sql_bundle.get("compare_target"),
+            group_by=sql_bundle.get("group_by"),
+            slots=self._intent_to_slots(intent),
+            planning_source="llm_parser",
             columns=execution_result.columns,
             rows=execution_result.rows,
             masked_columns=masking_result.columns,
@@ -997,8 +852,7 @@ class AnalyticsWorkflowNodes:
         analytics_result = state["analytics_result"]
         task_run = state["task_run"]
         conversation_id = state["conversation_id"]
-        plan = state["plan"]
-
+        intent = state.get("intent")
         # finish 节点只把轻量输出摘要写回 task_run。
         # 重结果继续交给 analytics_result_repository，避免 output_snapshot 再次膨胀。
         lightweight_snapshot = self.analytics_service.snapshot_builder.build_output_snapshot(
@@ -1029,15 +883,15 @@ class AnalyticsWorkflowNodes:
         self.analytics_service.conversation_repository.upsert_memory(
             conversation_id,
             last_route="analytics",
-            last_metric=plan.slots.get("metric"),
-            last_time_range=plan.slots.get("time_range") or {},
-            last_org_scope=plan.slots.get("org_scope") or {},
+            last_metric=self._intent_to_slots(intent).get("metric"),
+            last_time_range=self._intent_to_slots(intent).get("time_range") or {},
+            last_org_scope=self._intent_to_slots(intent).get("org_scope") or {},
             short_term_memory={
                 "last_analytics_run_id": task_run["run_id"],
-                "last_group_by": plan.slots.get("group_by"),
-                "last_compare_target": plan.slots.get("compare_target"),
-                "last_top_n": plan.slots.get("top_n"),
-                "last_sort_direction": plan.slots.get("sort_direction"),
+                "last_group_by": self._intent_to_slots(intent).get("group_by"),
+                "last_compare_target": self._intent_to_slots(intent).get("compare_target"),
+                "last_top_n": self._intent_to_slots(intent).get("top_n"),
+                "last_sort_direction": self._intent_to_slots(intent).get("sort_direction"),
             },
         )
         if state["output_mode"] == "lite":

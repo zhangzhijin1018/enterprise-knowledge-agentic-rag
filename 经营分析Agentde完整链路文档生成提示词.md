@@ -604,3 +604,23 @@ Report Blocks 示例内容可以使用：
 5. 是否给关键字段加了中文解释；
 6. 是否更新了 `docs/ANALYTICS_AGENT_ACCEPTANCE_CHECKLIST.md`；
 7. 后续如何阅读这份文档来理解经营分析完整链路。
+
+---
+
+# 九、场景覆盖检查清单
+
+文档应覆盖以下场景（每个场景都需要有用户问句 + 执行流程 + 字段说明）：
+
+| 编号 | 场景 | 说明 |
+|-----|------|------|
+| 1 | 简单明确查询 | 完整流程，无中断 |
+| 2 | 缺少指标澄清 | 触发澄清节点 |
+| 3 | 缺少时间澄清 | 触发澄清节点 |
+| 4 | 指标歧义澄清 | 触发澄清节点 |
+| 5 | 澄清后恢复执行 | resume_from_clarification |
+| 6 | 复杂同比分析 | complex 模式 + required_queries |
+| 7 | SQL Guard 阻断 | 安全校验失败 |
+| 8 | SQL 执行临时失败重试 | retry_policy |
+| 9 | 图表/洞察/报告降级 | degradation |
+| 10 | 导出报告 | export_service |
+| 11 | 高风险导出人工审核 | review_service |

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.analytics.intent.query_planner import ExecutionPlan, ExecutionPhase, ExecutionStrategy
-from core.analytics.schema_registry import SchemaRegistry, get_schema_registry
+from core.analytics.schema_registry import SchemaRegistry
 from core.tools.sql.sql_gateway import SQLGateway
 
 
