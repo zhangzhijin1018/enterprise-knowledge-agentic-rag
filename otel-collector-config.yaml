@@ -1,0 +1,114 @@
+# =============================================================================
+# OpenTelemetry Collector 配置文件
+# =============================================================================
+#
+# OTel Collector 负责接收来自应用的 Trace、Metrics、Logs 数据，
+# 然后转发到各个后端存储。
+#
+# 数据流：
+#   App (OTLP) → OTel Collector → Prometheus (Metrics)
+#                           → Tempo (Traces)
+#                           → Loki (Logs - 可选)
+#
+# =============================================================================
+
+receivers:
+  # OTLP 接收器 - 接收应用发送的 Trace 和 Metrics
+  otlp:
+    protocols:
+      # gRPC 接收器（推荐，用于生产环境）
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # 接收超时设置
+        keepalive:
+          server_parameters:
+            max_connection_idle: 5m
+      # HTTP 接收器（备用）
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Prometheus 接收器 - 接收 prometheus_client 暴露的指标
+  prometheus:
+    config:
+      scrape_configs:
+        # 抓取 OTel Collector 自身指标
+        - job_name: 'otel-collector'
+          static_configs:
+            - targets: ['localhost:8888']
+
+        # 抓取应用指标（根据实际情况修改）
+        - job_name: 'agent-platform'
+          static_configs:
+            - targets: ['host.docker.internal:8000']
+          metrics_path: '/metrics'
+          scrape_interval: 15s
+
+processors:
+  # 批处理器 - 批量发送数据，提高性能
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+  # 内存limiter - 防止内存溢出
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # 属性处理器 - 修改 span 属性
+  # 可用于添加、删除、重命名属性
+  transform:
+    trace_statements:
+      - context: span
+        statements:
+          # 添加服务名作为属性
+          - replace_pattern(attributes["service.name"], "^(.*)$", "agent-platform")
+
+exporters:
+  # Prometheus 导出器 - 将指标发送到 Prometheus
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "otel"
+    const_labels:
+      service: agent-platform
+
+  # OTLP 导出器 - 将 Trace 发送到 Tempo
+  otlp:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Jaeger 导出器（备用）
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+  # Loki 导出器（可选，用于日志）
+  # loki:
+  #   endpoint: http://loki:3100/loki/api/v1/push
+
+  # 控制台导出器（调试用）
+  console:
+    # 开启调试输出
+    debug: false
+
+service:
+  pipelines:
+    # Trace 管道：接收 → 处理 → 发送
+    traces:
+      receivers: [otlp]
+      processors: [batch, memory_limiter]
+      exporters: [otlp, prometheus, console]
+
+    # Metrics 管道：接收 → 处理 → 发送
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [batch, memory_limiter]
+      exporters: [prometheus, console]
+
+    # Logs 管道（可选）
+    # logs:
+    #   receivers: [otlp]
+    #   processors: [batch, memory_limiter]
+    #   exporters: [loki, console]

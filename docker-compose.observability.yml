@@ -1,0 +1,178 @@
+# =============================================================================
+# Docker Compose - 可观测性后端服务
+# =============================================================================
+#
+# 本配置文件用于部署可观测性后端服务：
+# - Prometheus: 指标采集和存储
+# - Grafana: 可视化平台
+# - Loki: 日志存储
+# - Tempo: 链路追踪存储
+# - OpenTelemetry Collector: 数据收集和转发
+#
+# 使用方式：
+#   docker-compose -f docker-compose.observability.yml up -d
+#
+# 访问地址：
+#   - Grafana: http://localhost:3000 (admin/admin)
+#   - Prometheus: http://localhost:9090
+#   - Tempo: http://localhost:3200
+#   - Loki: http://localhost:3100
+#   - OTel Collector: http://localhost:4317 (gRPC)
+#
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # OpenTelemetry Collector
+  # ==========================================================================
+  # OTel Collector 是数据收集的中间层，接收来自应用的 Trace、Metrics、Logs
+  # 然后转发到各个后端存储
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: otel-collector
+    command:
+      - "--config=/etc/otel-collector-config.yaml"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      # OTLP gRPC 接收端点
+      - "4317:4317"
+      # OTLP HTTP 接收端点
+      - "4318:4318"
+      # Metrics 导出端点（Prometheus 抓取用）
+      - "8888:8888"
+      # PrometheusExporter 指标
+      - "8889:8889"
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "localhost:13133"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==========================================================================
+  # Prometheus
+  # ==========================================================================
+  # Prometheus 是时序数据库，用于存储和查询指标数据
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'  # 允许热加载配置
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==========================================================================
+  # Grafana
+  # ==========================================================================
+  # Grafana 是可视化平台，支持 Prometheus、Loki、Tempo 等数据源
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: grafana
+    environment:
+      # 禁用默认登录（首次登录需要设置密码）
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      # 允许用户注册
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # 默认主题
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=tempo
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+  # ==========================================================================
+  # Loki
+  # ==========================================================================
+  # Loki 是日志聚合系统，专门为 Prometheus 设计
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    command:
+      - '-config.file=/etc/loki/local-config.yaml'
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==========================================================================
+  # Tempo
+  # ==========================================================================
+  # Tempo 是分布式追踪后端，存储 trace 数据
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: tempo
+    command:
+      - "-config.file=/etc/tempo.yaml"
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      # Tempo GRPC server (用于查询)
+      - "9095:9095"
+      # Tempo HTTP server
+      - "3200:3200"
+    networks:
+      - observability
+    restart: unless-stopped
+
+# =============================================================================
+# 网络定义
+# =============================================================================
+
+networks:
+  observability:
+    driver: bridge
+    name: observability-network
+
+# =============================================================================
+# 卷定义
+# =============================================================================
+
+volumes:
+  prometheus-data:
+    name: prometheus-data
+  grafana-data:
+    name: grafana-data
+  loki-data:
+    name: loki-data
+  tempo-data:
+    name: tempo-data

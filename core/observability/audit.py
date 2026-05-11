@@ -2,35 +2,36 @@
 
 该模块提供企业级 Agent 平台的审计能力，用于记录安全和合规相关事件。
 
-什么是审计日志？
----------------
-审计日志是系统安全的核心组成部分，记录所有与安全、合规相关的操作。
-
-审计 vs 普通日志的区别：
-| 维度 | 普通日志 | 审计日志 |
-|------|----------|----------|
-| 目的 | 调试、监控 | 合规、安全 |
-| 内容 | 技术细节 | 业务操作 |
-| 保存 | 短期 | 长期（通常1-5年）|
-| 访问 | 开发运维 | 安全合规团队 |
-| 格式 | 灵活 | 标准化 |
-
 为什么需要审计日志？
--------------------
+-----------------
+审计日志是企业安全的核心组成部分：
+
 1. **合规要求**：等保、GDPR、SOX 等法规要求
 2. **安全分析**：追踪异常行为、定位安全事件
 3. **问题追溯**：发生问题时能还原操作历史
 4. **责任认定**：明确操作人、时间、内容
 
+审计 vs 普通日志：
+┌──────────────────┬──────────────────┐
+│     普通日志       │    审计日志       │
+├──────────────────┼──────────────────┤
+│ 目的 │ 调试、监控 │ 合规、安全 │
+│ 内容 │ 技术细节   │ 业务操作   │
+│ 保存 │ 短期(7-30天)│ 长期(1-5年) │
+│ 访问 │ 开发运维   │ 安全合规   │
+│ 格式 │ 灵活     │ 标准化    │
+│ 法律效力 │ 无     │ 可作为证据  │
+└──────────────────┴──────────────────┘
+
 核心设计：
 ---------
-1. 事件类型化：每类操作有明确的类型
-2. 风险分级：区分低/中/高/极高风险
-3. 完整上下文：trace_id、user_id、时间戳等
-4. 可扩展存储：支持多种后端
+1. **事件类型化**：每类操作有明确的类型（AuditEventType）
+2. **风险分级**：区分低/中/高/极高风险（RiskLevel）
+3. **完整上下文**：trace_id、user_id、时间戳等
+4. **可扩展存储**：支持多种后端（数据库、文件、S3）
 
 覆盖的事件类型：
----------------
+-------------
 1. Agent 执行（请求、响应、错误）
 2. 工具调用（Tool 权限、调用结果）
 3. 数据访问（RAG 检索、SQL 查询）
@@ -43,16 +44,13 @@
     # 记录 Agent 请求
     audit_log.log_agent_request(
         action="rag.query",
-        trace_id="tr_abc123",
-        user_id="user_001",
-        success=True,
+        query="集团差旅费报销标准",
     )
 
     # 记录高风险操作
     audit_log.log(
         event_type=AuditEventType.RISK_OPERATION,
         action="contract.approve",
-        trace_id="tr_abc123",
         risk_level=RiskLevel.HIGH,
         metadata={"contract_id": "ct_001", "amount": 1000000}
     )
@@ -61,6 +59,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -68,6 +67,7 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+# 导入上下文管理
 from core.observability.context import (
     get_trace_id,
     get_run_id,
@@ -85,6 +85,11 @@ class AuditEventType(Enum):
     审计事件类型枚举
 
     覆盖 Agent 平台的所有关键操作类型
+
+    为什么需要事件类型？
+    - 便于分类查询："查所有 REVIEW_REQUEST"
+    - 便于权限控制："只有审计员能查 RISK_OPERATION"
+    - 便于告警："RISK_OPERATION 立即告警"
 
     分类说明：
     - AGENT_*: Agent 执行相关
@@ -152,17 +157,22 @@ class RiskLevel(Enum):
     1. 是否需要人工复核
     2. 是否触发告警
     3. 保存时长
+    4. 告警通知方式
     """
     # 低风险：普通操作
+    # 例如：查询知识库、查看公开文档
     LOW = "low"
 
     # 中风险：需要注意的操作
+    # 例如：SQL 查询、导出报告
     MEDIUM = "medium"
 
     # 高风险：需要复核的操作
+    # 例如：合同审批、敏感数据访问
     HIGH = "high"
 
     # 极高风险：必须立即处理
+    # 例如：大额合同、危险作业建议
     CRITICAL = "critical"
 
 
@@ -311,6 +321,11 @@ class AuditExporter(ABC):
 
     定义审计事件的导出接口
 
+    为什么需要抽象？
+    - 支持多种存储后端
+    - 便于测试
+    - 便于扩展
+
     实现类：
     - ConsoleExporter: 输出到控制台（开发调试）
     - FileExporter: 输出到文件
@@ -320,12 +335,22 @@ class AuditExporter(ABC):
 
     @abstractmethod
     def export(self, event: AuditEvent) -> None:
-        """导出单个事件"""
+        """
+        导出单个事件
+
+        Args:
+            event: 审计事件
+        """
         pass
 
     @abstractmethod
     def export_batch(self, events: list[AuditEvent]) -> None:
-        """批量导出事件"""
+        """
+        批量导出事件
+
+        Args:
+            events: 审计事件列表
+        """
         pass
 
 
@@ -334,6 +359,11 @@ class ConsoleAuditExporter(AuditExporter):
     控制台审计日志导出器
 
     用于开发调试，生产环境建议使用其他导出器
+
+    为什么需要这个？
+    - 开发环境快速查看审计事件
+    - 便于调试
+    - 无需配置数据库
     """
 
     def export(self, event: AuditEvent) -> None:
@@ -342,6 +372,98 @@ class ConsoleAuditExporter(AuditExporter):
 
     def export_batch(self, events: list[AuditEvent]) -> None:
         """批量输出"""
+        for event in events:
+            self.export(event)
+
+
+class DictAuditExporter(AuditExporter):
+    """
+    内存审计日志导出器
+
+    将审计事件存储在内存列表中，用于测试或简单场景
+
+    为什么需要这个？
+    - 测试时方便验证
+    - 单机应用快速使用
+    - 不依赖外部存储
+    """
+
+    def __init__(self):
+        self._events: list[AuditEvent] = []
+
+    def export(self, event: AuditEvent) -> None:
+        """存储到内存"""
+        self._events.append(event)
+
+    def export_batch(self, events: list[AuditEvent]) -> None:
+        """批量存储"""
+        self._events.extend(events)
+
+    def get_events(self) -> list[AuditEvent]:
+        """获取所有事件"""
+        return self._events.copy()
+
+    def clear(self) -> None:
+        """清空事件"""
+        self._events.clear()
+
+
+class DatabaseAuditExporter(AuditExporter):
+    """
+    数据库审计日志导出器
+
+    将审计事件持久化到数据库
+
+    为什么需要这个？
+    - 生产环境必须持久化
+    - 支持查询和报表
+    - 满足合规要求（长期保存）
+
+    实现注意事项：
+    - 应该使用异步写入避免阻塞
+    - 应该使用批量写入提高性能
+    - 应该支持重试和死信队列
+    """
+
+    def __init__(self, session_factory=None):
+        """
+        初始化数据库导出器
+
+        Args:
+            session_factory: SQLAlchemy session factory
+        """
+        self.session_factory = session_factory
+        self._logger = logging.getLogger("agent.audit.database")
+
+    def export(self, event: AuditEvent) -> None:
+        """
+        导出单个事件到数据库
+
+        实现时应考虑：
+        - 异步写入
+        - 异常重试
+        - 死信处理
+        """
+        if self.session_factory is None:
+            self._logger.warning("Database session not configured, event not persisted")
+            return
+
+        # TODO: 实现数据库写入
+        # session = self.session_factory()
+        # try:
+        #     audit_record = AuditRecord(**event.to_dict())
+        #     session.add(audit_record)
+        #     session.commit()
+        # except Exception as e:
+        #     session.rollback()
+        #     self._logger.error(f"Failed to persist audit event: {e}")
+        # finally:
+        #     session.close()
+
+        self._logger.debug(f"Audit event: {event.event_type.value} - {event.action}")
+
+    def export_batch(self, events: list[AuditEvent]) -> None:
+        """批量导出事件"""
         for event in events:
             self.export(event)
 
@@ -359,6 +481,12 @@ class AuditLogger:
     2. 支持多级风险评估
     3. 自动补全上下文信息
     4. 可扩展的导出后端
+    5. 高风险事件告警
+
+    为什么需要统一的记录器？
+    - 确保所有审计事件格式一致
+    - 自动补充 trace_id、user_id 等上下文
+    - 统一的风险评估和告警逻辑
 
     使用方式：
     --------
@@ -367,7 +495,7 @@ class AuditLogger:
         audit_log.log_agent_request(...)
 
     2. 注入使用（便于测试）：
-        logger = AuditLogger(exporter=MyExporter())
+        logger = AuditLogger(exporter=DictAuditExporter())
         logger.log(...)
     """
 
@@ -379,6 +507,7 @@ class AuditLogger:
             exporter: 导出器，默认使用 ConsoleExporter
         """
         self.exporter = exporter or ConsoleAuditExporter()
+        self._logger = logging.getLogger("agent.audit")
 
     def log(
         self,
@@ -397,12 +526,17 @@ class AuditLogger:
         risk_factors: list[str] | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录审计事件
 
         这是最底层的方法，其他便捷方法都是基于此方法
+
+        为什么需要这么多参数？
+        - 审计需要完整的信息
+        - 便于查询和分析
+        - 满足合规要求
 
         Args:
             event_type: 事件类型
@@ -451,8 +585,12 @@ class AuditLogger:
             metadata=metadata,
         )
 
-        # 导出
-        self.exporter.export(event)
+        # 导出到存储
+        try:
+            self.exporter.export(event)
+        except Exception as e:
+            # 导出失败不应该影响主流程
+            self._logger.error(f"Failed to export audit event: {e}")
 
         # 高风险事件触发告警
         if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
@@ -471,7 +609,7 @@ class AuditLogger:
         run_id: str | None = None,
         user_id: str | None = None,
         success: bool = True,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录 Agent 请求
@@ -507,7 +645,7 @@ class AuditLogger:
         success: bool = True,
         duration_ms: float | None = None,
         token_usage: dict | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录 Agent 响应
@@ -538,7 +676,7 @@ class AuditLogger:
         trace_id: str | None = None,
         run_id: str | None = None,
         user_id: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录 Agent 错误
@@ -570,7 +708,7 @@ class AuditLogger:
         run_id: str | None = None,
         success: bool = True,
         risk_level: RiskLevel = RiskLevel.LOW,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录工具调用
@@ -600,7 +738,7 @@ class AuditLogger:
         run_id: str | None = None,
         success: bool = True,
         duration_ms: float | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录工具执行结果
@@ -635,7 +773,7 @@ class AuditLogger:
         user_id: str | None = None,
         success: bool = True,
         duration_ms: float | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录数据检索（RAG）
@@ -670,7 +808,7 @@ class AuditLogger:
         success: bool = True,
         duration_ms: float | None = None,
         risk_level: RiskLevel = RiskLevel.MEDIUM,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录 SQL 查询
@@ -705,7 +843,7 @@ class AuditLogger:
         run_id: str | None = None,
         user_id: str | None = None,
         priority: str = "normal",
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录人工复核请求
@@ -742,7 +880,7 @@ class AuditLogger:
         comment: str | None = None,
         trace_id: str | None = None,
         run_id: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录人工复核结果
@@ -770,7 +908,6 @@ class AuditLogger:
             resource_type="review",
             resource_id=review_id,
             risk_level=RiskLevel.HIGH,
-            action=action,
             reviewer_id=reviewer_id,
             comment=comment,
             **metadata,
@@ -783,7 +920,7 @@ class AuditLogger:
         user_id: str,
         method: str = "password",
         trace_id: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录认证成功
@@ -806,7 +943,7 @@ class AuditLogger:
         reason: str = "invalid_credentials",
         ip_address: str | None = None,
         trace_id: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录认证失败
@@ -831,7 +968,7 @@ class AuditLogger:
         required_permission: str,
         user_id: str | None = None,
         trace_id: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录权限拒绝
@@ -861,7 +998,7 @@ class AuditLogger:
         user_id: str | None = None,
         resource_type: str | None = None,
         resource_id: str | None = None,
-        **metadata,
+        **metadata: Any,
     ) -> AuditEvent:
         """
         记录高风险操作
@@ -891,20 +1028,30 @@ class AuditLogger:
         """
         处理高风险事件
 
-        当前实现只是打印警告，后续可以扩展为：
-        1. 发送告警通知
+        当前实现只是打印警告和记录日志，后续可以扩展为：
+        1. 发送告警通知（Slack、邮件、钉钉）
         2. 写入单独的告警表
-        3. 触发自动化处理
+        3. 触发自动化处理流程
+
+        为什么单独处理高风险事件？
+        - 需要更快的响应
+        - 需要额外的通知渠道
+        - 需要保留更长时间
         """
-        import logging
-        logger = logging.getLogger("agent.audit")
-        logger.warning(
+        self._logger.warning(
             f"[HIGH RISK EVENT] {event.event_type.value} | "
             f"action={event.action} | "
             f"risk_level={event.risk_level.value} | "
             f"trace_id={event.trace_id} | "
             f"user_id={event.user_id}"
         )
+
+        # TODO: 发送告警通知
+        # 例如：
+        # - 发送 Slack 消息
+        # - 发送邮件
+        # - 发送钉钉消息
+        # - 创建工单
 
 
 # ============================================================================
@@ -929,3 +1076,20 @@ def get_audit_logger() -> AuditLogger:
 
 # 便捷访问
 audit_log = get_audit_logger()
+
+
+# ============================================================================
+# 便捷函数
+# ============================================================================
+
+def log_audit_event(
+    event_type: AuditEventType,
+    action: str,
+    **kwargs,
+) -> AuditEvent:
+    """
+    便捷函数：记录审计事件
+
+    相当于 audit_log.log()
+    """
+    return audit_log.log(event_type, action, **kwargs)

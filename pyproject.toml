@@ -24,6 +24,23 @@ dependencies = [
   "uvicorn[standard]>=0.30,<1.0",
   "python-a2a>=0.5.0",
   "httpx>=0.27.0",
+  # =========================================================
+  # 可观测性框架（主流生产级方案）
+  # =========================================================
+  # structlog: 结构化日志，Python 结构化日志的事实标准
+  "structlog>=24.0,<25.0",
+  # OpenTelemetry: CNCF 毕业项目，分布式追踪事实标准
+  "opentelemetry-api>=1.20,<2.0",
+  "opentelemetry-sdk>=1.20,<2.0",
+  # OpenTelemetry 导出器
+  "opentelemetry-exporter-otlp>=1.20,<2.0",  # OTLP 协议导出（发送到 Collector）
+  "opentelemetry-exporter-prometheus>=0.41b0",  # Prometheus 导出
+  # OpenTelemetry 自动埋点（FastAPI/httpx 自动注入 trace）
+  "opentelemetry-instrumentation-fastapi>=0.41b0",
+  "opentelemetry-instrumentation-httpx>=0.41b0",
+  "opentelemetry-instrumentation-logging>=0.41b0",
+  # Prometheus 客户端（指标采集）
+  "prometheus-client>=0.19,<1.0",
 ]
 
 [project.optional-dependencies]

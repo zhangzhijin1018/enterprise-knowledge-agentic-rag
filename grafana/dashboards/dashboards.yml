@@ -1,0 +1,21 @@
+# =============================================================================
+# Grafana Dashboard 配置文件
+# =============================================================================
+#
+# 自动导入 Dashboard
+#
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: 'Agent Platform Dashboards'
+    orgId: 1
+    folder: 'Agent Platform'
+    folderUid: 'agent-platform'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

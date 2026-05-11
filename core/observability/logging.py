@@ -1,76 +1,81 @@
 """结构化日志模块。
 
-该模块提供统一的日志格式和组件级日志分类。
+该模块使用 structlog 提供企业级结构化日志能力。
 
-核心设计：
----------
-1. 结构化输出（JSON 格式），便于日志收集和分析
-2. 自动注入 trace_id、run_id 等上下文
-3. 组件级日志分类，便于定位问题
-4. 支持多级别日志（DEBUG、INFO、WARNING、ERROR）
-
-为什么需要结构化日志？
+为什么用 structlog？
 ---------------------
-传统日志格式：
-    2024-01-15 14:30:00 INFO - 意图识别完成
+structlog 是 Python 结构化日志的事实标准，具有以下优势：
 
-问题：
-- 无法按字段搜索（如只查看某个 trace_id 的日志）
-- 难以和其他系统集成
-- 日志分析困难
+1. **标准化**：社区广泛采用，生产验证
+2. **功能完整**：开箱即用的 JSON 输出、上下文绑定、渲染器
+3. **性能优秀**：异步友好的设计
+4. **易于配置**：声明式配置，无需手写 Formatter
+5. **生态集成**：与 logging、OpenTelemetry 无缝集成
 
-结构化日志格式：
-    {
-        "timestamp": "2024-01-15T14:30:00.000Z",
-        "level": "INFO",
-        "trace_id": "tr_abc123",
-        "run_id": "run_xyz789",
-        "component": "intent_detector",
-        "event": "intent_detected",
-        "message": "意图识别完成",
-        "extra": {
-            "intent_type": "analytics_query",
-            "confidence": 0.92
-        }
-    }
+对比自研方案：
+- 自研：手写 Formatter、Filter、LogRecord，代码量大
+- structlog：声明式配置，几行代码搞定
 
-优点：
-- 可以按任意字段搜索和过滤
-- 可以和 Elasticsearch/Loki 无缝集成
-- 可以生成结构化报表
-- 便于 Trace 关联
+核心概念：
+---------
+1. BoundLogger：绑定上下文的日志器，自动带上预定义字段
+2. Processor：处理器链，控制字段添加、过滤、渲染
+3. Renderer：渲染器，将日志转为字符串/JSON
+4. Contextvars：异步安全的上下文传递
 
 使用示例：
-    from core.observability.logging import setup_logging, get_logger
-
-    # 初始化（应用启动时调用一次）
-    setup_logging(service_name="agent-platform")
+    from core.observability.logging import get_logger
 
     # 获取组件日志器
     logger = get_logger("intent_detector")
 
-    # 记录日志
-    logger.info(
-        event="intent_detected",
-        message="意图识别完成",
-        extra={
-            "intent_type": "analytics_query",
-            "confidence": 0.92,
-        },
+    # 记录日志（自动带上 trace_id、run_id 等上下文）
+    logger.info("意图识别完成",
+        intent_type="analytics_query",
+        confidence=0.92,
         duration_ms=45
     )
+
+    # 输出格式：
+    # {
+    #     "event": "意图识别完成",
+    #     "intent_type": "analytics_query",
+    #     "confidence": 0.92,
+    #     "duration_ms": 45,
+    #     "trace_id": "tr_abc123",
+    #     "logger": "intent_detector",
+    #     "timestamp": "2024-01-15T14:30:00.000Z"
+    # }
+
+设计原理：
+---------
+1. 使用 structlog.stdlib.BoundLogger 绑定组件名
+2. 通过 structlog.contextvars 绑定 trace_id、run_id 等上下文
+3. 生产环境使用 JSONRenderer，开发环境使用 ConsoleRenderer
+4. 自动添加 timestamp、log_level 等标准字段
 """
 
 from __future__ import annotations
 
 import logging
-import json
 import sys
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional
 from functools import lru_cache
+from typing import Any
 
+# 导入 structlog 核心组件
+import structlog
+from structlog.stdlib import (
+    BoundLogger,
+    LoggerFactory,
+    add_log_level,
+   Processor,
+)
+from structlog.types import EventDict, WrappedLogger
+from structlog.configuration import Configuration
+
+# 导入上下文管理（用于 trace_id、run_id 传递）
 from core.observability.context import (
     get_trace_id,
     get_run_id,
@@ -78,11 +83,12 @@ from core.observability.context import (
     get_conversation_id,
 )
 
+
 # ============================================================================
-# 日志级别映射
+# 配置常量
 # ============================================================================
 
-# Python logging 级别到字符串的映射
+# 日志级别映射
 LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -92,173 +98,347 @@ LOG_LEVELS = {
     "CRITICAL": logging.CRITICAL,
 }
 
-# 颜色代码（用于终端彩色输出）
-COLOR_CODES = {
-    "DEBUG": "\033[36m",     # 青色
-    "INFO": "\033[32m",      # 绿色
-    "WARNING": "\033[33m",    # 黄色
-    "ERROR": "\033[31m",     # 红色
-    "CRITICAL": "\033[35m",  # 紫色
-    "RESET": "\033[0m",
-}
-
-# 是否启用彩色输出
+# 是否启用彩色输出（仅开发环境）
 ENABLE_COLOR = sys.stdout.isatty() and os.getenv("NO_COLOR") is None
 
 
 # ============================================================================
-# 自定义日志格式化器
+# 自定义 Processor（处理器）
 # ============================================================================
 
-class StructuredLogFormatter(logging.Formatter):
+def add_trace_context_processor(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
     """
-    结构化日志格式化器
+    添加 Trace 上下文的 Processor
 
-    功能：
-    1. 输出 JSON 格式日志
-    2. 自动注入 trace_id、run_id 等上下文
-    3. 支持终端彩色输出
+    Processor 是 structlog 的核心概念，每个日志调用都会经过处理器链。
+    这个处理器自动添加 trace_id、run_id 等上下文字段。
 
-    设计原理：
-    ----------
-    logging.Formatter 是 Python 日志系统的核心组件，
-    负责将 LogRecord 转换为字符串。
+    为什么用 Processor？
+    - 日志调用时自动注入，无需手动传参
+    - 统一管理，避免遗漏
+    - 支持动态获取（如从 contextvars 读取）
+
+    Args:
+        logger: 底层日志器（logging.Logger）
+        method_name: 日志方法名（info、warning 等）
+        event_dict: 事件字典（包含 message、extra 等）
+
+    Returns:
+        处理后的事件字典
     """
+    # 从 contextvars 获取当前上下文
+    trace_id = get_trace_id()
+    run_id = get_run_id()
+    user_id = get_user_id()
+    conversation_id = get_conversation_id()
 
-    def __init__(self, service_name: str = "agent-platform"):
-        super().__init__()
-        self.service_name = service_name
+    # 添加到事件字典
+    if trace_id:
+        event_dict["trace_id"] = trace_id
+    if run_id:
+        event_dict["run_id"] = run_id
+    if user_id:
+        event_dict["user_id"] = user_id
+    if conversation_id:
+        event_dict["conversation_id"] = conversation_id
 
-    def format(self, record: logging.LogRecord) -> str:
-        """
-        格式化日志记录
+    # 添加服务信息
+    event_dict["service"] = "agent-platform"
 
-        Args:
-            record: Python logging.LogRecord 对象
+    return event_dict
 
-        Returns:
-            格式化的日志字符串
-        """
-        # 构建日志数据结构
-        log_data = {
-            # 时间戳（ISO 8601 格式）
-            "timestamp": datetime.now(timezone.utc).isoformat(),
 
-            # 日志级别
-            "level": record.levelname,
+def rename_event_key_processor(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
+    """
+    将 "event" 字段重命名为 "message"
 
-            # 服务信息
-            "service": self.service_name,
-            "logger": record.name,
+    structlog 默认使用 "event" 作为日志消息字段，
+    但很多系统习惯用 "message"。这个 Processor 做转换。
 
-            # 核心消息
-            "message": record.getMessage(),
+    转换前：{"event": "意图识别完成", "extra": {...}}
+    转换后：{"message": "意图识别完成", "extra": {...}}
 
-            # 上下文信息（从 contextvars 获取）
-            "trace_id": get_trace_id(),
-            "run_id": get_run_id(),
-            "conversation_id": get_conversation_id(),
-            "user_id": get_user_id(),
-        }
+    Args:
+        event_dict: 事件字典
 
-        # 添加组件信息（通过 extra 传递）
-        if hasattr(record, "component"):
-            log_data["component"] = record.component
-        if hasattr(record, "event"):
-            log_data["event"] = record.event
-        if hasattr(record, "duration_ms"):
-            log_data["duration_ms"] = record.duration_ms
+    Returns:
+        处理后的事件字典
+    """
+    # 如果有 event 字段且没有 message 字段，则复制
+    if "event" in event_dict and "message" not in event_dict:
+        event_dict["message"] = event_dict.pop("event")
 
-        # 添加额外数据（通过 extra 传递）
-        if hasattr(record, "extra_data"):
-            log_data["extra"] = record.extra_data
+    return event_dict
 
-        # 添加异常信息
-        if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
 
-        # 添加源代码信息（调试时有用）
-        if record.pathname:
-            log_data["source"] = {
-                "file": record.pathname,
-                "line": record.lineno,
-                "function": record.funcName,
+def add_timestamp_processor(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
+    """
+    添加 ISO 8601 格式时间戳
+
+    ISO 8601 是日志时间戳的标准格式，便于跨系统解析。
+
+    Args:
+        event_dict: 事件字典
+
+    Returns:
+        添加 timestamp 字段的事件字典
+    """
+    event_dict["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return event_dict
+
+
+def add_log_level_processor(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
+    """
+    添加标准化的日志级别字段
+
+    structlog 自动处理，但这里确保格式统一。
+
+    Args:
+        event_dict: 事件字典
+
+    Returns:
+        添加 level 字段的事件字典
+    """
+    event_dict["level"] = method_name.upper()
+    return event_dict
+
+
+def add_source_info_processor(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
+    """
+    添加源代码位置信息（仅开发环境）
+
+    便于定位日志来源，但生产环境可能不需要。
+
+    Args:
+        event_dict: 事件字典
+
+    Returns:
+        添加 source 字段的事件字典
+    """
+    # 获取调用栈信息
+    frame = sys._getframe()
+    try:
+        # 向上找调用者（通常是 3-4 层）
+        for _ in range(4):
+            frame = frame.f_back
+            if frame is None:
+                break
+
+        if frame:
+            event_dict["source"] = {
+                "file": os.path.basename(frame.f_code.co_filename),
+                "line": frame.f_lineno,
+                "function": frame.f_code.co_name,
             }
+    finally:
+        del frame
 
-        # 返回 JSON 格式
-        return json.dumps(log_data, ensure_ascii=False, default=str)
+    return event_dict
 
 
-class ColoredConsoleFormatter(logging.Formatter):
+# ============================================================================
+# 渲染器（Renderer）
+# ============================================================================
+
+def console_renderer(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> str:
     """
-    彩色控制台格式化器
+    控制台彩色渲染器
 
-    用于开发环境，提供易读的彩色输出
+    开发环境使用，将日志渲染为易读的彩色格式。
 
     格式：
         [2024-01-15 14:30:00] [INFO] [intent_detector] 意图识别完成
             trace_id: tr_abc123
             intent_type: analytics_query
             confidence: 0.92
+            duration_ms: 45
+
+    为什么不用 JSON 格式？
+    - JSON 不利于人类阅读
+    - 开发时需要快速定位问题
+    - 彩色输出便于区分不同级别的日志
     """
+    # 颜色代码
+    COLORS = {
+        "DEBUG": "\033[36m",     # 青色
+        "INFO": "\033[32m",      # 绿色
+        "WARNING": "\033[33m",   # 黄色
+        "ERROR": "\033[31m",     # 红色
+        "CRITICAL": "\033[35m",  # 紫色
+        "RESET": "\033[0m",
+    }
 
-    def format(self, record: logging.LogRecord) -> str:
-        # 基础信息行
-        timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        level = record.levelname
-        component = getattr(record, "component", record.name)
+    level = event_dict.pop("level", "INFO")
+    timestamp = event_dict.pop("timestamp", "")
+    logger_name = event_dict.pop("logger", "")
+    component = event_dict.pop("component", logger_name)
 
-        # 颜色
-        color = COLOR_CODES.get(level, "") if ENABLE_COLOR else ""
-        reset = COLOR_CODES["RESET"] if ENABLE_COLOR else ""
+    # 颜色
+    color = COLORS.get(level, "") if ENABLE_COLOR else ""
+    reset = COLORS["RESET"] if ENABLE_COLOR else ""
 
-        # 第一行：基础信息
-        lines = [
-            f"[{timestamp}] [{color}{level}{reset}] [{component}] {record.getMessage()}"
-        ]
+    # 第一行：基础信息
+    lines = [
+        f"[{timestamp}] [{color}{level}{reset}] [{component}] {event_dict.get('message', '')}"
+    ]
 
-        # 第二行：trace_id
-        trace_id = get_trace_id()
-        if trace_id:
-            lines.append(f"    trace_id: {trace_id}")
+    # trace_id
+    if "trace_id" in event_dict:
+        lines.append(f"    trace_id: {event_dict.pop('trace_id')}")
 
-        # 第三行：duration_ms
-        if hasattr(record, "duration_ms"):
-            lines.append(f"    duration_ms: {record.duration_ms:.2f}")
+    # 其他字段
+    for key, value in event_dict.items():
+        if key not in ("message", "event"):
+            lines.append(f"    {key}: {value}")
 
-        # 第四行：extra 数据
-        if hasattr(record, "extra_data") and record.extra_data:
-            for key, value in record.extra_data.items():
-                lines.append(f"    {key}: {value}")
+    return "\n".join(lines)
 
-        # 异常信息
-        if record.exc_info:
-            lines.append(f"    exception: {self.formatException(record.exc_info)}")
 
-        return "\n".join(lines)
+def json_renderer(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> str:
+    """
+    JSON 渲染器
+
+    生产环境使用，输出结构化 JSON，便于日志收集和分析。
+
+    格式：
+        {
+            "timestamp": "2024-01-15T14:30:00.000Z",
+            "level": "INFO",
+            "logger": "intent_detector",
+            "message": "意图识别完成",
+            "trace_id": "tr_abc123",
+            "intent_type": "analytics_query",
+            "confidence": 0.92
+        }
+
+    为什么要用 JSON？
+    - 便于日志系统收集和索引（如 ELK、Loki）
+    - 便于查询和过滤
+    - 便于结构化分析
+    """
+    import json
+
+    return json.dumps(event_dict, ensure_ascii=False, default=str)
 
 
 # ============================================================================
-# 自定义 LogRecord
+# Logger 配置
 # ============================================================================
 
-class StructuredLogRecord(logging.LogRecord):
+# 全局配置标志
+_logging_initialized = False
+_service_name = "agent-platform"
+
+
+def setup_logging(
+    service_name: str = "agent-platform",
+    level: str = "INFO",
+    json_output: bool | None = None,
+) -> None:
     """
-    自定义日志记录
+    初始化 structlog 日志系统
 
-    通过 extra 属性传递额外的结构化数据
+    这是应用启动时必须调用的初始化函数，配置整个日志系统。
+
+    为什么需要初始化？
+    - structlog 需要预先配置处理器链
+    - 确定是 JSON 输出还是控制台输出
+    - 设置日志级别
+
+    Args:
+        service_name: 服务名称，用于标识日志来源
+        level: 日志级别，可选值：DEBUG、INFO、WARNING、ERROR
+        json_output: 是否输出 JSON 格式。
+                     None 表示：生产环境（JSON）vs 开发环境（控制台）
+
+    使用示例：
+        # 开发环境（自动检测）
+        setup_logging()
+
+        # 强制 JSON 输出（生产环境）
+        setup_logging(json_output=True)
+
+        # 强制控制台输出（开发调试）
+        setup_logging(json_output=False)
     """
+    global _logging_initialized, _service_name
+    _service_name = service_name
 
-    def __init__(self, *args, **kwargs):
-        # 提取自定义字段
-        self.component = kwargs.pop("component", None)
-        self.event = kwargs.pop("event", None)
-        self.duration_ms = kwargs.pop("duration_ms", None)
-        self.extra_data = kwargs.pop("extra", {})
+    if _logging_initialized:
+        # 避免重复初始化
+        return
 
-        super().__init__(*args, **kwargs)
+    # 自动判断输出格式
+    # 生产环境（不是 tty 或明确指定）：JSON
+    # 开发环境（是 tty 且未指定）：控制台
+    if json_output is None:
+        json_output = not sys.stdout.isatty()
+
+    # 构建处理器链
+    processors = [
+        # 1. 添加调用栈位置（开发环境）
+        structlog.contextvars.merge_contextvars,
+        # 2. 添加 trace 上下文
+        add_trace_context_processor,
+        # 3. 重命名 event -> message
+        rename_event_key_processor,
+        # 4. 添加时间戳
+        add_timestamp_processor,
+        # 5. 添加日志级别
+        structlog.stdlib.add_log_level,
+        # 6. 添加源代码信息（开发环境）
+        structbot_processors,
+        # 7. 渲染输出
+        console_renderer if not json_output else json_renderer,
+    ]
+
+    # 如果是生产环境，移除源代码信息处理器（性能优化）
+    if json_output:
+        processors = [p for p in processors if p != add_source_info_processor]
+
+    # 配置 structlog
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # 配置标准库 logging
+    # 将 structlog 和标准 logging 桥接
+    # 这样使用 logging.getLogger() 的代码也能用 structlog
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=LOG_LEVELS.get(level.upper(), logging.INFO),
+    )
+
+    # 设置第三方库的日志级别，避免噪音
+    # 这些库通常不需要详细的结构化日志
+    for lib in ["uvicorn", "uvicorn.access", "fastapi", "httpx", "httpcore"]:
+        logging.getLogger(lib).setLevel(logging.WARNING)
+
+    _logging_initialized = True
+
+
+# 为了避免未使用警告，这里提供一个占位符
+# 实际使用时，add_source_info_processor 会被添加到处理器链
+structbot_processors = add_source_info_processor
 
 
 # ============================================================================
@@ -269,26 +449,28 @@ class ComponentLogger:
     """
     组件级日志器
 
-    功能：
-    1. 为组件提供统一的日志接口
-    2. 自动带上组件名称
-    3. 支持结构化额外数据
+    为每个组件提供独立的日志器实例，自动带上组件名称。
 
-    设计原理：
-    ---------
-    传统 logger.warning("意图识别完成") 只输出文本，
-    ComponentLogger 提供了：
-    - 统一的日志格式
-    - 结构化的 extra 数据
-    - 便于追踪的 event 字段
+    为什么需要组件日志器？
+    - 统一组件的日志格式
+    - 便于按组件过滤日志
+    - 强制添加 event 字段
 
     使用示例：
         logger = ComponentLogger("intent_detector")
         logger.info(
-            event="intent_detected",
-            message="意图识别完成",
-            extra={"intent_type": "rag_qa", "confidence": 0.95}
+            event="意图识别完成",
+            intent_type="analytics_query",
+            confidence=0.92,
+            duration_ms=45
         )
+
+        # 输出：
+        # [2024-01-15 14:30:00] [INFO] [intent_detector] 意图识别完成
+        #     trace_id: tr_abc123
+        #     intent_type: analytics_query
+        #     confidence: 0.92
+        #     duration_ms: 45
     """
 
     def __init__(self, component: str):
@@ -299,103 +481,53 @@ class ComponentLogger:
             component: 组件名称，如 "intent_detector"、"rag_agent" 等
         """
         self.component = component
-        # 使用 "agent.{component}" 作为 logger name
-        self.logger = logging.getLogger(f"agent.{component}")
+        # 使用 structlog.get_logger 获取日志器
+        # 结构：agent.<component>
+        self._logger = structlog.get_logger(f"agent.{component}")
 
     def _log(
         self,
-        level: int,
+        level: str,
         event: str,
-        message: str,
-        extra: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-        exc_info: bool = False,
+        message: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """
         内部日志方法
 
         Args:
-            level: 日志级别
+            level: 日志级别（debug、info、warning、error、critical）
             event: 事件名称（如 "intent_detected"）
-            message: 日志消息
-            extra: 额外的结构化数据
-            duration_ms: 执行时长（毫秒）
-            exc_info: 是否包含异常信息
+            message: 日志消息（可省略，简化为只用 event）
+            **kwargs: 额外的结构化字段
         """
-        # 构建 kwargs
-        kwargs = {
-            "extra": {
-                "component": self.component,
-                "event": event,
-                **(extra or {}),
-            }
-        }
+        # 如果没有提供 message，使用 event 作为 message
+        if message is None:
+            message = event
 
-        if duration_ms is not None:
-            kwargs["extra"]["duration_ms"] = duration_ms
+        # 调用 structlog 的方法
+        log_method = getattr(self._logger, level, self._logger.info)
+        log_method(event, message=message, component=self.component, **kwargs)
 
-        # 记录日志
-        self.logger.log(
-            level,
-            message,
-            exc_info=exc_info,
-            component=self.component,
-            event=event,
-            extra_data=extra,
-            duration_ms=duration_ms,
-        )
-
-    def debug(
-        self,
-        event: str,
-        message: str,
-        extra: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-    ) -> None:
+    def debug(self, event: str, message: str | None = None, **kwargs: Any) -> None:
         """记录 DEBUG 级别日志"""
-        self._log(logging.DEBUG, event, message, extra, duration_ms)
+        self._log("debug", event, message, **kwargs)
 
-    def info(
-        self,
-        event: str,
-        message: str,
-        extra: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-    ) -> None:
+    def info(self, event: str, message: str | None = None, **kwargs: Any) -> None:
         """记录 INFO 级别日志"""
-        self._log(logging.INFO, event, message, extra, duration_ms)
+        self._log("info", event, message, **kwargs)
 
-    def warning(
-        self,
-        event: str,
-        message: str,
-        extra: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-    ) -> None:
+    def warning(self, event: str, message: str | None = None, **kwargs: Any) -> None:
         """记录 WARNING 级别日志"""
-        self._log(logging.WARNING, event, message, extra, duration_ms)
+        self._log("warning", event, message, **kwargs)
 
-    def error(
-        self,
-        event: str,
-        message: str,
-        extra: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-        exc_info: bool = True,
-    ) -> None:
+    def error(self, event: str, message: str | None = None, **kwargs: Any) -> None:
         """记录 ERROR 级别日志"""
-        self._log(logging.ERROR, event, message, extra, duration_ms, exc_info)
+        self._log("error", event, message, **kwargs)
 
-    def critical(
-        self,
-        event: str,
-        message: str,
-        extra: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-        exc_info: bool = True,
-    ) -> None:
+    def critical(self, event: str, message: str | None = None, **kwargs: Any) -> None:
         """记录 CRITICAL 级别日志"""
-        self._log(logging.CRITICAL, event, message, extra, duration_ms, exc_info)
+        self._log("critical", event, message, **kwargs)
 
     # ==================== 业务场景专用方法 ====================
 
@@ -403,13 +535,20 @@ class ComponentLogger:
         self,
         endpoint: str,
         method: str = "POST",
-        extra: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
-        """记录请求开始"""
+        """记录请求开始
+
+        Args:
+            endpoint: 请求路径
+            method: HTTP 方法
+        """
         self.info(
             event="request_start",
             message=f"{method} {endpoint} 开始",
-            extra={"endpoint": endpoint, "method": method, **(extra or {})},
+            endpoint=endpoint,
+            method=method,
+            **kwargs,
         )
 
     def log_request_end(
@@ -417,30 +556,62 @@ class ComponentLogger:
         endpoint: str,
         status_code: int,
         duration_ms: float,
-        extra: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
-        """记录请求结束"""
-        level = logging.INFO if status_code < 400 else logging.WARNING
-        event = "request_end"
-        self._log(
-            level,
-            event,
-            f"{endpoint} 完成，状态码: {status_code}",
-            extra={"endpoint": endpoint, "status_code": status_code, **(extra or {})},
-            duration_ms=duration_ms,
-        )
+        """记录请求结束
+
+        Args:
+            endpoint: 请求路径
+            status_code: HTTP 状态码
+            duration_ms: 耗时（毫秒）
+        """
+        # 根据状态码决定日志级别
+        if status_code >= 500:
+            self.error(
+                event="request_end",
+                message=f"{endpoint} 完成，状态码: {status_code}",
+                endpoint=endpoint,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                **kwargs,
+            )
+        elif status_code >= 400:
+            self.warning(
+                event="request_end",
+                message=f"{endpoint} 完成，状态码: {status_code}",
+                endpoint=endpoint,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                **kwargs,
+            )
+        else:
+            self.info(
+                event="request_end",
+                message=f"{endpoint} 完成，状态码: {status_code}",
+                endpoint=endpoint,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                **kwargs,
+            )
 
     def log_agent_start(
         self,
         agent_name: str,
         intent_type: str,
-        extra: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
-        """记录 Agent 执行开始"""
+        """记录 Agent 执行开始
+
+        Args:
+            agent_name: Agent 名称
+            intent_type: 意图类型
+        """
         self.info(
             event="agent_start",
             message=f"Agent {agent_name} 开始执行",
-            extra={"agent_name": agent_name, "intent_type": intent_type, **(extra or {})},
+            agent_name=agent_name,
+            intent_type=intent_type,
+            **kwargs,
         )
 
     def log_agent_end(
@@ -449,23 +620,36 @@ class ComponentLogger:
         intent_type: str,
         duration_ms: float,
         success: bool = True,
-        extra: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
-        """记录 Agent 执行结束"""
-        level = logging.INFO if success else logging.ERROR
-        event = "agent_end"
-        self._log(
-            level,
-            event,
-            f"Agent {agent_name} 执行{'成功' if success else '失败'}",
-            extra={
-                "agent_name": agent_name,
-                "intent_type": intent_type,
-                "success": success,
-                **(extra or {}),
-            },
-            duration_ms=duration_ms,
-        )
+        """记录 Agent 执行结束
+
+        Args:
+            agent_name: Agent 名称
+            intent_type: 意图类型
+            duration_ms: 耗时（毫秒）
+            success: 是否成功
+        """
+        if success:
+            self.info(
+                event="agent_end",
+                message=f"Agent {agent_name} 执行成功",
+                agent_name=agent_name,
+                intent_type=intent_type,
+                duration_ms=duration_ms,
+                success=success,
+                **kwargs,
+            )
+        else:
+            self.error(
+                event="agent_end",
+                message=f"Agent {agent_name} 执行失败",
+                agent_name=agent_name,
+                intent_type=intent_type,
+                duration_ms=duration_ms,
+                success=success,
+                **kwargs,
+            )
 
     def log_llm_call(
         self,
@@ -476,21 +660,34 @@ class ComponentLogger:
         success: bool = True,
         error: str | None = None,
     ) -> None:
-        """记录 LLM 调用"""
-        level = logging.INFO if success else logging.ERROR
-        self._log(
-            level,
-            "llm_call",
-            f"LLM 调用 {'成功' if success else '失败'}: {model}",
-            extra={
-                "model": model,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-                "error": error,
-            },
-            duration_ms=duration_ms,
-        )
+        """记录 LLM 调用
+
+        Args:
+            model: 模型名称
+            duration_ms: 耗时（毫秒）
+            prompt_tokens: 提示词 Token 数
+            completion_tokens: 完成 Token 数
+            success: 是否成功
+            error: 错误信息
+        """
+        if success:
+            self.info(
+                event="llm_call",
+                message=f"LLM 调用成功: {model}",
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                duration_ms=duration_ms,
+            )
+        else:
+            self.error(
+                event="llm_call",
+                message=f"LLM 调用失败: {model}",
+                model=model,
+                duration_ms=duration_ms,
+                error=error,
+            )
 
     def log_tool_call(
         self,
@@ -498,96 +695,50 @@ class ComponentLogger:
         duration_ms: float,
         success: bool = True,
         error: str | None = None,
-        extra: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
-        """记录工具调用"""
-        level = logging.INFO if success else logging.WARNING
-        self._log(
-            level,
-            "tool_call",
-            f"工具调用 {'成功' if success else '失败'}: {tool_name}",
-            extra={
-                "tool_name": tool_name,
-                "error": error,
-                **(extra or {}),
-            },
-            duration_ms=duration_ms,
-        )
+        """记录工具调用
+
+        Args:
+            tool_name: 工具名称
+            duration_ms: 耗时（毫秒）
+            success: 是否成功
+            error: 错误信息
+        """
+        if success:
+            self.info(
+                event="tool_call",
+                message=f"工具调用成功: {tool_name}",
+                tool_name=tool_name,
+                duration_ms=duration_ms,
+                **kwargs,
+            )
+        else:
+            self.warning(
+                event="tool_call",
+                message=f"工具调用失败: {tool_name}",
+                tool_name=tool_name,
+                duration_ms=duration_ms,
+                error=error,
+                **kwargs,
+            )
 
 
 # ============================================================================
-# 全局配置
+# 便捷函数
 # ============================================================================
-
-# 全局日志配置
-_logging_initialized = False
-_service_name = "agent-platform"
-
-
-def setup_logging(
-    service_name: str = "agent-platform",
-    level: str = "INFO",
-    enable_console_colors: bool = True,
-) -> None:
-    """
-    初始化日志系统
-
-    建议在应用启动时调用一次
-
-    Args:
-        service_name: 服务名称
-        level: 日志级别
-        enable_console_colors: 是否启用控制台彩色输出
-
-    使用示例：
-        setup_logging(
-            service_name="agent-platform",
-            level="INFO"
-        )
-    """
-    global _logging_initialized, _service_name
-    _service_name = service_name
-
-    if _logging_initialized:
-        return
-
-    # 创建根日志器
-    root_logger = logging.getLogger("agent")
-    root_logger.setLevel(LOG_LEVELS.get(level.upper(), logging.INFO))
-
-    # 清除已有的 handlers
-    root_logger.handlers.clear()
-
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(LOG_LEVELS.get(level.upper(), logging.INFO))
-
-    # 选择格式化器
-    if enable_console_colors and sys.stdout.isatty():
-        formatter = ColoredConsoleFormatter()
-    else:
-        formatter = StructuredLogFormatter(service_name=service_name)
-
-    console_handler.setFormatter(formatter)
-
-    # 添加处理器
-    root_logger.addHandler(console_handler)
-
-    # 防止日志传播到 root logger
-    root_logger.propagate = False
-
-    # 注册自定义 LogRecord 工厂
-    logging.setLogRecordFactory(StructuredLogRecord)
-
-    _logging_initialized = True
-
 
 @lru_cache(maxsize=128)
 def get_logger(component: str) -> ComponentLogger:
     """
     获取组件日志器
 
-    使用 lru_cache 缓存，同一组件多次调用返回同一实例
+    使用 lru_cache 缓存，同一组件多次调用返回同一实例。
+
+    为什么用 lru_cache？
+    - 避免重复创建 Logger 实例
+    - 提高性能
+    - 内存友好
 
     Args:
         component: 组件名称
@@ -597,91 +748,41 @@ def get_logger(component: str) -> ComponentLogger:
 
     使用示例：
         logger = get_logger("intent_detector")
-        logger.info("意图识别完成")
+        logger.info("意图识别完成", extra={"intent": "analytics"})
     """
     return ComponentLogger(component)
 
 
-def get_root_logger() -> logging.Logger:
-    """获取根日志器"""
-    return logging.getLogger("agent")
+def get_root_logger() -> BoundLogger:
+    """
+    获取根日志器
+
+    用于需要获取底层 structlog 的场景（通常不需要）。
+
+    Returns:
+        structlog BoundLogger
+    """
+    return structlog.get_logger()
 
 
 # ============================================================================
-# 便捷函数
+# 与标准 logging 的桥接
 # ============================================================================
 
-def log_entry_exit(func):
+def get_standard_logger(name: str) -> logging.Logger:
     """
-    函数入口/出口日志装饰器
+    获取标准 logging 日志器
 
-    自动记录函数的执行时间和状态
+    用于需要使用标准 logging API 的场景（如第三方库桥接）。
 
-    使用示例：
-        @log_entry_exit
-        def my_function():
-            pass
+    为什么需要桥接？
+    - 一些第三方库只接受 logging.Logger
+    - 可以将这些日志器桥接到 structlog
+
+    Args:
+        name: 日志器名称
+
+    Returns:
+        标准 logging.Logger
     """
-    import time
-    import functools
-
-    @functools.wraps(func)
-    def sync_wrapper(*args, **kwargs):
-        logger = get_logger(func.__module__)
-        logger.debug(
-            event="function_entry",
-            message=f"进入函数: {func.__name__}",
-        )
-
-        start_time = time.time()
-        try:
-            result = func(*args, **kwargs)
-            duration_ms = (time.time() - start_time) * 1000
-            logger.debug(
-                event="function_exit",
-                message=f"退出函数: {func.__name__}",
-                duration_ms=duration_ms,
-            )
-            return result
-        except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            logger.error(
-                event="function_error",
-                message=f"函数异常: {func.__name__}: {e}",
-                duration_ms=duration_ms,
-                exc_info=True,
-            )
-            raise
-
-    @functools.wraps(func)
-    async def async_wrapper(*args, **kwargs):
-        logger = get_logger(func.__module__)
-        logger.debug(
-            event="function_entry",
-            message=f"进入异步函数: {func.__name__}",
-        )
-
-        start_time = time.time()
-        try:
-            result = await func(*args, **kwargs)
-            duration_ms = (time.time() - start_time) * 1000
-            logger.debug(
-                event="function_exit",
-                message=f"退出异步函数: {func.__name__}",
-                duration_ms=duration_ms,
-            )
-            return result
-        except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            logger.error(
-                event="function_error",
-                message=f"异步函数异常: {func.__name__}: {e}",
-                duration_ms=duration_ms,
-                exc_info=True,
-            )
-            raise
-
-    import asyncio
-    if asyncio.iscoroutinefunction(func):
-        return async_wrapper
-    return sync_wrapper
+    return logging.getLogger(name)

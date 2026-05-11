@@ -1,0 +1,38 @@
+# =============================================================================
+# Grafana Tempo 配置文件
+# =============================================================================
+#
+# Tempo 是分布式追踪后端，存储 trace 数据
+#
+# =============================================================================
+
+server:
+  # HTTP 服务配置
+  http_listen_port: 3200
+
+# 存储配置
+storage:
+  trace:
+    # 后端存储类型
+    backend: local
+
+    # 本地存储配置
+    local:
+      path: /var/tempo/blocks
+
+    # Wal 配置
+    wal:
+      path: /var/tempo/wal
+
+    # 块配置
+    block:
+      # 块大小
+      v2_encoding: zlib
+      # 压缩
+      index_downsample_bytes: 1024
+
+# 前端配置
+query_frontend:
+  # 查询地址
+  trace_by_id:
+    query_shards: 3

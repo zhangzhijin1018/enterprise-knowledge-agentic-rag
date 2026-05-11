@@ -1,0 +1,55 @@
+# =============================================================================
+# Prometheus 配置文件
+# =============================================================================
+#
+# Prometheus 从应用和 OTel Collector 抓取指标数据
+#
+# =============================================================================
+
+global:
+  # 全局抓取间隔
+  scrape_interval: 15s
+  # 评估规则间隔
+  evaluation_interval: 15s
+  # 外部标签（所有指标都会带这个标签）
+  external_labels:
+    cluster: 'agent-platform'
+    environment: 'production'
+
+# Alertmanager 配置（可选）
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# 规则文件（可选）
+# rule_files:
+#   - "alert_rules.yml"
+
+scrape_configs:
+  # 抓取 Prometheus 自身指标
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    metrics_path: /metrics
+
+  # 抓取 OTel Collector 指标
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8888']
+    metrics_path: /metrics
+
+  # 抓取应用指标（Agent Platform）
+  # host.docker.internal 是 Docker 提供的特殊 DNS，指向宿主机
+  - job_name: 'agent-platform'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # 抓取 GPU 指标（如果有）
+  # - job_name: 'nvidia_gpu'
+  #   static_configs:
+  #     - targets: ['nvidia_exporter:9100']
