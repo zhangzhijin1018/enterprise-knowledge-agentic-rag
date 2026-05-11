@@ -21,8 +21,12 @@ from apps.api.routers import (
     chat_router,
     clarifications_router,
     conversations_router,
+    contract_router,
+    contract_review_router,
     documents_router,
+    rag_router,
     retrieval_router,
+    reviews_router,
 )
 from apps.api.routes import health_router
 from core.common.exceptions import register_exception_handlers
@@ -50,8 +54,12 @@ def create_app() -> FastAPI:
     app.include_router(chat_router, prefix=settings.api_prefix)
     app.include_router(conversations_router, prefix=settings.api_prefix)
     app.include_router(clarifications_router, prefix=settings.api_prefix)
+    app.include_router(contracts_router, prefix=settings.api_prefix)
+    app.include_router(contract_review_router, prefix=settings.api_prefix)
     app.include_router(documents_router, prefix=settings.api_prefix)
+    app.include_router(rag_router, prefix=settings.api_prefix)
     app.include_router(retrieval_router, prefix=settings.api_prefix)
+    app.include_router(reviews_router, prefix=settings.api_prefix)
     return app
 
 

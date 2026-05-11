@@ -21,6 +21,39 @@ class AnalyticsQueryRequest(BaseModel):
     need_sql_explain: bool = Field(default=False, description="是否返回 SQL 解释")
 
 
+class AnalyticsChatRequest(BaseModel):
+    """经营分析聊天请求 - 前端聊天框专用。
+
+    简化版请求，专注于自然语言问答体验。
+    """
+
+    query: str = Field(description="用户问题")
+    conversation_id: str | None = Field(default=None, description="会话 ID")
+    output_mode: str = Field(default="full", description="输出模式: lite/standard/full")
+
+
+class AnalyticsChatResponseData(BaseModel):
+    """经营分析聊天响应 - 前端聊天框专用。"""
+
+    run_id: str = Field(description="任务运行 ID")
+    conversation_id: str | None = Field(description="会话 ID")
+
+    # 核心内容（前端直接展示）
+    summary: str | None = Field(default=None, description="自然语言摘要")
+    insight_cards: list[dict] = Field(default_factory=list, description="洞察卡片")
+    chart_desc: dict | None = Field(default=None, description="图表描述")
+    report_blocks: list[dict] = Field(default_factory=list, description="报告块")
+
+    # 技术信息（可折叠显示）
+    sql_preview: str | None = Field(default=None, description="生成的 SQL")
+    tables: list[AnalyticsResultTable] = Field(default_factory=list, description="结果表")
+    row_count: int | None = Field(default=None, description="返回行数")
+
+    # 状态
+    status: str = Field(default="completed", description="状态")
+    latency_ms: int | None = Field(default=None, description="耗时")
+
+
 class AnalyticsResultTable(BaseModel):
     """经营分析结果表。"""
 

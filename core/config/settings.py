@@ -103,6 +103,52 @@ class Settings(BaseSettings):
         description="Redis 连接地址",
     )
 
+    # Redis SSE 进度推送 Stream Key 前缀
+    # 用于经营分析等任务的实时进度推送
+    redis_sse_stream_prefix: str = Field(
+        default="sse:progress",
+        description="Redis SSE Stream Key 前缀",
+    )
+
+    # Redis SSE 消息最大数量限制
+    # 每个 run_id 的 Stream 最多保留这么多消息，防止内存泄漏
+    redis_sse_max_stream_len: int = Field(
+        default=100,
+        description="Redis SSE Stream 最大消息数",
+    )
+
+    # Redis SSE 消息 TTL（秒）
+    # 任务完成后多久删除 Stream，兼顾断线重连和资源清理
+    redis_sse_stream_ttl_seconds: int = Field(
+        default=3600,
+        description="Redis SSE Stream TTL（秒）",
+    )
+
+    # Redis 连接池大小
+    # 考虑到多 worker 部署，SSE 推送和消费可能并发，需要足够的连接数
+    redis_pool_size: int = Field(
+        default=20,
+        description="Redis 连接池大小",
+    )
+
+    # Redis 连接池最大连接数
+    redis_pool_max_connections: int = Field(
+        default=50,
+        description="Redis 连接池最大连接数",
+    )
+
+    # Redis Socket 超时（秒）
+    redis_socket_timeout: float = Field(
+        default=5.0,
+        description="Redis Socket 超时（秒）",
+    )
+
+    # Redis Socket 连接超时（秒）
+    redis_socket_connect_timeout: float = Field(
+        default=5.0,
+        description="Redis Socket 连接超时（秒）",
+    )
+
     # Milvus 服务地址，未来用于向量检索和混合检索。
     milvus_uri: str = Field(
         default="http://localhost:19530",
@@ -206,10 +252,11 @@ class Settings(BaseSettings):
     )
 
     # 经营分析 ReAct planner 默认模型。
-    # 一期推荐私有化优先使用 Qwen2.5-14B-Instruct / Qwen2.5-32B-Instruct，
+    # 一期推荐私有化优先使用 Qwen3-14B-Instruct / Qwen3-32B-Instruct，
     # 并通过 vLLM 暴露 OpenAI-compatible API。
+    # Qwen3 系列相比 Qwen2.5 有显著性能提升，预训练数据翻倍，支持思考模式。
     llm_model_name: str = Field(
-        default="qwen2.5-14b-instruct",
+        default="Qwen/Qwen3-14B",
         description="LLM 默认模型名称",
     )
 
@@ -304,6 +351,70 @@ class Settings(BaseSettings):
     analytics_report_gateway_transport_mode: str = Field(
         default="inprocess_report_mcp_server",
         description="经营分析 Report Gateway transport 模式",
+    )
+
+    # ============================================================================
+    # 文件存储配置
+    # ============================================================================
+
+    # 存储类型：local（本地文件系统）、oss（阿里云）、s3（AWS/MinIO）
+    storage_type: str = Field(
+        default="local",
+        description="文件存储类型",
+    )
+
+    # 本地存储路径（storage_type=local 时使用）
+    storage_local_path: str = Field(
+        default="storage/uploads",
+        description="本地存储路径",
+    )
+
+    # 阿里云 OSS 配置（storage_type=oss 时使用）
+    oss_endpoint: str = Field(
+        default="",
+        description="阿里云 OSS 端点",
+    )
+    oss_access_key_id: str = Field(
+        default="",
+        description="阿里云 Access Key ID",
+    )
+    oss_access_key_secret: str = Field(
+        default="",
+        description="阿里云 Access Key Secret",
+    )
+    oss_bucket: str = Field(
+        default="",
+        description="阿里云 OSS Bucket",
+    )
+    oss_region: str = Field(
+        default="",
+        description="阿里云区域",
+    )
+
+    # S3/MinIO 配置（storage_type=s3 或 storage_type=minio 时使用）
+    s3_endpoint: str = Field(
+        default="",
+        description="S3/MinIO 端点",
+    )
+    s3_access_key: str = Field(
+        default="",
+        description="S3 Access Key",
+    )
+    s3_secret_key: str = Field(
+        default="",
+        description="S3 Secret Key",
+    )
+    s3_bucket: str = Field(
+        default="",
+        description="S3 Bucket",
+    )
+    s3_region: str = Field(
+        default="us-east-1",
+        description="S3 区域",
+    )
+    s3_secure: bool = Field(
+        default=False,
+        description="S3 是否使用 HTTPS",
     )
 
     @property

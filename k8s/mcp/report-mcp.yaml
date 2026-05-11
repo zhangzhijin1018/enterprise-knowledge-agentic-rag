@@ -1,0 +1,79 @@
+# =============================================================================
+# Report MCP K8s Deployment
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-mcp
+  namespace: enterprise-agent
+  labels:
+    app: report-mcp
+    tier: mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: report-mcp
+  template:
+    metadata:
+      labels:
+        app: report-mcp
+        tier: mcp
+    spec:
+      containers:
+        - name: report-mcp
+          image: enterprise-agent/report-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5002
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: LOCAL_EXPORT_DIR
+              value: "/exports"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: exports
+              mountPath: /exports
+          livenessProbe:
+            httpGet:
+              path: /mcp/v1/health
+              port: 5002
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /mcp/v1/health
+              port: 5002
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: exports
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: report-mcp-svc
+  namespace: enterprise-agent
+  labels:
+    app: report-mcp
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5002
+      targetPort: 5002
+      protocol: TCP
+      name: http
+  selector:
+    app: report-mcp

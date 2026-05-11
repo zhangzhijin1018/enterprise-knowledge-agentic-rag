@@ -13,6 +13,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -20,16 +23,26 @@ from core.analytics.analytics_result_model import AnalyticsResult
 from core.analytics.intent.parser import LLMAnalyticsIntentParser
 from core.analytics.intent.schema import AnalyticsIntent, IntentValidationResult
 from core.analytics.intent.validator import AnalyticsIntentValidator
+from core.analytics.llm_content_generator import (
+    MAX_SSE_INLINE_SIZE,
+    LLMContentGenerator,
+    ParallelLLMGenerator,
+    should_inline_result,
+)
 from core.common import error_codes
 from core.common.exceptions import AppException
 from core.common.response import build_response_meta
+from core.common.sse_progress import RedisSSEProgressTracker, SSEEventType, get_redis_pool
 from core.config.settings import get_settings
 from core.agent.workflows.analytics.degradation import AnalyticsWorkflowDegradationController
 from core.agent.workflows.analytics.retry_policy import AnalyticsWorkflowRetryController
 from core.agent.workflows.analytics.state import AnalyticsWorkflowOutcome, AnalyticsWorkflowStage
+from core.llm.gateway import LLMGateway, MockLLMGateway
 from core.services.analytics_service import AnalyticsService
 from core.tools.mcp import SQLGatewayExecutionError
 from core.tools.mcp.sql_mcp_contracts import SQLReadQueryRequest
+
+logger = logging.getLogger(__name__)
 
 
 class AnalyticsWorkflowNodes:
@@ -62,7 +75,35 @@ class AnalyticsWorkflowNodes:
             schema_registry=analytics_service.schema_registry,
         )
 
-    def analytics_entry(self, state: dict) -> dict:
+        # LLM 内容生成器（并行调用版本）
+        self._llm_gateway: LLMGateway | None = None
+        self._parallel_llm_generator: ParallelLLMGenerator | None = None
+
+    @property
+    def llm_gateway(self) -> LLMGateway:
+        """获取 LLM Gateway（懒加载）"""
+        if self._llm_gateway is None:
+            # 优先使用配置的模型，否则使用 Mock
+            if self.settings.llm_api_key and self.settings.llm_api_key != "your-api-key":
+                from core.llm.gateway import OpenAICompatibleLLMGateway
+                self._llm_gateway = OpenAICompatibleLLMGateway(settings=self.settings)
+            else:
+                self._llm_gateway = MockLLMGateway()
+        return self._llm_gateway
+
+    @property
+    def parallel_llm_generator(self) -> ParallelLLMGenerator:
+        """获取并行 LLM 生成器（懒加载）"""
+        if self._parallel_llm_generator is None:
+            model = self.settings.llm_model_name or "qwen-32b"
+            self._parallel_llm_generator = ParallelLLMGenerator(
+                llm_gateway=self.llm_gateway,
+                model=model,
+                temperature=0.7,
+            )
+        return self._parallel_llm_generator
+
+    async def analytics_entry(self, state: dict) -> dict:
         """工作流入口节点。
 
         职责：
@@ -72,6 +113,11 @@ class AnalyticsWorkflowNodes:
         - 记录用户消息（clarification 恢复场景不重复写原始问题）；
         - 为后续 plan 节点准备 conversation memory。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_entry")
 
         query = (state.get("query") or "").strip()
         if not query:
@@ -95,7 +141,7 @@ class AnalyticsWorkflowNodes:
                     detail={"conversation_id": conversation_id},
                 )
         else:
-            conversation = self.analytics_service._get_or_create_conversation(
+            conversation = await self.analytics_service._get_or_create_conversation(
                 conversation_id=state.get("conversation_id"),
                 query=query,
                 user_context=user_context,
@@ -130,13 +176,18 @@ class AnalyticsWorkflowNodes:
         state["review_required"] = False
         return state
 
-    def analytics_plan(self, state: dict) -> dict:
+    async def analytics_plan(self, state: dict) -> dict:
         """规划节点（v2 纯 Workflow 链路）。
 
         核心职责：
         - 调用 LLMAnalyticsIntentParser 生成结构化 AnalyticsIntent；
         - LLM 只生成结构化 AnalyticsIntent，不生成 SQL。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_plan")
 
         # 调用新版统一意图解析器
         parser_result = self.intent_parser.parse(
@@ -154,7 +205,7 @@ class AnalyticsWorkflowNodes:
         state["intent"] = intent
         return state
 
-    def analytics_validate_slots(self, state: dict) -> dict:
+    async def analytics_validate_slots(self, state: dict) -> dict:
         """槽位验证节点（v2 纯 Workflow 链路）。
 
         职责：
@@ -163,6 +214,11 @@ class AnalyticsWorkflowNodes:
         - 调用 AnalyticsIntentValidator 进行校验；
         - 判断进入 clarify 还是继续 SQL 执行。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_validate_slots")
 
         intent = state.get("intent")
         conversation = state["conversation"]
@@ -241,7 +297,7 @@ class AnalyticsWorkflowNodes:
 
         return state
 
-    def analytics_clarify(self, state: dict) -> dict:
+    async def analytics_clarify(self, state: dict) -> dict:
         """澄清节点（v2 纯 Workflow 链路）。
 
         职责：
@@ -305,7 +361,7 @@ class AnalyticsWorkflowNodes:
         state["clarification_needed"] = True
         return state
 
-    def analytics_build_sql(self, state: dict) -> dict:
+    async def analytics_build_sql(self, state: dict) -> dict:
         """SQL 构造节点（新版适配 AnalyticsIntent）。
 
         职责：
@@ -318,6 +374,11 @@ class AnalyticsWorkflowNodes:
         
         - 支持 simple 和 complex 两种模式。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_build_sql")
 
         t0 = time.monotonic()
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_BUILD_SQL
@@ -334,8 +395,8 @@ class AnalyticsWorkflowNodes:
                     user_context=user_context,
                     task_run=task_run,
                 )
-            
 
+        # 使用 asyncio.to_thread 将同步操作放到线程池执行
         (
             metric_definition,
             data_source_definition,
@@ -343,7 +404,8 @@ class AnalyticsWorkflowNodes:
             permission_check_result,
             data_scope_result,
             sql_bundle,
-        ) = self.retry_controller.run(
+        ) = await asyncio.to_thread(
+            self.retry_controller.run,
             node_name="analytics_build_sql",
             state=state,
             action=_build_sql_bundle,
@@ -491,7 +553,7 @@ class AnalyticsWorkflowNodes:
         )
 
 
-    def analytics_guard_sql(self, state: dict) -> dict:
+    async def analytics_guard_sql(self, state: dict) -> dict:
         """SQL Guard 节点。
 
         职责：
@@ -499,6 +561,11 @@ class AnalyticsWorkflowNodes:
         - 强制表白名单与部门过滤约束；
         - 如果不安全则直接阻断。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_guard_sql")
 
         t1 = time.monotonic()
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_GUARD_SQL
@@ -528,7 +595,7 @@ class AnalyticsWorkflowNodes:
         state["guard_result"] = guard_result
         return state
 
-    def analytics_execute_sql(self, state: dict) -> dict:
+    async def analytics_execute_sql(self, state: dict) -> dict:
         """SQL 执行节点。
 
         职责：
@@ -536,6 +603,11 @@ class AnalyticsWorkflowNodes:
         - 记录 SQL Audit；
         - 完成结果脱敏。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_execute_sql")
 
         t2 = time.monotonic()
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_EXECUTE_SQL
@@ -571,7 +643,9 @@ class AnalyticsWorkflowNodes:
             )
 
         try:
-            execution_result = self.retry_controller.run(
+            # 使用 asyncio.to_thread 将同步 IO 操作放到线程池执行，避免阻塞事件循环
+            execution_result = await asyncio.to_thread(
+                self.retry_controller.run,
                 node_name="analytics_execute_sql",
                 state=state,
                 action=_execute_sql,
@@ -644,19 +718,24 @@ class AnalyticsWorkflowNodes:
         state["masking_result"] = masking_result
         return state
 
-    def analytics_summarize(self, state: dict) -> dict:
-        """结果总结节点。
+    async def analytics_summarize(self, state: dict) -> dict:
+        """结果总结节点（v2 并行 LLM 版本）。
 
         职责：
-        - 生成 summary；
-        - 按 output_mode 延迟生成 chart_spec / insight_cards / report_blocks；
+        - 生成 summary / insight / chart / report；
+        - 使用 ParallelLLMGenerator 并行调用 LLM；
+        - 按 output_mode 决定生成范围；
         - 构造统一 AnalyticsResult 对象。
         """
+
+        # SSE 进度推送
+        tracker = state.get("_sse_tracker")
+        if tracker:
+            await tracker.step("analytics_summarize")
 
         state["workflow_stage"] = AnalyticsWorkflowStage.ANALYTICS_SUMMARIZE
         state["workflow_outcome"] = AnalyticsWorkflowOutcome.CONTINUE
         output_mode = state["output_mode"]
-        intent = state.get("intent")
         execution_result = state["execution_result"]
         masking_result = state["masking_result"]
         audit_record = state["audit_record"]
@@ -665,8 +744,9 @@ class AnalyticsWorkflowNodes:
         permission_check_result = state["permission_check_result"]
         data_scope_result = state["data_scope_result"]
         need_sql_explain = bool(state.get("need_sql_explain"))
+        intent = state.get("intent")
 
-        slots = self._intent_to_slots(state["intent"])
+        slots = self._intent_to_slots(intent)
         summary = self.analytics_service._build_summary(slots, execution_result)
         state["summary"] = summary
         sql_explain = None
@@ -707,69 +787,145 @@ class AnalyticsWorkflowNodes:
         chart_spec = None
         insight_cards: list[dict] = []
         report_blocks: list[dict] = []
+        llm_summary = None
+        llm_insights = None
+        llm_chart = None
+        llm_report = None
 
+        # 准备行数据
+        rows = masking_result.rows
+        columns = masking_result.columns
+        row_count = execution_result.row_count
+
+        # 并行 LLM 生成（仅在 standard/full 模式下）
         if output_mode in {"standard", "full"}:
             t4 = time.monotonic()
             try:
-                chart_spec = self.analytics_service._build_chart_spec(
-                    slots=self._intent_to_slots(intent),
-                    execution_result=execution_result,
-                    metric_name=self._intent_to_slots(intent).get("metric"),
+                # 使用并行 LLM 生成器
+                generator = self.parallel_llm_generator
+
+                # 准备回调（如果有 SSE tracker）
+                progress_callback = None
+                tracker: RedisSSEProgressTracker | None = state.get("_sse_tracker")
+
+                if tracker:
+                    async def llm_progress_callback(product: str, progress: int, data: dict):
+                        event_map = {
+                            "summary": SSEEventType.SUMMARY_DONE,
+                            "insight": SSEEventType.INSIGHT_DONE,
+                            "chart": SSEEventType.CHART_DONE,
+                            "report": SSEEventType.REPORT_DONE,
+                        }
+                        event_type = event_map.get(product)
+                        if event_type:
+                            data = {"run_id": state["task_run"]["run_id"], "progress": progress, product: data}
+                            await tracker.publisher.publish(event_type, data)
+
+                    progress_callback = llm_progress_callback
+
+                # 直接 await 异步调用（节点现在是 async 的）
+                llm_result = await generator.generate_all(
+                    original_query=state["query"],
+                    slots=slots,
+                    rows=[dict(zip(columns, row)) for row in rows],
+                    columns=list(columns),
+                    row_count=row_count,
+                    progress_callback=progress_callback,
                 )
-            except Exception as exc:  # pragma: no cover - 降级保护
+
+                # 解析 LLM 结果
+                if llm_result.get("summary"):
+                    llm_summary = llm_result["summary"]
+                    # 优先使用 LLM 生成的摘要
+                    if llm_summary.get("main_text"):
+                        summary = llm_summary["main_text"]
+
+                if llm_result.get("insights"):
+                    llm_insights = llm_result["insights"]
+                    if llm_insights.get("insights"):
+                        insight_cards = llm_insights["insights"]
+
+                if llm_result.get("chart"):
+                    llm_chart = llm_result["chart"]
+                    # 构建 chart_spec
+                    chart_spec = {
+                        "chart_type": llm_chart.get("chart_type", "bar"),
+                        "title": llm_chart.get("title", slots.get("metric", "指标")),
+                        "x_field": llm_chart.get("x_field"),
+                        "y_field": llm_chart.get("y_field"),
+                    }
+
+                if llm_result.get("report"):
+                    llm_report = llm_result["report"]
+
+            except Exception as exc:
+                logger.warning(f"并行 LLM 生成失败，降级到规则生成: {exc}")
                 self.degradation_controller.mark_degraded(
                     state=state,
-                    feature="chart_spec",
-                    reason=f"图表描述生成失败：{exc}",
+                    feature="parallel_llm",
+                    reason=f"LLM 内容生成失败：{exc}",
                 )
-                chart_spec = None
-            try:
+                # 降级：使用规则生成
+                chart_spec = self.analytics_service._build_chart_spec(
+                    slots=slots,
+                    execution_result=execution_result,
+                    metric_name=slots.get("metric"),
+                )
                 insight_cards = self.retry_controller.run(
                     node_name="analytics_summarize",
                     state=state,
                     action=lambda: self.analytics_service.insight_builder.build(
-                        slots=self._intent_to_slots(intent),
-                        rows=masking_result.rows,
-                        row_count=execution_result.row_count,
+                        slots=slots,
+                        rows=rows,
+                        row_count=row_count,
                     ),
                 )
-            except Exception as exc:  # pragma: no cover - 降级保护
-                self.degradation_controller.mark_degraded(
-                    state=state,
-                    feature="insight_cards",
-                    reason=f"洞察卡片生成失败：{exc}",
-                )
-                insight_cards = []
-            state["timing"]["insight_ms"] = round((time.monotonic() - t4) * 1000, 1)
+            state["timing"]["llm_content_ms"] = round((time.monotonic() - t4) * 1000, 1)
+        else:
+            # lite 模式：只生成基础摘要
+            state["timing"]["llm_content_ms"] = 0.0
 
+        # 生成报告块（仅 full 模式）
         if output_mode == "full":
             t5 = time.monotonic()
             try:
-                report_blocks = self.retry_controller.run(
-                    node_name="analytics_summarize",
-                    state=state,
-                    action=lambda: self.analytics_service.report_formatter.build(
-                        summary=summary,
-                        insight_cards=insight_cards,
-                        tables=[
-                            {
-                                "name": "main_result",
-                                "columns": masking_result.columns,
-                                "rows": [list(row.values()) for row in masking_result.rows],
-                            }
-                        ],
-                        chart_spec=chart_spec,
-                        governance_note={
-                            "audit_info": audit_info,
-                            "permission_check_result": permission_check_result,
-                            "data_scope_result": data_scope_result,
-                            "masked_fields": masking_result.masked_fields,
-                            "effective_filters": effective_filters,
-                            "governance_action": masking_result.governance_decision,
-                        },
-                    ),
-                )
-            except Exception as exc:  # pragma: no cover - 降级保护
+                # 如果有 LLM 生成的报告，直接使用
+                if llm_report:
+                    report_blocks = llm_report.get("blocks", [])
+                    if not report_blocks:
+                        # 没有 blocks，尝试用 LLM 摘要构建
+                        report_blocks = self._build_report_blocks_from_llm(
+                            summary=llm_summary or {"main_text": summary},
+                            insights=llm_insights,
+                            chart=llm_chart,
+                        )
+                else:
+                    report_blocks = self.retry_controller.run(
+                        node_name="analytics_summarize",
+                        state=state,
+                        action=lambda: self.analytics_service.report_formatter.build(
+                            summary=summary,
+                            insight_cards=insight_cards,
+                            tables=[
+                                {
+                                    "name": "main_result",
+                                    "columns": masking_result.columns,
+                                    "rows": [list(row.values()) for row in rows],
+                                }
+                            ],
+                            chart_spec=chart_spec,
+                            governance_note={
+                                "audit_info": audit_info,
+                                "permission_check_result": permission_check_result,
+                                "data_scope_result": data_scope_result,
+                                "masked_fields": masking_result.masked_fields,
+                                "effective_filters": effective_filters,
+                                "governance_action": masking_result.governance_decision,
+                            },
+                        ),
+                    )
+            except Exception as exc:
+                logger.warning(f"报告块生成失败: {exc}")
                 self.degradation_controller.mark_degraded(
                     state=state,
                     feature="report_blocks",
@@ -778,25 +934,29 @@ class AnalyticsWorkflowNodes:
                 report_blocks = []
             state["timing"]["report_ms"] = round((time.monotonic() - t5) * 1000, 1)
         else:
-            state["timing"].setdefault("insight_ms", 0.0)
             state["timing"].setdefault("report_ms", 0.0)
 
-            governance_decision_value = masking_result.governance_decision
-            if isinstance(governance_decision_value, str):
-                governance_decision_value = {"action": governance_decision_value}
+        governance_decision_value = masking_result.governance_decision
+        if isinstance(governance_decision_value, str):
+            governance_decision_value = {"action": governance_decision_value}
 
-            state["analytics_result"] = AnalyticsResult(
+        state["llm_summary"] = llm_summary
+        state["llm_insights"] = llm_insights
+        state["llm_chart"] = llm_chart
+        state["llm_report"] = llm_report
+
+        state["analytics_result"] = AnalyticsResult(
             run_id=state["task_run"]["run_id"],
             trace_id=state["task_run"]["trace_id"],
             summary=summary,
             sql_preview=guard_result.checked_sql,
-            row_count=execution_result.row_count,
+            row_count=row_count,
             latency_ms=execution_result.latency_ms,
             data_source=execution_result.data_source,
             metric_scope=sql_bundle["metric_scope"],
             compare_target=sql_bundle.get("compare_target"),
             group_by=sql_bundle.get("group_by"),
-            slots=self._intent_to_slots(intent),
+            slots=slots,
             planning_source="llm_parser",
             columns=execution_result.columns,
             rows=execution_result.rows,
@@ -835,7 +995,55 @@ class AnalyticsWorkflowNodes:
         )
         return state
 
-    def analytics_finish(self, state: dict) -> dict:
+    def _build_report_blocks_from_llm(
+        self,
+        summary: dict,
+        insights: dict | None,
+        chart: dict | None,
+    ) -> list[dict]:
+        """从 LLM 生成的内容构建报告块
+
+        当 LLM 返回的报告没有 blocks 时，使用其他 LLM 结果构建。
+        """
+        blocks = []
+
+        # 执行摘要
+        main_text = summary.get("main_text", "")
+        if main_text:
+            blocks.append({
+                "block_type": "overview",
+                "title": "分析概览",
+                "content": main_text,
+            })
+
+        # 关键发现
+        if insights and insights.get("insights"):
+            insights_list = insights["insights"]
+            if insights_list:
+                findings_text = "\n".join([
+                    f"• **{insight.get('title', '洞察')}**：{insight.get('summary', '')}"
+                    for insight in insights_list
+                ])
+                blocks.append({
+                    "block_type": "findings",
+                    "title": "关键发现",
+                    "content": findings_text,
+                })
+
+        # 图表
+        if chart and chart.get("chart_type"):
+            blocks.append({
+                "block_type": "chart",
+                "title": chart.get("title", "可视化图表"),
+                "content": {
+                    "chart_type": chart.get("chart_type"),
+                    "description": chart.get("description", ""),
+                },
+            })
+
+        return blocks
+
+    async def analytics_finish(self, state: dict) -> dict:
         """结束节点。
 
         职责：
@@ -852,7 +1060,6 @@ class AnalyticsWorkflowNodes:
         analytics_result = state["analytics_result"]
         task_run = state["task_run"]
         conversation_id = state["conversation_id"]
-        intent = state.get("intent")
         # finish 节点只把轻量输出摘要写回 task_run。
         # 重结果继续交给 analytics_result_repository，避免 output_snapshot 再次膨胀。
         lightweight_snapshot = self.analytics_service.snapshot_builder.build_output_snapshot(

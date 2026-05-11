@@ -1,0 +1,19 @@
+### LLaMA-Factory 数据集注册配置
+### 用于合同条款提取任务的数据集
+
+contract_clauses:
+  - dataset_class: TextifyDataset
+    file: ../dataset/data/contract_train.jsonl
+    format: ${.format}
+  - dataset_class: TextifyDataset
+    file: ../dataset/data/contract_val.jsonl
+    format: ${.format}
+  - dataset_class: TextifyDataset
+    file: ../dataset/data/contract_test.jsonl
+    format: ${.format}
+
+### 数据格式化模板
+format:
+  feature: "instruction"
+  input: "input"
+  output: "output"

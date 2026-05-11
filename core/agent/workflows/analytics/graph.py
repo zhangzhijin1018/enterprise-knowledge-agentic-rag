@@ -173,6 +173,166 @@ class AnalyticsLangGraphWorkflow:
         }
         return self._compiled.invoke(state)
 
+    async def arun_state(
+        self,
+        *,
+        query: str,
+        user_context,
+        conversation_id: str | None = None,
+        output_mode: str = "lite",
+        need_sql_explain: bool = False,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
+        recovered_plan=None,
+        resume_from_clarification: bool = False,
+        existing_task_run: dict | None = None,
+        _sse_tracker=None,  # SSE tracker，由 ainvoke 传递
+    ) -> AnalyticsWorkflowState:
+        """异步执行经营分析微观工作流并返回完整微观状态。
+
+        返回的是 workflow state，不是持久化快照。
+
+        _sse_tracker: SSE 进度追踪器，用于推送工作流执行进度
+        """
+
+        state: AnalyticsWorkflowState = {
+            "query": query,
+            "user_context": user_context,
+            "conversation_id": conversation_id,
+            "parent_task_id": parent_task_id,
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "output_mode": output_mode,
+            "need_sql_explain": need_sql_explain,
+            "recovered_plan": recovered_plan,
+            "resume_from_clarification": resume_from_clarification,
+            "existing_task_run": existing_task_run,
+            "_sse_tracker": _sse_tracker,  # 传递给节点
+        }
+        return await self._compiled.ainvoke(state)
+
+    async def aresume_from_slots(
+        self,
+        *,
+        query: str,
+        user_context,
+        conversation_id: str,
+        run_id: str,
+        trace_id: str,
+        output_mode: str,
+        need_sql_explain: bool,
+        recovered_plan,
+        existing_task_run: dict,
+        parent_task_id: str | None = None,
+    ) -> AnalyticsWorkflowState:
+        """异步基于 clarification 补槽结果恢复 workflow。"""
+
+        return await self.arun_state(
+            query=query,
+            user_context=user_context,
+            conversation_id=conversation_id,
+            output_mode=output_mode,
+            need_sql_explain=need_sql_explain,
+            run_id=run_id,
+            trace_id=trace_id,
+            parent_task_id=parent_task_id,
+            recovered_plan=recovered_plan,
+            resume_from_clarification=True,
+            existing_task_run=existing_task_run,
+        )
+
+    async def ainvoke(
+        self,
+        *,
+        query: str,
+        user_context,
+        conversation_id: str | None = None,
+        output_mode: str = "lite",
+        need_sql_explain: bool = False,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
+    ) -> dict:
+        """异步执行经营分析微观工作流并返回最终业务响应。
+
+        支持 SSE 推送模式：
+        - 如果传递了 run_id 且需要 SSE，则通过 RedisSSEProgressTracker 推送进度
+        - 工作流各节点会在执行过程中推送 progress 事件
+        - 完成时推送 complete 事件
+        """
+
+        from core.common.sse_progress import RedisSSEProgressTracker, get_redis_pool
+
+        # 定义工作流步骤（用于进度展示）
+        workflow_steps = [
+            {"key": "analytics_entry", "label": "初始化"},
+            {"key": "analytics_plan", "label": "理解问题"},
+            {"key": "analytics_validate_slots", "label": "验证参数"},
+            {"key": "analytics_build_sql", "label": "构建查询"},
+            {"key": "analytics_guard_sql", "label": "安全校验"},
+            {"key": "analytics_execute_sql", "label": "执行查询"},
+            {"key": "analytics_summarize", "label": "生成摘要"},
+            {"key": "analytics_finish", "label": "完成"},
+        ]
+
+        sse_tracker = None
+        pool = None
+
+        # 如果有 run_id，初始化 SSE tracker
+        if run_id:
+            try:
+                pool = await get_redis_pool()
+                sse_tracker = RedisSSEProgressTracker(
+                    run_id=run_id,
+                    steps=workflow_steps,
+                    redis_pool=pool,
+                )
+                # 启动 tracker（发送初始状态）
+                await sse_tracker.__aenter__()
+            except Exception as e:
+                # SSE 初始化失败不影响主流程
+                import logging
+                logging.getLogger(__name__).warning(f"SSE tracker 初始化失败: {e}")
+                sse_tracker = None
+
+        try:
+            result_state = await self.arun_state(
+                query=query,
+                user_context=user_context,
+                conversation_id=conversation_id,
+                output_mode=output_mode,
+                need_sql_explain=need_sql_explain,
+                run_id=run_id,
+                trace_id=trace_id,
+                parent_task_id=parent_task_id,
+                _sse_tracker=sse_tracker,
+            )
+
+            # 发送完成事件
+            if sse_tracker:
+                final_response = result_state.get("final_response", {})
+                # 根据工作流结果决定状态
+                if final_response.get("meta", {}).get("status") == "succeeded":
+                    await sse_tracker.finish(result=final_response)
+                elif final_response.get("meta", {}).get("status") == "failed":
+                    error_msg = final_response.get("meta", {}).get("message", "任务失败")
+                    await sse_tracker.error("WORKFLOW_FAILED", error_msg)
+                elif final_response.get("meta", {}).get("status") == "awaiting_clarification":
+                    await sse_tracker.finish(result={
+                        "clarification": final_response.get("data", {}).get("clarification"),
+                        "status": "awaiting_clarification"
+                    })
+
+            return result_state["final_response"]
+        finally:
+            # 清理 tracker
+            if sse_tracker:
+                try:
+                    await sse_tracker.__aexit__(None, None, None)
+                except Exception:
+                    pass
+
     def resume_from_slots(
         self,
         *,

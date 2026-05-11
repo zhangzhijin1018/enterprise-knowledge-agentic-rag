@@ -1,0 +1,80 @@
+# =============================================================================
+# RAG Agent K8s Deployment
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+  namespace: enterprise-agent
+  labels:
+    app: rag-agent
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rag-agent
+  template:
+    metadata:
+      labels:
+        app: rag-agent
+        tier: agent
+    spec:
+      containers:
+        - name: rag-agent
+          image: enterprise-agent/rag-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6001
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: MILVUS_HOST
+              value: "milvus.default.svc.cluster.local"
+            - name: MILVUS_PORT
+              value: "19530"
+            - name: LLM_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-config
+                  key: llm_gateway_url
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /a2a/health
+              port: 6001
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /a2a/health
+              port: 6001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-agent-svc
+  namespace: enterprise-agent
+  labels:
+    app: rag-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6001
+      targetPort: 6001
+      protocol: TCP
+      name: http
+  selector:
+    app: rag-agent

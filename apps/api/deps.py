@@ -55,6 +55,7 @@ from core.services.retrieval_service import RetrievalService
 from core.tools.report.report_gateway import ReportGateway
 from core.tools.sql.sql_gateway import SQLGateway
 from core.vectorstore import MilvusStore
+from core.common.sse_progress import RedisSSEProgressTracker, get_redis_pool
 
 
 def get_session() -> Iterator[Session | None]:
@@ -443,3 +444,97 @@ def get_analytics_review_service(
         analytics_review_repository=analytics_review_repository,
         analytics_export_service=analytics_export_service,
     )
+
+
+# =============================================================================
+# SSE 进度追踪相关依赖
+# =============================================================================
+
+async def get_redis_pool():
+    """获取 Redis 连接池。
+
+    Returns:
+        Redis 连接池实例
+    """
+    from core.common.sse_progress import get_redis_pool as _get_pool
+    return await _get_pool()
+
+
+# =============================================================================
+# RAG 相关依赖
+# =============================================================================
+
+def get_rag_retrieval_chain(
+    embedding_gateway: EmbeddingGateway = Depends(get_embedding_gateway),
+    vector_store: MilvusStore = Depends(get_vector_store),
+) -> "RetrievalChain":
+    """提供 RAG 检索链路依赖。
+
+    创建并返回 RAG 检索链路实例。
+    """
+    from core.rag import create_retrieval_chain
+    return create_retrieval_chain(
+        embedding_gateway=embedding_gateway,
+        vector_store=vector_store,
+    )
+
+
+def get_rag_llm_gateway() -> "LLMGateway":
+    """提供 RAG LLM Gateway 依赖。
+
+    Returns:
+        LLM Gateway 实例
+    """
+    from core.llm.gateway import get_llm_gateway
+    return get_llm_gateway()
+
+
+def get_rag_agent(
+    retrieval_chain: "RetrievalChain" = Depends(get_rag_retrieval_chain),
+    llm_gateway: "LLMGateway" = Depends(get_rag_llm_gateway),
+) -> "RAGAgent":
+    """提供 RAG Agent 依赖。
+
+    Returns:
+        RAG Agent 实例
+    """
+    from core.agent.business_agents.rag_agent import RAGAgent
+    return RAGAgent(
+        retrieval_chain=retrieval_chain,
+        llm_gateway=llm_gateway,
+        min_retrieval_score=0.3,
+        min_retrieval_count=1,
+    )
+
+
+def get_rag_service(
+    rag_agent: "RAGAgent" = Depends(get_rag_agent),
+    conversation_repository: ConversationRepository = Depends(get_conversation_repository),
+    task_run_repository: TaskRunRepository = Depends(get_task_run_repository),
+) -> "RAGService":
+    """提供 RAG Service 依赖。
+
+    Returns:
+        RAG Service 实例
+    """
+    from core.services.rag_service import RAGService
+    return RAGService(
+        rag_agent=rag_agent,
+        conversation_repository=conversation_repository,
+        task_run_repository=task_run_repository,
+    )
+
+
+# =============================================================================
+# Human Review 相关依赖
+# =============================================================================
+
+def get_review_service() -> "ReviewService":
+    """提供 Review Service 依赖。
+
+    Returns:
+        Review Service 实例
+    """
+    from core.review.review_service import ReviewService
+    from core.review.models import ReviewPolicy
+    return ReviewService(review_policy=ReviewPolicy())

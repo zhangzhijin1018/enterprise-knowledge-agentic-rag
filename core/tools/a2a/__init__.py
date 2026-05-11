@@ -1,19 +1,26 @@
-"""A2A 相关能力导出。"""
+"""
+A2A 工具模块
 
-from core.tools.a2a.contracts import (
-    AgentCardRef,
-    DelegationTarget,
-    ResultContract,
-    StatusContract,
-    TaskEnvelope,
+使用 python_a2a 库实现标准的 A2A 协议。
+"""
+
+from python_a2a import A2AServer, AgentCard, AgentSkill
+from python_a2a.models import (
+    Message,
+    TextContent,
+    MessageRole,
+    Task,
+    TaskStatus,
 )
-from core.tools.a2a.gateway import A2AGateway
 
+# Re-export for convenience
 __all__ = [
-    "AgentCardRef",
-    "DelegationTarget",
-    "ResultContract",
-    "StatusContract",
-    "TaskEnvelope",
-    "A2AGateway",
+    "A2AServer",
+    "AgentCard",
+    "AgentSkill",
+    "Message",
+    "TextContent",
+    "MessageRole",
+    "Task",
+    "TaskStatus",
 ]

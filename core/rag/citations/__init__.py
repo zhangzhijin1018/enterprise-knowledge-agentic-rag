@@ -1,4 +1,10 @@
-"""引用构造模块包。
+"""RAG 引用模块包。
 
-后续会在这里统一生成文档来源、页码、chunk 和分数等引用信息。
+该模块负责检索结果的引用标记生成和格式化。
 """
+
+from core.rag.citations.builder import CitationBuilder
+
+__all__ = [
+    "CitationBuilder",
+]

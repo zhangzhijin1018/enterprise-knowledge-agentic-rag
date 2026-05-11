@@ -1,0 +1,76 @@
+# =============================================================================
+# Contract Agent K8s Deployment
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: contract-agent
+  namespace: enterprise-agent
+  labels:
+    app: contract-agent
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: contract-agent
+  template:
+    metadata:
+      labels:
+        app: contract-agent
+        tier: agent
+    spec:
+      containers:
+        - name: contract-agent
+          image: enterprise-agent/contract-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6003
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: LLM_GATEWAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-config
+                  key: llm_gateway_url
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /a2a/health
+              port: 6003
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /a2a/health
+              port: 6003
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: contract-agent-svc
+  namespace: enterprise-agent
+  labels:
+    app: contract-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6003
+      targetPort: 6003
+      protocol: TCP
+      name: http
+  selector:
+    app: contract-agent

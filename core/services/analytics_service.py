@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from core.agent.workflows.analytics.snapshot_builder import AnalyticsSnapshotBuilder
@@ -105,7 +107,7 @@ class AnalyticsService:
             self._workflow_adapter = AnalyticsWorkflowAdapter(analytics_service=self)
         return self._workflow_adapter
 
-    def submit_query(
+    async def submit_query(
         self,
         *,
         query: str,
@@ -129,7 +131,7 @@ class AnalyticsService:
             )
 
         # 直接调用 Workflow Adapter
-        return self.workflow_adapter.execute_query(
+        return await self.workflow_adapter.execute_query(
             query=normalized_query,
             conversation_id=conversation_id,
             output_mode=output_mode,
@@ -137,7 +139,250 @@ class AnalyticsService:
             user_context=user_context,
         )
 
-    def get_run_detail(
+    async def chat_query(
+        self,
+        *,
+        query: str,
+        conversation_id: str | None,
+        output_mode: str,
+        user_context: UserContext,
+    ) -> dict:
+        """经营分析聊天接口 - 前端聊天框专用。
+
+        与 submit_query 的区别：
+        1. 返回格式更适合前端展示
+        2. 使用 Mock LLM 生成自然语言摘要和洞察
+        3. 简化响应结构
+        """
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise AppException(
+                error_code=error_codes.ANALYTICS_QUERY_FAILED,
+                message="经营分析问题不能为空",
+                status_code=400,
+                detail={},
+            )
+
+        # 调用 Workflow Adapter
+        result = await self.workflow_adapter.execute_query(
+            query=normalized_query,
+            conversation_id=conversation_id,
+            output_mode=output_mode,
+            need_sql_explain=False,
+            user_context=user_context,
+        )
+
+        # 转换为前端友好格式
+        output_data = result.get("data", {})
+        output_snapshot = output_data.get("output_snapshot", {})
+
+        # 获取 slots
+        slots = output_snapshot.get("slots", {})
+
+        # 如果有真实数据，尝试用 Mock LLM 生成更自然的摘要
+        if output_data.get("status") == "succeeded":
+            from core.analytics.mock_llm_generator import get_mock_generator
+            mock_gen = get_mock_generator()
+
+            # 构造 Mock LLM 输入
+            rows = []
+            tables = output_snapshot.get("tables", [])
+            if tables and len(tables) > 0:
+                table = tables[0]
+                columns = table.get("columns", [])
+                rows_data = table.get("rows", [])
+                for row in rows_data:
+                    row_dict = dict(zip(columns, row))
+                    rows.append(row_dict)
+
+            if rows:
+                mock_result = mock_gen.generate_all(
+                    original_query=normalized_query,
+                    slots=slots,
+                    rows=rows,
+                    columns=columns if tables else [],
+                    row_count=len(rows),
+                )
+                # 用 Mock 生成的摘要覆盖
+                output_snapshot["summary"] = mock_result["summary"]["main_text"]
+                output_snapshot["insight_cards"] = mock_result["insights"]["insights"]
+                output_snapshot["chart_desc"] = mock_result["chart_desc"]
+
+        # 构建前端友好响应
+        chat_data = {
+            "run_id": output_data.get("run_id", ""),
+            "conversation_id": output_data.get("conversation_id"),
+            "summary": output_snapshot.get("summary"),
+            "insight_cards": output_snapshot.get("insight_cards", []),
+            "chart_desc": output_snapshot.get("chart_desc"),
+            "report_blocks": output_snapshot.get("report_blocks", []),
+            "sql_preview": output_snapshot.get("sql_preview"),
+            "tables": output_snapshot.get("tables", []),
+            "row_count": output_snapshot.get("row_count"),
+            "status": output_data.get("status", "completed"),
+            "latency_ms": output_snapshot.get("latency_ms"),
+        }
+
+        return {
+            "data": chat_data,
+            "meta": result.get("meta", {}),
+        }
+
+    async def get_run_status(
+        self,
+        *,
+        run_id: str,
+        user_context: UserContext,
+    ) -> dict:
+        """轮询任务状态 - 用于前端进度展示。
+
+        返回结构：
+        - status: running/completed/failed/awaiting_clarification
+        - current_step: 当前执行步骤（用于进度条展示）
+        - steps: 所有步骤及其状态
+        - progress: 进度百分比 (0-100)
+        - result: 完成后返回完整结果（仅 completed 时有值）
+        - error: 错误信息（仅 failed 时有值）
+        """
+
+        task_run = self.task_run_repository.get_task_run(run_id)
+        if task_run is None or task_run["task_type"] != "analytics":
+            raise AppException(
+                error_code=error_codes.ANALYTICS_RUN_NOT_FOUND,
+                message="指定经营分析任务不存在",
+                status_code=404,
+                detail={"run_id": run_id},
+            )
+
+        conversation = self.conversation_repository.get_conversation(task_run["conversation_id"])
+        if conversation is None or conversation["user_id"] != user_context.user_id:
+            raise AppException(
+                error_code=error_codes.PERMISSION_DENIED,
+                message="当前用户无权查看该任务",
+                status_code=403,
+                detail={},
+            )
+
+        # 定义标准步骤
+        steps = [
+            {"key": "intent_parse", "label": "理解问题", "status": "pending"},
+            {"key": "slot_validate", "label": "验证参数", "status": "pending"},
+            {"key": "sql_execute", "label": "执行查询", "status": "pending"},
+            {"key": "generate_summary", "label": "生成摘要", "status": "pending"},
+        ]
+
+        # 根据 task_run 状态更新步骤
+        status = task_run.get("status", "pending")
+        sub_status = task_run.get("sub_status")
+        output_snapshot = task_run.get("output_snapshot") or {}
+
+        # 映射 task_run 状态到步骤状态
+        status_step_map = {
+            "intent_parsing": ("intent_parse", "pending", "pending", "pending"),
+            "slot_validating": ("intent_parse", "slot_validate", "pending", "pending"),
+            "sql_executing": ("intent_parse", "slot_validate", "sql_execute", "pending"),
+            "generating_summary": ("intent_parse", "slot_validate", "sql_execute", "generate_summary"),
+            "succeeded": ("intent_parse", "slot_validate", "sql_execute", "generate_summary"),
+            "failed": ("intent_parse", "slot_validate", "sql_execute", "generate_summary"),
+            "awaiting_clarification": ("intent_parse", "slot_validate", "pending", "pending"),
+        }
+
+        if status in status_step_map:
+            completed_keys, current_key, remaining = status_step_map[status]
+            for step in steps:
+                if step["key"] in completed_keys:
+                    step["status"] = "completed"
+                elif step["key"] == current_key and status not in ["succeeded", "failed"]:
+                    step["status"] = "running"
+                else:
+                    step["status"] = "pending"
+
+        # 计算进度
+        completed_count = sum(1 for s in steps if s["status"] == "completed")
+        progress = int((completed_count / len(steps)) * 100)
+
+        # 当前步骤描述
+        current_step = None
+        for step in steps:
+            if step["status"] == "running":
+                current_step = step["label"]
+                break
+
+        # 构建响应
+        result_data = {
+            "run_id": run_id,
+            "status": "completed" if status == "succeeded" else ("failed" if status == "failed" else "running"),
+            "task_status": status,
+            "sub_status": sub_status,
+            "current_step": current_step or (steps[-1]["label"] if status == "succeeded" else None),
+            "steps": steps,
+            "progress": progress,
+            "trace_id": task_run.get("trace_id"),
+            "latency_ms": output_snapshot.get("latency_ms"),
+        }
+
+        # 完成后返回完整数据
+        if status == "succeeded":
+            result_data["result"] = self._build_chat_response(run_id, task_run)
+        elif status == "failed":
+            result_data["error"] = {
+                "error_code": sub_status,
+                "message": output_snapshot.get("error_message") or "任务执行失败",
+            }
+
+        return {
+            "data": result_data,
+            "meta": {"run_id": run_id},
+        }
+
+    def _build_chat_response(self, run_id: str, task_run: dict) -> dict:
+        """构建聊天响应数据（供轮询完成后使用）"""
+
+        output_snapshot = task_run.get("output_snapshot") or {}
+
+        # 获取 slots
+        slots = output_snapshot.get("slots", {})
+
+        # 如果有真实数据，尝试用 Mock LLM 生成更自然的摘要
+        rows = []
+        tables = output_snapshot.get("tables", [])
+        if tables and len(tables) > 0:
+            table = tables[0]
+            columns = table.get("columns", [])
+            rows_data = table.get("rows", [])
+            for row in rows_data:
+                row_dict = dict(zip(columns, row))
+                rows.append(row_dict)
+
+        if rows:
+            from core.analytics.mock_llm_generator import get_mock_generator
+            mock_gen = get_mock_generator()
+            mock_result = mock_gen.generate_all(
+                original_query=task_run.get("query", ""),
+                slots=slots,
+                rows=rows,
+                columns=columns if tables else [],
+                row_count=len(rows),
+            )
+            output_snapshot["summary"] = mock_result["summary"]["main_text"]
+            output_snapshot["insight_cards"] = mock_result["insights"]["insights"]
+            output_snapshot["chart_desc"] = mock_result["chart_desc"]
+
+        return {
+            "run_id": run_id,
+            "conversation_id": task_run.get("conversation_id"),
+            "summary": output_snapshot.get("summary"),
+            "insight_cards": output_snapshot.get("insight_cards", []),
+            "chart_desc": output_snapshot.get("chart_desc"),
+            "report_blocks": output_snapshot.get("report_blocks", []),
+            "sql_preview": output_snapshot.get("sql_preview"),
+            "tables": output_snapshot.get("tables", []),
+            "row_count": output_snapshot.get("row_count"),
+            "latency_ms": output_snapshot.get("latency_ms"),
+        }
+
+    async def get_run_detail(
         self,
         *,
         run_id: str,
@@ -260,7 +505,7 @@ class AnalyticsService:
             return "standard"
         return DEFAULT_OUTPUT_MODE
 
-    def _get_or_create_conversation(
+    async def _get_or_create_conversation(
         self,
         *,
         conversation_id: str | None,
@@ -269,34 +514,38 @@ class AnalyticsService:
     ) -> dict:
         """读取已有会话或创建新会话（供 Workflow 节点调用）。"""
 
-        if conversation_id:
-            conversation = self.conversation_repository.get_conversation(conversation_id)
-            if conversation is None:
-                raise AppException(
-                    error_code=error_codes.CONVERSATION_NOT_FOUND,
-                    message="指定会话不存在",
-                    status_code=404,
-                    detail={"conversation_id": conversation_id},
-                )
-            if conversation["user_id"] != user_context.user_id:
-                raise AppException(
-                    error_code=error_codes.PERMISSION_DENIED,
-                    message="当前用户无权访问该会话",
-                    status_code=403,
-                    detail={
-                        "conversation_id": conversation_id,
-                        "owner_user_id": conversation["user_id"],
-                        "current_user_id": user_context.user_id,
-                    },
-                )
-            return conversation
+        def _sync_get_create():
+            if conversation_id:
+                conversation = self.conversation_repository.get_conversation(conversation_id)
+                if conversation is None:
+                    raise AppException(
+                        error_code=error_codes.CONVERSATION_NOT_FOUND,
+                        message="指定会话不存在",
+                        status_code=404,
+                        detail={"conversation_id": conversation_id},
+                    )
+                if conversation["user_id"] != user_context.user_id:
+                    raise AppException(
+                        error_code=error_codes.PERMISSION_DENIED,
+                        message="当前用户无权访问该会话",
+                        status_code=403,
+                        detail={
+                            "conversation_id": conversation_id,
+                            "owner_user_id": conversation["user_id"],
+                            "current_user_id": user_context.user_id,
+                        },
+                    )
+                return conversation
 
-        return self.conversation_repository.create_conversation(
-            user_id=user_context.user_id,
-            title=query[:20],
-            current_route="analytics",
-            current_status="active",
-        )
+            return self.conversation_repository.create_conversation(
+                user_id=user_context.user_id,
+                title=query[:20],
+                current_route="analytics",
+                current_status="active",
+            )
+
+        # 使用 asyncio.to_thread 将同步 IO 操作放到线程池执行
+        return await asyncio.to_thread(_sync_get_create)
 
     # 以下是保留的辅助方法，供 Workflow 节点复用
 
@@ -584,4 +833,110 @@ class AnalyticsService:
             return True
         permission_set = set(user_permissions or [])
         return all(permission in permission_set for permission in required_permissions)
+
+    async def get_full_result(
+        self,
+        *,
+        run_id: str,
+        user_context: UserContext,
+    ) -> dict:
+        """获取完整的分析结果（用于大结果下载）
+
+        先从 Redis 缓存获取，缓存不存在则从数据库构建。
+
+        Args:
+            run_id: 任务运行ID
+            user_context: 用户上下文
+
+        Returns:
+            完整的分析结果字典
+        """
+
+        import json
+
+        # 1. 权限校验
+        task_run = self.task_run_repository.get_task_run(run_id)
+        if task_run is None or task_run["task_type"] != "analytics":
+            raise AppException(
+                error_code=error_codes.ANALYTICS_RUN_NOT_FOUND,
+                message="指定经营分析任务不存在",
+                status_code=404,
+                detail={"run_id": run_id},
+            )
+
+        conversation = self.conversation_repository.get_conversation(task_run["conversation_id"])
+        if conversation is None or conversation["user_id"] != user_context.user_id:
+            raise AppException(
+                error_code=error_codes.PERMISSION_DENIED,
+                message="当前用户无权查看该任务",
+                status_code=403,
+                detail={},
+            )
+
+        # 2. 尝试从 Redis 缓存获取
+        try:
+            pool = await get_redis_pool()
+            cache_key = f"result:download:{run_id}"
+            cached = await pool.redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass  # 缓存不存在或获取失败，继续从数据库构建
+
+        # 3. 从数据库构建完整结果
+        output_snapshot = task_run.get("output_snapshot") or {}
+        heavy_result = self.analytics_result_repository.get_heavy_result(run_id)
+
+        # 构建完整结果
+        full_result = {
+            "run_id": run_id,
+            "conversation_id": task_run["conversation_id"],
+            "query": output_snapshot.get("query"),
+            "summary": output_snapshot.get("summary"),
+            "slots": output_snapshot.get("slots", {}),
+            "chart_spec": heavy_result.get("chart_spec") if heavy_result else None,
+            "insight_cards": heavy_result.get("insight_cards", []) if heavy_result else [],
+            "report_blocks": heavy_result.get("report_blocks", []) if heavy_result else [],
+            "tables": heavy_result.get("tables", []) if heavy_result else [],
+            "sql_preview": output_snapshot.get("sql_preview"),
+            "row_count": output_snapshot.get("row_count"),
+            "latency_ms": output_snapshot.get("latency_ms"),
+            "metric_scope": output_snapshot.get("metric_scope"),
+            "data_source": output_snapshot.get("data_source"),
+            "compare_target": output_snapshot.get("compare_target"),
+            "group_by": output_snapshot.get("group_by"),
+            "audit_info": heavy_result.get("audit_info") if heavy_result else None,
+            "masked_fields": heavy_result.get("masked_fields", []) if heavy_result else [],
+            "effective_filters": heavy_result.get("effective_filters", {}) if heavy_result else {},
+            "governance_decision": output_snapshot.get("governance_decision"),
+            "created_at": task_run.get("created_at"),
+            "finished_at": task_run.get("finished_at"),
+        }
+
+        return full_result
+
+    async def cache_full_result(
+        self,
+        *,
+        run_id: str,
+        result: dict,
+        ttl_seconds: int = 86400,
+    ) -> None:
+        """缓存完整结果到 Redis
+
+        Args:
+            run_id: 任务运行ID
+            result: 完整结果字典
+            ttl_seconds: 缓存过期时间，默认 24 小时
+        """
+
+        import json
+
+        try:
+            pool = await get_redis_pool()
+            cache_key = f"result:download:{run_id}"
+            await pool.redis.setex(cache_key, ttl_seconds, json.dumps(result, ensure_ascii=False))
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"结果缓存失败: {e}")
 

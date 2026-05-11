@@ -1,4 +1,12 @@
-"""人工复核模块包。
+"""Human Review 审核管理模块包。
 
-该目录未来用于 Human Review 创建、审批和恢复执行能力。
+提供人工复核功能，支持高风险任务的审核流程。
 """
+
+from core.review.models import ReviewTask, ReviewDecision, ReviewStatus
+
+__all__ = [
+    "ReviewTask",
+    "ReviewDecision",
+    "ReviewStatus",
+]

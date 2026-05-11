@@ -1,0 +1,75 @@
+# =============================================================================
+# Policy Agent K8s Deployment
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: policy-agent
+  namespace: enterprise-agent
+  labels:
+    app: policy-agent
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: policy-agent
+  template:
+    metadata:
+      labels:
+        app: policy-agent
+        tier: agent
+    spec:
+      containers:
+        - name: policy-agent
+          image: enterprise-agent/policy-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6004
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: MILVUS_HOST
+              value: "milvus.default.svc.cluster.local"
+            - name: MILVUS_PORT
+              value: "19530"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /a2a/health
+              port: 6004
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /a2a/health
+              port: 6004
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-agent-svc
+  namespace: enterprise-agent
+  labels:
+    app: policy-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6004
+      targetPort: 6004
+      protocol: TCP
+      name: http
+  selector:
+    app: policy-agent

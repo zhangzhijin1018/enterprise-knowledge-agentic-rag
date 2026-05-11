@@ -1,0 +1,73 @@
+# =============================================================================
+# SQL MCP K8s Deployment
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sql-mcp
+  namespace: enterprise-agent
+  labels:
+    app: sql-mcp
+    tier: mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sql-mcp
+  template:
+    metadata:
+      labels:
+        app: sql-mcp
+        tier: mcp
+    spec:
+      containers:
+        - name: sql-mcp
+          image: enterprise-agent/sql-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5001
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: ANALYTICS_SQL_GATEWAY_TRANSPORT_MODE
+              value: "inprocess_mcp_server"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /mcp/v1/health
+              port: 5001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /mcp/v1/health
+              port: 5001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sql-mcp-svc
+  namespace: enterprise-agent
+  labels:
+    app: sql-mcp
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5001
+      targetPort: 5001
+      protocol: TCP
+      name: http
+  selector:
+    app: sql-mcp

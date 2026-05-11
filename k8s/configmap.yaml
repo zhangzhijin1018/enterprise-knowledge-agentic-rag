@@ -1,0 +1,52 @@
+# =============================================================================
+# 全局配置 ConfigMap
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: enterprise-agent
+data:
+  # Redis 配置
+  redis_url: "redis://redis.default.svc.cluster.local:6379/0"
+
+  # LLM Gateway 配置
+  llm_gateway_url: "http://llm-gateway.default.svc.cluster.local:8000"
+
+  # Milvus 配置
+  milvus_host: "milvus.default.svc.cluster.local"
+  milvus_port: "19530"
+
+  # PostgreSQL 配置
+  postgres_url: "postgresql://postgres:password@postgres.default.svc.cluster.local:5432/agent_db"
+
+  # 日志级别
+  log_level: "INFO"
+
+  # CORS 配置
+  cors_allowed_origins: "*"
+
+  # 会话超时（分钟）
+  conversation_timeout_minutes: "30"
+  conversation_max_turns: "20"
+---
+# =============================================================================
+# 密钥管理（实际使用时请使用 Sealed Secrets 或 Vault）
+# =============================================================================
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-secrets
+  namespace: enterprise-agent
+type: Opaque
+stringData:
+  # LLM API Key
+  LLM_API_KEY: "your-api-key-here"
+
+  # Database credentials
+  POSTGRES_PASSWORD: "your-db-password-here"
+
+  # Redis password (if needed)
+  REDIS_PASSWORD: ""

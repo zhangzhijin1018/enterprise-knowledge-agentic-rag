@@ -1,0 +1,52 @@
+### 合同审查条款提取 - Qwen3-32B LoRA 微调配置
+### LLaMA-Factory 训练配置文件
+### 适用于更强的复杂合同分析场景
+
+### 模型配置
+model_name_or_path: Qwen/Qwen3-32B
+stage: sft
+do_train: true
+finetuning_type: lora
+quantization_bit: 4  # 4bit 量化，节省显存（QLoRA）
+
+### 数据集配置
+dataset: contract_clauses
+template: qwen3
+cutoff_len: 4096  # 32B 模型支持更长上下文
+max_samples: 1000  # 每种数据集采样数量，-1 表示使用全部
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### 输出配置
+output_dir: ./output/contract_qwen32b_lora
+exp_name: contract_clauses_extract
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+val_size: 0.0  # 已在外部划分验证集
+per_device_train_batch_size: 1  # 32B 需要更大显存，减少 batch size
+gradient_accumulation_steps: 16  # 增加梯度累积保持有效 batch size
+learning_rate: 5.0e-5
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+flash_attn: auto
+optim: adamw_torch
+
+### LoRA 配置
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target: all  # 全部参数都加 LoRA
+
+### 断点续训
+resume_from_checkpoint: false
+checkpoint_path: null
+
+### 梯度检查点（节省显存）
+gradient_checkpointing: true
+
+### DDP 配置（32B 需要多卡）
+world_size: 1  # 单卡训练，如需多卡修改为实际 GPU 数量
+rsocket_timeout: 600

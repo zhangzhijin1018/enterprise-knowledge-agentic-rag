@@ -1,186 +1,299 @@
-"""最小 Report MCP Server。
+"""
+Report MCP Server - 基于 python_a2a.mcp.FastMCP 的标准化 MCP 服务
 
-当前阶段这里实现的是“进程内 Report MCP Server”：
-- 对外暴露的输入输出围绕 `ReportRenderRequest / ReportRenderResponse`；
-- 内部先把导出产物写到本地 `storage/exports/`；
-- 后续如果切对象存储、远端导出服务或独立 worker，只需要替换 transport/存储实现。
+使用 FastMCP 装饰器定义工具，提供报告生成和导出能力。
+
+启动方式：
+```bash
+python -m core.tools.mcp.report_mcp_server
+# 或
+uvicorn core.tools.mcp.report_mcp_server:app --host 0.0.0.0 --port 5002
+```
+
+Author: Enterprise Knowledge Agentic RAG Platform
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import logging
+import os
 from datetime import datetime
+from pathlib import Path
 
 from core.config.settings import Settings, get_settings
-from core.tools.mcp.report_mcp_contracts import (
-    ReportGatewayExecutionError,
-    ReportHealthcheckResponse,
-    ReportRenderRequest,
-    ReportRenderResponse,
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# FastMCP Server（参考 agent_learn 风格）
+# ============================================================================
+
+from python_a2a.mcp import FastMCP, create_fastapi_app
+
+# 创建 FastMCP Server
+mcp = FastMCP(
+    name="Report MCPTools",
+    description="提供报告生成工具 - 支持 JSON、Markdown、DOCX、PDF 导出",
+    version="1.0.0"
 )
 
+# 全局设置
+_settings: Settings | None = None
 
-class ReportMCPServer:
-    """最小 Report MCP Server。"""
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        self.settings = settings or get_settings()
+def _get_settings() -> Settings:
+    """获取设置实例"""
+    global _settings
+    if _settings is None:
+        _settings = get_settings()
+    return _settings
 
-    def render_report(self, request: ReportRenderRequest) -> ReportRenderResponse:
-        """基于结构化分析结果生成最小导出产物。
 
-        当前阶段导出策略：
-        - `json`：生成完整 JSON 结构文件；
-        - `markdown`：生成 Markdown 报告；
-        - `docx/pdf`：先生成占位文本文件，但保留最终目标扩展名，
-          目的是把导出任务链路、状态流转和 artifact 管理先做通。
-        """
+# ============================================================================
+# MCP 工具定义
+# ============================================================================
 
-        export_dir = self._resolve_export_dir()
+@mcp.tool(
+    name="render_report",
+    description="生成报告并导出为指定格式"
+)
+async def render_report(**kwargs) -> str:
+    """
+    生成报告
+
+    参数（通过 kwargs 传入）：
+    - export_id: 导出 ID
+    - run_id: 运行 ID
+    - export_type: 导出类型（json, markdown, docx, pdf）
+    - export_template: 导出模板（可选）
+    - summary: 分析摘要
+    - insight_cards: 洞察卡片（JSON 字符串）
+    - tables: 数据表（JSON 字符串）
+    - chart_spec: 图表配置（JSON 字符串）
+
+    返回：
+    JSON 格式的导出结果
+    """
+    try:
+        logger.info(f"[Report MCP] render_report 调用，参数: {kwargs}")
+
+        # 解析参数
+        export_id = kwargs.get("export_id", f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        run_id = kwargs.get("run_id", "")
+        export_type = kwargs.get("export_type", "json")
+        export_template = kwargs.get("export_template")
+        summary = kwargs.get("summary", "")
+        insight_cards = json.loads(kwargs.get("insight_cards", "[]"))
+        tables = json.loads(kwargs.get("tables", "[]"))
+        chart_spec = json.loads(kwargs.get("chart_spec", "{}"))
+        report_blocks = json.loads(kwargs.get("report_blocks", "[]"))
+        metadata = json.loads(kwargs.get("metadata", "{}"))
+
+        settings = _get_settings()
+
+        # 解析导出目录
+        export_dir = _resolve_export_dir(settings)
         export_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = self._build_filename(request.export_id, request.export_type, request.export_template)
+        # 构建文件名
+        filename = _build_filename(export_id, export_type, export_template)
         artifact_path = export_dir / filename
 
-        content_preview = None
-        placeholder_mode = False
-        if request.export_type == "json":
-            payload = self._build_json_payload(request)
+        # 根据类型生成内容
+        if export_type == "json":
+            payload = _build_json_payload(run_id, export_template, summary, insight_cards, report_blocks, chart_spec, tables, metadata)
             serialized = json.dumps(payload, ensure_ascii=False, indent=2)
             artifact_path.write_text(serialized, encoding="utf-8")
             content_preview = serialized[:200]
-        elif request.export_type == "markdown":
-            markdown = self._build_markdown_payload(request)
+        elif export_type == "markdown":
+            markdown = _build_markdown_payload(run_id, export_template, summary, insight_cards, tables, chart_spec, report_blocks)
             artifact_path.write_text(markdown, encoding="utf-8")
             content_preview = markdown[:200]
-        elif request.export_type in {"docx", "pdf"}:
-            placeholder_mode = True
-            placeholder_content = self._build_placeholder_payload(request)
+        elif export_type in {"docx", "pdf"}:
+            placeholder_content = _build_placeholder_payload(run_id, export_template, summary, insight_cards, tables, report_blocks)
             artifact_path.write_text(placeholder_content, encoding="utf-8")
             content_preview = placeholder_content[:200]
-        else:  # pragma: no cover - 由 service 提前兜底
-            raise ReportGatewayExecutionError(
-                "不支持的导出类型",
-                error_code="report_export_type_unsupported",
-                detail={"export_type": request.export_type},
-            )
+        else:
+            return f'{{"status": "error", "message": "不支持的导出类型: {export_type}"}}'
 
-        return ReportRenderResponse(
-            export_id=request.export_id,
-            run_id=request.run_id,
-            export_type=request.export_type,
-            export_template=request.export_template,
-            filename=filename,
-            artifact_path=str(artifact_path.resolve()),
-            file_uri=str(artifact_path.resolve()),
-            content_preview=content_preview,
-            metadata={
-                "server_mode": "inprocess_report_mcp_server",
-                "placeholder_mode": placeholder_mode,
-                "export_template": request.export_template,
-                "artifact_size_bytes": artifact_path.stat().st_size if artifact_path.exists() else 0,
-            },
-        )
+        file_size = artifact_path.stat().st_size if artifact_path.exists() else 0
 
-    def healthcheck(self) -> ReportHealthcheckResponse:
-        """执行最小健康检查。"""
+        return f'''{{
+    "status": "success",
+    "export_id": "{export_id}",
+    "run_id": "{run_id}",
+    "export_type": "{export_type}",
+    "filename": "{filename}",
+    "artifact_path": "{str(artifact_path.resolve())}",
+    "file_uri": "{str(artifact_path.resolve())}",
+    "content_preview": "{content_preview.replace('"', '\\"') if content_preview else ""}",
+    "metadata": {{
+        "server_mode": "fastmcp_report_server",
+        "file_size_bytes": {file_size}
+    }}
+}}'''
 
-        export_dir = self._resolve_export_dir()
+    except Exception as e:
+        logger.error(f"[Report MCP] render_report 失败: {e}", exc_info=True)
+        return f'{{"status": "error", "message": "{str(e)}"}}'
+
+
+@mcp.tool(
+    name="healthcheck",
+    description="Report MCP 服务健康检查"
+)
+async def healthcheck(**kwargs) -> str:
+    """
+    执行健康检查
+
+    返回：
+    JSON 格式的健康状态
+    """
+    try:
+        logger.info(f"[Report MCP] healthcheck 调用")
+
+        settings = _get_settings()
+        export_dir = _resolve_export_dir(settings)
         export_dir.mkdir(parents=True, exist_ok=True)
-        return ReportHealthcheckResponse(
-            healthy=True,
-            server_mode="inprocess_report_mcp_server",
-            metadata={"export_dir": str(export_dir.resolve())},
-        )
 
-    def _resolve_export_dir(self) -> Path:
-        """解析本地导出目录。"""
+        return f'''{{
+    "healthy": true,
+    "server_mode": "fastmcp_report_server",
+    "export_dir": "{str(export_dir.resolve())}"
+}}'''
 
-        export_dir = Path(self.settings.local_export_dir).expanduser()
-        if export_dir.is_absolute():
-            return export_dir
-        return Path.cwd() / export_dir
+    except Exception as e:
+        logger.error(f"[Report MCP] healthcheck 失败: {e}", exc_info=True)
+        return f'{{"healthy": false, "message": "{str(e)}"}}'
 
-    def _build_filename(self, export_id: str, export_type: str, export_template: str | None = None) -> str:
-        """构造导出文件名。"""
 
-        extension_map = {
-            "json": "json",
-            "markdown": "md",
-            "docx": "docx",
-            "pdf": "pdf",
-        }
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        template_suffix = f"_{export_template}" if export_template else ""
-        return f"{export_id}{template_suffix}_{timestamp}.{extension_map[export_type]}"
+# ============================================================================
+# 辅助函数
+# ============================================================================
 
-    def _build_json_payload(self, request: ReportRenderRequest) -> dict:
-        """构造 JSON 导出载荷。"""
+def _resolve_export_dir(settings: Settings) -> Path:
+    """解析导出目录"""
+    export_dir = Path(settings.local_export_dir).expanduser()
+    if export_dir.is_absolute():
+        return export_dir
+    return Path.cwd() / export_dir
 
-        return {
-            "run_id": request.run_id,
-            "export_template": request.export_template,
-            "summary": request.summary,
-            "insight_cards": request.insight_cards,
-            "report_blocks": request.report_blocks,
-            "chart_spec": request.chart_spec,
-            "tables": request.tables,
-            "metadata": request.metadata,
-        }
 
-    def _build_markdown_payload(self, request: ReportRenderRequest) -> str:
-        """构造 Markdown 报告。
+def _build_filename(export_id: str, export_type: str, export_template: str | None = None) -> str:
+    """构造导出文件名"""
+    extension_map = {
+        "json": "json",
+        "markdown": "md",
+        "docx": "docx",
+        "pdf": "pdf",
+    }
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    template_suffix = f"_{export_template}" if export_template else ""
+    return f"{export_id}{template_suffix}_{timestamp}.{extension_map[export_type]}"
 
-        当前阶段不追求复杂排版，重点是把结构化分析结果稳定转换成可交付文本。
-        """
 
-        lines: list[str] = [
-            "# 经营分析报告",
-            "",
-            f"- run_id: `{request.run_id}`",
-            f"- export_type: `{request.export_type}`",
-            f"- export_template: `{request.export_template or 'default'}`",
-            "",
-        ]
-        if request.summary:
-            lines.extend(["## 分析概览", "", request.summary, ""])
-        if request.insight_cards:
-            lines.extend(["## 洞察卡片", ""])
-            for card in request.insight_cards:
-                lines.append(f"- **{card.get('title', '未命名洞察')}**：{card.get('summary', '')}")
-            lines.append("")
-        for table in request.tables:
-            lines.extend([f"## 数据表：{table.get('name', 'main_result')}", ""])
-            columns = table.get("columns", [])
-            rows = table.get("rows", [])
-            if columns:
-                lines.append("| " + " | ".join(str(column) for column in columns) + " |")
-                lines.append("| " + " | ".join("---" for _ in columns) + " |")
-                for row in rows:
-                    lines.append("| " + " | ".join(str(item) for item in row) + " |")
-            lines.append("")
-        if request.chart_spec:
-            lines.extend(["## 图表描述", "", f"```json\n{json.dumps(request.chart_spec, ensure_ascii=False, indent=2)}\n```", ""])
-        if request.report_blocks:
-            lines.extend(["## 报告块", ""])
-            for block in request.report_blocks:
-                lines.append(f"- `{block.get('block_type')}`：{block.get('title', '')}")
-            lines.append("")
-        return "\n".join(lines)
+def _build_json_payload(
+    run_id: str,
+    export_template: str | None,
+    summary: str,
+    insight_cards: list,
+    report_blocks: list,
+    chart_spec: dict,
+    tables: list,
+    metadata: dict
+) -> dict:
+    """构造 JSON 导出载荷"""
+    return {
+        "run_id": run_id,
+        "export_template": export_template,
+        "summary": summary,
+        "insight_cards": insight_cards,
+        "report_blocks": report_blocks,
+        "chart_spec": chart_spec,
+        "tables": tables,
+        "metadata": metadata,
+    }
 
-    def _build_placeholder_payload(self, request: ReportRenderRequest) -> str:
-        """构造 docx/pdf 占位内容。
 
-        当前阶段先保留导出链路与 artifact 生命周期，不实现复杂排版引擎。
-        因此 docx/pdf 先写入占位文本，并在 metadata 中标记 placeholder_mode。
-        """
+def _build_markdown_payload(
+    run_id: str,
+    export_template: str | None,
+    summary: str,
+    insight_cards: list,
+    tables: list,
+    chart_spec: dict,
+    report_blocks: list
+) -> str:
+    """构造 Markdown 报告"""
+    lines: list[str] = [
+        "# 经营分析报告",
+        "",
+        f"- run_id: `{run_id}`",
+        f"- export_template: `{export_template or 'default'}`",
+        "",
+    ]
+    if summary:
+        lines.extend(["## 分析概览", "", summary, ""])
+    if insight_cards:
+        lines.extend(["## 洞察卡片", ""])
+        for card in insight_cards:
+            lines.append(f"- **{card.get('title', '未命名洞察')}**：{card.get('summary', '')}")
+        lines.append("")
+    for table in tables:
+        lines.extend([f"## 数据表：{table.get('name', 'main_result')}", ""])
+        columns = table.get("columns", [])
+        rows = table.get("rows", [])
+        if columns:
+            lines.append("| " + " | ".join(str(column) for column in columns) + " |")
+            lines.append("| " + " | ".join("---" for _ in columns) + " |")
+            for row in rows:
+                lines.append("| " + " | ".join(str(item) for item in row) + " |")
+        lines.append("")
+    if chart_spec:
+        lines.extend(["## 图表描述", "", f"```json\n{json.dumps(chart_spec, ensure_ascii=False, indent=2)}\n```", ""])
+    if report_blocks:
+        lines.extend(["## 报告块", ""])
+        for block in report_blocks:
+            lines.append(f"- `{block.get('block_type')}`：{block.get('title', '')}")
+        lines.append("")
+    return "\n".join(lines)
 
-        return (
-            f"Placeholder {request.export_type.upper()} export for run {request.run_id}\n\n"
-            f"Template: {request.export_template or 'default'}\n\n"
-            f"Summary:\n{request.summary or 'N/A'}\n\n"
-            f"Insight count: {len(request.insight_cards)}\n"
-            f"Table count: {len(request.tables)}\n"
-            f"Report block count: {len(request.report_blocks)}\n"
-        )
+
+def _build_placeholder_payload(
+    run_id: str,
+    export_template: str | None,
+    summary: str,
+    insight_cards: list,
+    tables: list,
+    report_blocks: list
+) -> str:
+    """构造 docx/pdf 占位内容"""
+    return (
+        f"Placeholder export for run {run_id}\n\n"
+        f"Template: {export_template or 'default'}\n\n"
+        f"Summary:\n{summary or 'N/A'}\n\n"
+        f"Insight count: {len(insight_cards)}\n"
+        f"Table count: {len(tables)}\n"
+        f"Report block count: {len(report_blocks)}\n"
+    )
+
+
+# ============================================================================
+# 启动入口
+# ============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("REPORT_MCP_PORT", "5002"))
+    host = os.environ.get("REPORT_MCP_HOST", "0.0.0.0")
+
+    logger.info(f"=== Report MCP Server 信息 ===")
+    logger.info(f"名称: {mcp.name}")
+    logger.info(f"描述: {mcp.description}")
+    logger.info(f"启动于 http://{host}:{port}")
+
+    # 使用 create_fastapi_app 启动
+    app = create_fastapi_app(mcp)
+    uvicorn.run(app, host=host, port=port)

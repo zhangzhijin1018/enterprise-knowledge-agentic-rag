@@ -351,16 +351,23 @@ LLM Gateway 负责：
 
 经营分析复杂 planning 场景使用统一 `LLMGateway` 接入模型，推荐：
 
-- 私有化优先：`Qwen2.5-14B-Instruct`；
-- 更强复杂拆解：`Qwen2.5-32B-Instruct`；
+- 私有化优先：`Qwen3-14B`；
+- 更强复杂拆解：`Qwen3-32B`；
+- 轻量替代：`Qwen3-8B`（单卡可运行）；
 - 部署方式：优先通过 vLLM 暴露 OpenAI-compatible API；
 - 测试环境：使用 `MockLLMGateway`，不要求真实 API Key。
+
+**Qwen3 系列优势**：
+- 预训练数据翻倍（18T → 36T tokens）
+- 支持思考模式，适合复杂推理
+- 支持 119 种语言
+- AIME25 数学基准从 42 分提升到 81.5 分
 
 默认配置：
 
 ```text
 LLM_PROVIDER=openai_compatible
-LLM_MODEL_NAME=qwen2.5-14b-instruct
+LLM_MODEL_NAME=Qwen/Qwen3-14B
 LLM_TIMEOUT_SECONDS=30
 ANALYTICS_REACT_PLANNER_ENABLED=false
 ANALYTICS_REACT_MAX_STEPS=3

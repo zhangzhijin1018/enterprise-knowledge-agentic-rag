@@ -221,7 +221,7 @@ class LocalOCRGateway:
             return None
 
         try:
-            from paddleocr import PPStructure  # type: ignore
+            from paddleo3333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333   27cr import PPStructure  # type: ignore
 
             self._pp_structure_engine = PPStructure(show_log=False)
         except Exception as exc:  # pragma: no cover - 依赖缺失分支依赖运行环境

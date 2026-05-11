@@ -37,7 +37,7 @@ class AnalyticsWorkflowAdapter:
         self.analytics_service = analytics_service
         self.workflow = AnalyticsLangGraphWorkflow(analytics_service=analytics_service)
 
-    def execute_query(
+    async def execute_query(
         self,
         *,
         query: str,
@@ -55,7 +55,7 @@ class AnalyticsWorkflowAdapter:
         而不是“调用哪个 graph、走哪些 node”的内部细节。
         """
 
-        return self.workflow.invoke(
+        return await self.workflow.ainvoke(
             query=query,
             user_context=user_context,
             conversation_id=conversation_id,
@@ -66,7 +66,7 @@ class AnalyticsWorkflowAdapter:
             parent_task_id=parent_task_id,
         )
 
-    def execute_state(
+    async def execute_state(
         self,
         *,
         query: str,
@@ -91,7 +91,7 @@ class AnalyticsWorkflowAdapter:
         - 这些对象不能直接等同于 task_run/input_snapshot/output_snapshot 之类的持久化快照。
         """
 
-        return self.workflow.run_state(
+        return await self.workflow.arun_state(
             query=query,
             user_context=user_context,
             conversation_id=conversation_id,
@@ -102,7 +102,7 @@ class AnalyticsWorkflowAdapter:
             parent_task_id=parent_task_id,
         )
 
-    def resume_from_clarification(
+    async def resume_from_clarification(
         self,
         *,
         query: str,
@@ -125,7 +125,7 @@ class AnalyticsWorkflowAdapter:
         - 对上返回稳定业务响应。
         """
 
-        workflow_state = self.workflow.resume_from_slots(
+        workflow_state = await self.workflow.aresume_from_slots(
             query=query,
             user_context=user_context,
             conversation_id=conversation_id,
