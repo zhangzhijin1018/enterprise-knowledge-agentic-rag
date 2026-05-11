@@ -190,18 +190,31 @@ class RoutingEngine:
             return True
         return False
 
-    def route(self, intent_result: IntentResult) -> RouteDecision:
+    def route(self, intent_result) -> RouteDecision:
         """
         根据意图结果路由请求
 
         Args:
-            intent_result: 意图识别结果
+            intent_result: 意图识别结果（支持 IntentResult 对象或 dict）
 
         Returns:
             RouteDecision: 路由决策
         """
-        intent_type = intent_result.intent_type
-        routing_target = intent_result.routing_target
+        # 支持 IntentResult 对象和 dict 两种格式
+        if hasattr(intent_result, 'intent_type'):
+            # IntentResult 对象格式
+            intent_type = intent_result.intent_type
+            routing_target = intent_result.routing_target
+        else:
+            # dict 格式（来自上下文感知意图检测器）
+            intent_type_str = intent_result.get("intent_type", "rag_qa")
+            routing_target = intent_result.get("routing_target", "rag_agent")
+
+            # 将字符串转换为 IntentType
+            try:
+                intent_type = IntentType(intent_type_str)
+            except ValueError:
+                intent_type = IntentType.RAG_QA
 
         # 检查目标是否存在
         if routing_target not in self._agent_registry:
@@ -209,7 +222,7 @@ class RoutingEngine:
             return self._route_with_fallback(intent_type)
 
         target = self._agent_registry[routing_target]
-        reason = f"Intent '{intent_type.value}' matched to '{routing_target}'"
+        reason = f"Intent '{intent_type.value if hasattr(intent_type, 'value') else intent_type}' matched to '{routing_target}'"
 
         return RouteDecision(
             target=target,

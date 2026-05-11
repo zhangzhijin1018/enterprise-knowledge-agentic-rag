@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from core.agent.context_aware_intent_detector import ContextAwareIntentDetector
 from core.agent.intent_detector import IntentDetector, IntentType
 from core.agent.routing_engine import get_routing_engine
 from core.common.events import sse_event_stream
@@ -184,6 +185,20 @@ class ChatRequest(BaseModel):
         description="合同类型"
     )
 
+    # 上下文信息（用于多轮对话的意图继承）
+    previous_intent: Optional[str] = Field(
+        default=None,
+        description="上一轮意图类型（用于意图继承）"
+    )
+    previous_domain: Optional[str] = Field(
+        default=None,
+        description="上一轮业务域（用于域一致性判断）"
+    )
+    previous_slots: Optional[dict] = Field(
+        default=None,
+        description="上一轮槽位（用于槽位补全）"
+    )
+
 
 class ChatResponse(BaseModel):
     """聊天响应"""
@@ -191,6 +206,12 @@ class ChatResponse(BaseModel):
     trace_id: str
     conversation_id: Optional[str]
     intent: str
+    # 置信度信息
+    confidence: float = Field(default=0.0, description="意图识别置信度")
+    confidence_breakdown: Optional[dict] = Field(
+        default=None,
+        description="置信度分解（每个因子的贡献）"
+    )
     # 是否需要 SSE 订阅（RAG 等快速场景同步返回时为 false）
     needs_sse: bool = False
     # SSE 模式下的完整结果（同步返回时直接返回）
@@ -200,6 +221,9 @@ class ChatResponse(BaseModel):
     needs_clarification: bool = False
     clarification_questions: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
+    # 代词消解信息
+    pronoun_resolved: bool = Field(default=False, description="是否进行了代词消解")
+    resolved_query: Optional[str] = Field(default=None, description="代词消解后的查询")
 
 
 # ============================================================================
@@ -222,6 +246,7 @@ app.add_middleware(
 
 # 全局组件
 _intent_detector = IntentDetector()
+_context_aware_detector = ContextAwareIntentDetector()
 _routing_engine = get_routing_engine()
 _a2a_client = A2AClient()
 
@@ -256,24 +281,62 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # 强制路由到合同审查
         agent_name = "contract-agent"
         logger.info(f"[{run_id}] 强制路由到合同审查: contract_file_id={request.contract_file_id}")
+
+        # 合同审查场景也使用上下文感知检测器
+        intent_result = await _context_aware_detector.detect(
+            query=request.query,
+            conversation_id=conversation_id,
+            user_id=request.user_id,
+            previous_intent=request.previous_intent,
+            previous_domain=request.previous_domain,
+            previous_slots=request.previous_slots,
+        )
+        intent_type_str = "contract_review"  # 合同审查固定类型
+        confidence = intent_result.get("confidence", 0.0)
+        confidence_breakdown = intent_result.get("confidence_breakdown")
+        pronoun_resolved = intent_result.get("pronoun_resolved", False)
+        resolved_query = intent_result.get("resolved_query")
     else:
-        # 2. 意图识别
-        intent_result = _intent_detector.detect(request.query)
-        logger.info(f"[{run_id}] Intent: {intent_result.intent_type.value}")
+        # 2. 意图识别（使用上下文感知的检测器）
+        intent_result = await _context_aware_detector.detect(
+            query=request.query,
+            conversation_id=conversation_id,
+            user_id=request.user_id,
+            previous_intent=request.previous_intent,
+            previous_domain=request.previous_domain,
+            previous_slots=request.previous_slots,
+        )
+
+        # 提取结果
+        intent_type_str = intent_result.get("intent_type", "rag_qa")
+        confidence = intent_result.get("confidence", 0.0)
+        confidence_breakdown = intent_result.get("confidence_breakdown")
+        requires_clarification = intent_result.get("requires_clarification", False)
+        clarification_questions = intent_result.get("clarification_questions", [])
+        routing_target = intent_result.get("routing_target", "rag_agent")
+        slots = intent_result.get("slots", {})
+        pronoun_resolved = intent_result.get("pronoun_resolved", False)
+        resolved_query = intent_result.get("resolved_query")
+
+        logger.info(f"[{run_id}] Intent: {intent_type_str}, confidence: {confidence:.3f}")
 
         # 3. 检查澄清
-        if intent_result.requires_clarification:
+        if requires_clarification:
             return ChatResponse(
                 run_id=run_id,
                 trace_id=trace_id,
                 conversation_id=conversation_id,
-                intent=intent_result.intent_type.value,
+                intent=intent_type_str,
+                confidence=confidence,
+                confidence_breakdown=confidence_breakdown,
                 status="awaiting_clarification",
-                routing_target=intent_result.routing_target,
+                routing_target=routing_target,
                 needs_sse=False,
                 needs_clarification=True,
-                clarification_questions=intent_result.clarification_questions,
-                metadata={"slots": intent_result.slots.model_dump()},
+                clarification_questions=clarification_questions,
+                metadata={"slots": slots},
+                pronoun_resolved=pronoun_resolved,
+                resolved_query=resolved_query,
             )
 
         # 4. 路由决策
@@ -294,6 +357,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
         "user_role": request.user_role,
         "department_code": request.department_code,
     }
+
+    # 统一获取意图类型
+    intent_type_str = "contract_review" if request.contract_file_id else intent_type_str
 
     # 如果是合同审查，添加合同相关元数据
     if request.contract_file_id:
@@ -321,13 +387,17 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 run_id=run_id,
                 trace_id=trace_id,
                 conversation_id=conversation_id,
-                intent="contract_review" if request.contract_file_id else intent_result.intent_type.value,
+                intent=intent_type_str,
+                confidence=confidence,
+                confidence_breakdown=confidence_breakdown,
                 needs_sse=True,
                 status="processing",
                 routing_target=agent_name,
                 metadata={
                     "message": "任务已提交，请订阅 SSE 获取进度和结果"
                 },
+                pronoun_resolved=pronoun_resolved,
+                resolved_query=resolved_query,
             )
         else:
             # 快速场景（RAG 等）：同步返回完整结果
@@ -337,12 +407,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 run_id=run_id,
                 trace_id=trace_id,
                 conversation_id=conversation_id,
-                intent=intent_result.intent_type.value if not request.contract_file_id else "contract_review",
+                intent=intent_type_str,
+                confidence=confidence,
+                confidence_breakdown=confidence_breakdown,
                 needs_sse=False,
                 answer=answer,
                 status="succeeded",
                 routing_target=agent_name,
                 metadata=result,
+                pronoun_resolved=pronoun_resolved,
+                resolved_query=resolved_query,
             )
 
     except HTTPException:
@@ -353,12 +427,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
             run_id=run_id,
             trace_id=trace_id,
             conversation_id=conversation_id,
-            intent="contract_review" if request.contract_file_id else intent_result.intent_type.value,
+            intent=intent_type_str,
+            confidence=confidence,
+            confidence_breakdown=confidence_breakdown,
             needs_sse=False,
             answer="处理失败，请稍后重试。",
             status="failed",
             routing_target=agent_name,
             metadata={"error": str(e)},
+            pronoun_resolved=pronoun_resolved,
+            resolved_query=resolved_query,
         )
 
 
