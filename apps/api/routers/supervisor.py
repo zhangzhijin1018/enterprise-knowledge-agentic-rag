@@ -2,11 +2,13 @@
 Supervisor API - 基于 python_a2a 的标准化总控服务
 
 Supervisor 职责：
-1. 意图识别
+1. 意图识别（支持 LLM + 规则双模式）
 2. Agent 路由
 3. 直接 HTTP 调用 Agent（不用 AgentNetwork）
 
-使用 python_a2a 客户端直接调用各 Agent 的 A2A 端点。
+双模式设计：
+- USE_LLM_INTENT_DETECTION=true：纯 LLM 检测 + 置信度自适应处理
+- 默认：规则 + 上下文感知检测
 
 启动方式：
 ```bash
@@ -29,6 +31,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.agent.context_aware_intent_detector import ContextAwareIntentDetector
+from core.agent.confidence_handler import ConfidenceHandler, HandlingStrategy
+from core.agent.llm_only_intent_detector import LLMIntentDetector
 from core.agent.intent_detector import IntentDetector, IntentType
 from core.agent.routing_engine import get_routing_engine
 from core.common.events import sse_event_stream
@@ -52,12 +56,6 @@ class A2AClient:
     """
 
     def __init__(self, namespace: str = "enterprise-agent"):
-        """
-        初始化 A2A 客户端
-
-        Args:
-            namespace: K8s 命名空间
-        """
         from python_a2a import Task, Message, TextContent, MessageRole
 
         self.namespace = namespace
@@ -66,7 +64,6 @@ class A2AClient:
         self._MessageRole = MessageRole
         self._Task = Task
 
-        # Agent 端点配置（K8s DNS）
         self._agent_endpoints = {
             "rag-agent": os.environ.get(
                 "RAG_AGENT_URL",
@@ -86,7 +83,6 @@ class A2AClient:
             ),
         }
 
-        # 初始化基类 A2A 客户端
         self._base_client = BaseA2AClient(self._agent_endpoints)
 
     def get_agent_url(self, agent_name: str) -> str:
@@ -97,66 +93,44 @@ class A2AClient:
         self,
         agent_name: str,
         message: str,
-        *,
-        task_id: Optional[str] = None,
-        trace_id: Optional[str] = None,
-        conversation_id: Optional[str] = None,
-        user_id: str = "anonymous",
-        user_role: str = "user",
+        task_id: str,
+        trace_id: str,
+        conversation_id: str,
+        user_id: str,
+        user_role: str,
         department_code: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
-        """
-        发送任务到 Agent
-
-        Args:
-            agent_name: Agent 名称
-            message: 用户消息
-            task_id: 任务 ID
-            trace_id: 追踪 ID
-            conversation_id: 会话 ID
-            user_id: 用户 ID
-            user_role: 用户角色
-            department_code: 部门代码
-            metadata: 额外元数据
-
-        Returns:
-            Agent 响应 (dict)
-        """
-        # 构建 A2A 消息（参考 agent_learn 示例）
-        a2a_message = self._Message(
-            content=self._TextContent(text=message),
-            role=self._MessageRole.USER,
-            conversation_id=conversation_id,
-        )
-
-        # 构建 A2A 任务
-        a2a_task = self._Task(
-            id=task_id or f"task_{uuid.uuid4().hex[:12]}",
-            message=a2a_message.to_dict(),
-            metadata={
-                "user_id": user_id,
-                "user_role": user_role,
-                "department_code": department_code,
-                "trace_id": trace_id,
-                "conversation_id": conversation_id,
-                **(metadata or {}),
-            },
-        )
-
-        # 调用 python_a2a 的 send_task_async
+        """发送任务到 Agent"""
         try:
-            response = await self._base_client.send_task_async(
-                agent_name=agent_name,
-                task=a2a_task,
+            endpoint = self.get_agent_url(agent_name)
+            if not endpoint:
+                logger.warning(f"[{task_id}] Agent {agent_name} endpoint not found")
+                return {"error": f"Agent {agent_name} not found"}
+
+            logger.info(f"[{task_id}] Sending task to {agent_name}: {endpoint}")
+
+            message_obj = self._Message(
+                content=self._TextContent(text=message),
+                role=self._MessageRole.USER,
             )
-            # 返回 dict 格式
-            if hasattr(response, 'to_dict'):
-                return response.to_dict()
-            return response
+
+            task = self._Task(
+                id=task_id,
+                message=message_obj,
+                session_id=conversation_id,
+            )
+
+            result = await self._base_client.send_task(endpoint, task)
+
+            if hasattr(result, 'message') and hasattr(result.message, 'content'):
+                return {"answer": result.message.content.text}
+
+            return {"result": result}
+
         except Exception as e:
-            logger.error(f"[{agent_name}] A2A call failed: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"[{task_id}] Failed to send task to {agent_name}: {e}")
+            return {"error": str(e)}
 
 
 # ============================================================================
@@ -212,9 +186,8 @@ class ChatResponse(BaseModel):
         default=None,
         description="置信度分解（每个因子的贡献）"
     )
-    # 是否需要 SSE 订阅（RAG 等快速场景同步返回时为 false）
+    # 是否需要 SSE 订阅
     needs_sse: bool = False
-    # SSE 模式下的完整结果（同步返回时直接返回）
     answer: Optional[str] = None
     status: str
     routing_target: str
@@ -250,6 +223,46 @@ _context_aware_detector = ContextAwareIntentDetector()
 _routing_engine = get_routing_engine()
 _a2a_client = A2AClient()
 
+# LLM 意图检测和置信度处理器（按需初始化）
+_llm_detector: Optional[LLMIntentDetector] = None
+_confidence_handler: Optional[ConfidenceHandler] = None
+_use_llm_detection: bool = os.environ.get("USE_LLM_INTENT_DETECTION", "false").lower() == "true"
+
+
+def _get_llm_detector() -> LLMIntentDetector:
+    """获取或创建 LLM 意图检测器（懒加载）"""
+    global _llm_detector
+    if _llm_detector is None:
+        _llm_detector = LLMIntentDetector(
+            llm_gateway=_get_llm_gateway(),
+            cache=_get_cache(),
+        )
+    return _llm_detector
+
+
+def _get_confidence_handler() -> ConfidenceHandler:
+    """获取或创建置信度处理器（懒加载）"""
+    global _confidence_handler
+    if _confidence_handler is None:
+        _confidence_handler = ConfidenceHandler(
+            fallback_detector=_context_aware_detector,
+        )
+    return _confidence_handler
+
+
+def _get_llm_gateway():
+    """获取 LLM 网关（待实现）"""
+    # TODO: 接入实际的 LLM 网关
+    # 例如：from core.llm_gateway import get_llm_gateway
+    return None
+
+
+def _get_cache():
+    """获取缓存客户端（待实现）"""
+    # TODO: 接入 Redis 等缓存
+    # 例如：return await get_redis_client()
+    return None
+
 
 # ============================================================================
 # API 路由
@@ -264,11 +277,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
     统一聊天接口
 
     设计说明：
-    1. 所有场景都推送 SSE 进度（只是快慢不同）
-    2. needs_sse 控制是否通过 SSE 推送最终结果：
-       - needs_sse=true：结果通过 SSE complete 事件推送，前端订阅 SSE 获取结果
-       - needs_sse=false：结果在 HTTP 响应中返回，前端直接使用
-    3. 合同审查场景：如果提供 contract_file_id，强制路由到合同审查流程
+    1. 支持两种意图检测模式：
+       - USE_LLM_INTENT_DETECTION=true：纯 LLM 检测 + 置信度自适应处理
+       - 默认：规则 + 上下文感知检测
+    2. 置信度自适应处理：
+       - >= 0.80：立即执行
+       - 0.60-0.80：谨慎执行（带风险警告）
+       - < 0.60：请求澄清或多意图候选
+    3. 支持上下文继承和代词消解
     """
     run_id = f"run_{uuid.uuid4().hex[:12]}"
     trace_id = f"tr_{uuid.uuid4().hex[:12]}"
@@ -278,11 +294,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     # 1. 检查是否需要合同审查
     if request.contract_file_id:
-        # 强制路由到合同审查
         agent_name = "contract-agent"
         logger.info(f"[{run_id}] 强制路由到合同审查: contract_file_id={request.contract_file_id}")
 
-        # 合同审查场景也使用上下文感知检测器
         intent_result = await _context_aware_detector.detect(
             query=request.query,
             conversation_id=conversation_id,
@@ -291,23 +305,19 @@ async def chat(request: ChatRequest) -> ChatResponse:
             previous_domain=request.previous_domain,
             previous_slots=request.previous_slots,
         )
-        intent_type_str = "contract_review"  # 合同审查固定类型
+        intent_type_str = "contract_review"
         confidence = intent_result.get("confidence", 0.0)
         confidence_breakdown = intent_result.get("confidence_breakdown")
         pronoun_resolved = intent_result.get("pronoun_resolved", False)
         resolved_query = intent_result.get("resolved_query")
+        decision = None
     else:
-        # 2. 意图识别（使用上下文感知的检测器）
-        intent_result = await _context_aware_detector.detect(
-            query=request.query,
-            conversation_id=conversation_id,
-            user_id=request.user_id,
-            previous_intent=request.previous_intent,
-            previous_domain=request.previous_domain,
-            previous_slots=request.previous_slots,
-        )
+        # 2. 意图识别
+        if _use_llm_detection:
+            intent_result, decision = await _llm_intent_detection(request, run_id, conversation_id)
+        else:
+            intent_result, decision = await _rule_based_intent_detection(request, run_id, conversation_id)
 
-        # 提取结果
         intent_type_str = intent_result.get("intent_type", "rag_qa")
         confidence = intent_result.get("confidence", 0.0)
         confidence_breakdown = intent_result.get("confidence_breakdown")
@@ -320,21 +330,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
         logger.info(f"[{run_id}] Intent: {intent_type_str}, confidence: {confidence:.3f}")
 
-        # 3. 检查澄清
-        if requires_clarification:
-            return ChatResponse(
+        # 3. 检查置信度处理决策
+        if decision and not decision.can_execute:
+            return _build_clarification_response(
                 run_id=run_id,
                 trace_id=trace_id,
                 conversation_id=conversation_id,
-                intent=intent_type_str,
+                intent_type_str=intent_type_str,
                 confidence=confidence,
                 confidence_breakdown=confidence_breakdown,
-                status="awaiting_clarification",
+                decision=decision,
                 routing_target=routing_target,
-                needs_sse=False,
-                needs_clarification=True,
-                clarification_questions=clarification_questions,
-                metadata={"slots": slots},
+                slots=slots,
                 pronoun_resolved=pronoun_resolved,
                 resolved_query=resolved_query,
             )
@@ -346,7 +353,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
     logger.info(f"[{run_id}] Routed to: {agent_name}")
 
     # 5. 判断是否需要 SSE 推送结果
-    # Analytics/Contract 等慢速场景需要 SSE 推送结构化结果
     needs_sse = agent_name in {"analytics-agent", "contract-agent"}
 
     # 6. 构建元数据
@@ -358,10 +364,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
         "department_code": request.department_code,
     }
 
-    # 统一获取意图类型
     intent_type_str = "contract_review" if request.contract_file_id else intent_type_str
 
-    # 如果是合同审查，添加合同相关元数据
     if request.contract_file_id:
         metadata["contract_file_id"] = request.contract_file_id
         metadata["contract_name"] = request.contract_name
@@ -382,7 +386,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
         )
 
         if needs_sse:
-            # 慢速场景：返回 run_id，前端订阅 SSE 获取结果
             return ChatResponse(
                 run_id=run_id,
                 trace_id=trace_id,
@@ -393,14 +396,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 needs_sse=True,
                 status="processing",
                 routing_target=agent_name,
-                metadata={
-                    "message": "任务已提交，请订阅 SSE 获取进度和结果"
-                },
+                metadata={"message": "任务已提交，请订阅 SSE 获取进度和结果"},
                 pronoun_resolved=pronoun_resolved,
                 resolved_query=resolved_query,
             )
         else:
-            # 快速场景（RAG 等）：同步返回完整结果
             answer = result.get("answer") or result.get("result", {}).get("answer", "")
 
             return ChatResponse(
@@ -440,139 +440,138 @@ async def chat(request: ChatRequest) -> ChatResponse:
         )
 
 
-@router.get("/intent/detect")
-async def detect_intent(query: str) -> dict:
-    """意图检测接口"""
-    result = _intent_detector.detect(query)
-    return {
-        "intent_type": result.intent_type.value,
-        "confidence": result.confidence,
-        "routing_target": result.routing_target,
-        "requires_clarification": result.requires_clarification,
-        "clarification_questions": result.clarification_questions,
-        "slots": result.slots.model_dump(),
-    }
-
-
-@router.get("/agents")
-async def list_agents() -> dict:
-    """列出可用 Agent"""
-    return {
-        "agents": list(_a2a_client._agent_endpoints.keys()),
-        "total": len(_a2a_client._agent_endpoints),
-    }
-
-
-@router.get("/health")
-async def health_check() -> dict:
-    """健康检查"""
-    return {"status": "healthy", "service": "supervisor"}
-
-
 # ============================================================================
-# SSE 流式推送端点
+# 辅助函数
 # ============================================================================
 
-@router.get("/stream/{run_id}")
-async def stream_progress(run_id: str) -> StreamingResponse:
+async def _llm_intent_detection(
+    request: ChatRequest,
+    run_id: str,
+    conversation_id: str,
+) -> tuple[dict, Any]:
     """
-    SSE 流式进度推送端点
-
-    订阅指定 run_id 的事件流，通过 SSE 推送给前端。
-
-    支持多 Agent 并行推送进度：
-    - Analytics Agent: 推送 SQL 构建、图表生成等进度
-    - RAG Agent: 推送检索、答案生成等进度
-    - Contract Agent: 推送合同解析、风险分析等进度
-
-    前端订阅方式：
-    ```javascript
-    const eventSource = new EventSource(`/api/v1/stream/${run_id}`);
-    eventSource.addEventListener('progress', (e) => {
-        const data = JSON.parse(e.data);
-        console.log(data); // {run_id, stage, progress, message, ...}
-    });
-    eventSource.addEventListener('summary_done', (e) => {
-        const data = JSON.parse(e.data);
-        // 收到摘要数据
-    });
-    eventSource.addEventListener('completed', (e) => {
-        const data = JSON.parse(e.data);
-        // 任务完成
-    });
-    ```
-
-    Returns:
-        SSE 流
+    纯 LLM 意图检测 + 置信度自适应处理
     """
-    return StreamingResponse(
-        sse_event_stream(run_id),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
-        },
-    )
-
-
-@router.get("/stream/{run_id}/progress")
-async def get_progress_status(run_id: str) -> dict:
-    """
-    获取任务进度状态（非 SSE）
-
-    用于轮询场景或检查任务是否存在。
-
-    Returns:
-        进度状态
-    """
-    from core.common.events.consumer import AgentEventConsumer
-
-    consumer = AgentEventConsumer()
-    stream_key = f"events:{run_id}"
-
     try:
-        await consumer.connect()
-        exists = await consumer.client.exists(stream_key)
+        llm_detector = _get_llm_detector()
+        llm_gateway = _get_llm_gateway()
 
-        if not exists:
-            return {
-                "run_id": run_id,
-                "exists": False,
-                "message": "Task not found or expired",
-            }
+        if llm_gateway is None:
+            logger.warning(f"[{run_id}] LLM 网关未配置，降级到规则检测")
+            return await _rule_based_intent_detection(request, run_id, conversation_id)
 
-        # 获取最新消息
-        messages = await consumer.client.xrange(stream_key, count=1)
-        if messages:
-            _, fields = messages[0]
-            event_data = fields.get("event", "{}")
-            return {
-                "run_id": run_id,
-                "exists": True,
-                "message": "Task is running",
-            }
+        history = await _get_conversation_history(conversation_id)
 
-        return {
-            "run_id": run_id,
-            "exists": True,
-            "message": "Task is waiting",
+        prediction = await llm_detector.detect(
+            query=request.query,
+            conversation_history=history,
+            previous_intent=request.previous_intent,
+            previous_slots=request.previous_slots,
+        )
+
+        handler = _get_confidence_handler()
+        decision = handler.handle(
+            intent_prediction=prediction,
+            user_query=request.query,
+            business_domain=prediction.business_domain.value if prediction.business_domain else None,
+        )
+
+        intent_result = {
+            "intent_type": prediction.intent_type.value,
+            "confidence": prediction.confidence,
+            "confidence_breakdown": {
+                "final_score": prediction.confidence,
+                "reasoning": prediction.reasoning,
+            },
+            "routing_target": prediction.routing_target,
+            "slots": prediction.extracted_slots,
+            "requires_clarification": decision.can_execute is False,
+            "clarification_questions": decision.clarification_questions,
+            "pronoun_resolved": prediction.refers_to_previous,
+            "resolved_query": request.query,
         }
 
-    finally:
-        await consumer.close()
+        logger.info(
+            f"[{run_id}] LLM 检测: intent={prediction.intent_type.value}, "
+            f"confidence={prediction.confidence:.3f}, "
+            f"strategy={decision.strategy.value}"
+        )
+
+        return intent_result, decision
+
+    except Exception as e:
+        logger.error(f"[{run_id}] LLM 意图检测失败: {e}", exc_info=True)
+        return await _rule_based_intent_detection(request, run_id, conversation_id)
 
 
-# ============================================================================
-# 主入口
-# ============================================================================
+async def _rule_based_intent_detection(
+    request: ChatRequest,
+    run_id: str,
+    conversation_id: str,
+) -> tuple[dict, None]:
+    """
+    规则 + 上下文感知意图检测
+    """
+    intent_result = await _context_aware_detector.detect(
+        query=request.query,
+        conversation_id=conversation_id,
+        user_id=request.user_id,
+        previous_intent=request.previous_intent,
+        previous_domain=request.previous_domain,
+        previous_slots=request.previous_slots,
+    )
 
-if __name__ == "__main__":
-    import uvicorn
+    return intent_result, None
 
-    uvicorn.run(
-        "apps.api.routers.supervisor:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
+
+async def _get_conversation_history(conversation_id: str) -> list[dict]:
+    """获取对话历史"""
+    # TODO: 从数据库或缓存获取对话历史
+    return []
+
+
+def _build_clarification_response(
+    run_id: str,
+    trace_id: str,
+    conversation_id: str,
+    intent_type_str: str,
+    confidence: float,
+    confidence_breakdown: dict,
+    decision: Any,
+    routing_target: str,
+    slots: dict,
+    pronoun_resolved: bool,
+    resolved_query: Optional[str],
+) -> ChatResponse:
+    """构建澄清响应"""
+    clarification_questions = list(decision.clarification_questions)
+
+    if decision.strategy == HandlingStrategy.MULTI_INTENT_CANDIDATES:
+        clarification_questions = [
+            "您的问题可能有多种理解，请选择或确认您的意图：",
+        ]
+        for i, alt in enumerate(decision.alternative_intents[:3]):
+            clarification_questions.append(
+                f"{i+1}. {alt.get('reasoning', alt.get('intent_type', '未知意图'))}"
+            )
+
+    return ChatResponse(
+        run_id=run_id,
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        intent=intent_type_str,
+        confidence=confidence,
+        confidence_breakdown=confidence_breakdown,
+        status="awaiting_clarification",
+        routing_target=routing_target,
+        needs_sse=False,
+        needs_clarification=True,
+        clarification_questions=clarification_questions,
+        metadata={
+            "slots": slots,
+            "confidence_strategy": decision.strategy.value,
+            "risk_warning": decision.risk_warning,
+        },
+        pronoun_resolved=pronoun_resolved,
+        resolved_query=resolved_query,
     )

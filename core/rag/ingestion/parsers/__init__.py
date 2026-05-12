@@ -1,4 +1,18 @@
-"""文档解析器包。
+"""PP-Structure 表格识别器。
 
-后续会在这里放置 PDF、Word、Excel 等文档解析实现。
+基于 PaddleOCR 的 PP-Structure 表格识别能力。
 """
+
+from core.rag.ingestion.parsers.ppstructure_parser import (
+    PPStructureTableRecognizer,
+    TableResult,
+    MarkerTableRecognizer,
+    TableRecognitionStrategy,
+)
+
+__all__ = [
+    "PPStructureTableRecognizer",
+    "TableResult",
+    "MarkerTableRecognizer",
+    "TableRecognitionStrategy",
+]
