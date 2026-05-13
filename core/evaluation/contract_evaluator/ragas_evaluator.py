@@ -15,13 +15,18 @@ RAGAS 指标映射：
 |-----------|-----------|------------|
 | 检索类 | search_laws | Context Precision, Context Recall |
 | 检索类 | search_templates | Context Precision, Context Recall |
-| 生成类 | extract_clauses | Faithfulness, Answer Relevance |
-| 生成类 | analyze_risk | Faithfulness, Answer Relevance |
+| 生成类 | extract_clauses | Faithfulness, Answer Relevance, Answer Correctness |
+| 生成类 | analyze_risk | Faithfulness, Answer Relevance, Answer Correctness |
 
 设计原因：
 1. RAGAS 是经过社区验证的 RAG 评估框架
 2. 复用成熟指标，避免重复造轮子
 3. 支持离线批量评估和在线实时评估
+4. 生成类指标说明：
+   - Faithfulness: 检测幻觉（答案是否有依据）
+   - Answer Relevance: 检测切题（答案是否回答问题）
+   - Answer Correctness: 检测正确性（与 ground_truth 的匹配程度）
+   - 注意：Answer Correctness 需要 ground_truth，适用于需要与标准答案对比的场景
 
 Author: Enterprise Knowledge Agentic RAG Platform
 """
@@ -122,8 +127,9 @@ class GenerationEvaluationResult:
     case_id: str
 
     # RAGAS 核心指标
-    faithfulness: float  # 忠实率（生成内容是否忠实于上下文）
-    answer_relevance: float  # 答案相关性
+    faithfulness: float = 0.0  # 忠实率（生成内容是否忠实于上下文，无幻觉）
+    answer_relevance: float = 0.0  # 答案相关性（答案是否回答了问题）
+    answer_correctness: float = 0.0  # 答案正确性（与 ground_truth 的匹配程度）
 
     # 辅助信息
     question: str
@@ -145,6 +151,7 @@ class ToolEvaluationResult:
     context_recall: float = 0.0  # 仅检索类
     faithfulness: float = 0.0  # 仅生成类
     answer_relevance: float = 0.0  # 仅生成类
+    answer_correctness: float = 0.0  # 仅生成类，需要 ground_truth
 
     # 综合评分
     overall_score: float = 0.0
@@ -167,7 +174,8 @@ class RAGASEvaluator:
 
     设计原因：
     - 检索类 Tool 使用 Context Precision/Recall 评估检索质量
-    - 生成类 Tool 使用 Faithfulness/Answer Relevance 评估生成质量
+    - 生成类 Tool 使用 Faithfulness/Answer Relevance/Answer Correctness 评估生成质量
+    - Answer Correctness 需要 ground_truth，用于检测与标准答案的匹配程度
     - RAGAS 提供了经过验证的评估方法论
     """
 
@@ -356,8 +364,11 @@ class RAGASEvaluator:
         """评估生成类 Tool。
 
         评估指标：
-        - Faithfulness: 生成内容是否忠实于检索上下文
-        - Answer Relevance: 答案与问题的相关程度
+        - Faithfulness: 生成内容是否忠实于检索上下文（幻觉检测）
+        - Answer Relevance: 答案与问题的相关程度（切题检测）
+        - Answer Correctness: 答案与 ground_truth 的匹配程度（正确性检测）
+
+        注意：Answer Correctness 需要 ground_truth，适用于需要与标准答案对比的场景。
 
         Args:
             dataset: 生成类数据集
@@ -375,10 +386,13 @@ class RAGASEvaluator:
         # 计算平均指标
         avg_faithfulness = sum(r.faithfulness for r in results) / len(results)
         avg_relevance = sum(r.answer_relevance for r in results) / len(results)
+        avg_correctness = sum(r.answer_correctness for r in results) / len(results)
 
         logger.info(
             f"[RAGASEvaluator] 生成类 Tool 评估完成 | "
-            f"avg_faithfulness={avg_faithfulness:.3f} | avg_relevance={avg_relevance:.3f}"
+            f"avg_faithfulness={avg_faithfulness:.3f} | "
+            f"avg_relevance={avg_relevance:.3f} | "
+            f"avg_correctness={avg_correctness:.3f}"
         )
 
         return results
@@ -396,15 +410,16 @@ class RAGASEvaluator:
             评估结果
         """
         if self._ragas_available:
-            faithfulness, relevance = self._ragas_evaluate_generation(item)
+            faithfulness, relevance, correctness = self._ragas_evaluate_generation(item)
         else:
-            faithfulness, relevance = self._simple_evaluate_generation(item)
+            faithfulness, relevance, correctness = self._simple_evaluate_generation(item)
 
         return GenerationEvaluationResult(
             tool_name=item.tool_name,
             case_id=item.case_id,
             faithfulness=faithfulness,
             answer_relevance=relevance,
+            answer_correctness=correctness,
             question=item.question,
             response_length=len(item.response),
             ground_truth_length=len(item.ground_truth),
@@ -413,18 +428,25 @@ class RAGASEvaluator:
     def _ragas_evaluate_generation(
         self,
         item: GenerationDatasetItem,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         """使用 RAGAS 评估生成质量。
+
+        评估指标：
+        - Faithfulness: 幻觉检测（答案是否有依据）
+        - Answer Relevance: 切题检测（答案是否回答了问题）
+        - Answer Correctness: 正确性检测（与 ground_truth 的匹配程度）
+
+        注意：Answer Correctness 需要 ground_truth，适用于需要与标准答案对比的场景。
 
         Args:
             item: 生成数据集项
 
         Returns:
-            (faithfulness, answer_relevance)
+            (faithfulness, answer_relevance, answer_correctness)
         """
         try:
             from ragas import evaluate
-            from ragas.metrics import faithfulness, answer_relevance
+            from ragas.metrics import faithfulness, answer_relevance, answer_correctness
 
             # 构建 RAGAS 数据集格式
             from ragas.dataset_schema import SingleTurnSample
@@ -433,18 +455,19 @@ class RAGASEvaluator:
                 user_input=item.question,
                 retrieved_contexts=item.retrieved_contexts,
                 response=item.response,
-                reference=item.ground_truth,
+                reference=item.ground_truth,  # answer_correctness 需要 reference
             )
 
-            # 执行评估
+            # 执行评估（三个指标都需要 ground_truth）
             result = evaluate(
                 dataset=[sample],
-                metrics=[faithfulness, answer_relevance],
+                metrics=[faithfulness, answer_relevance, answer_correctness],
             )
 
             return (
                 result["faithfulness"] / 100.0,
                 result["answer_relevance"] / 100.0,
+                result["answer_correctness"] / 100.0,
             )
 
         except Exception as e:
@@ -454,25 +477,27 @@ class RAGASEvaluator:
     def _simple_evaluate_generation(
         self,
         item: GenerationDatasetItem,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         """简化评估方法（当 RAGAS 不可用时）。
 
         实现逻辑：
         - Faithfulness: 生成内容中的关键实体有多少在上下文中出现
-        - Answer Relevance: 生成内容与 ground_truth 的语义相似度
+        - Answer Relevance: 生成内容与问题的语义相似度
+        - Answer Correctness: 生成内容与 ground_truth 的语义相似度
 
         Args:
             item: 生成数据集项
 
         Returns:
-            (faithfulness, answer_relevance)
+            (faithfulness, answer_relevance, answer_correctness)
         """
         response = item.response
         contexts = item.retrieved_contexts
         ground_truth = item.ground_truth
+        question = item.question
 
         if not response or not contexts:
-            return (0.0, 0.0)
+            return (0.0, 0.0, 0.0)
 
         # 合并上下文
         combined_context = " ".join(contexts)
@@ -491,18 +516,29 @@ class RAGASEvaluator:
         faithfulness = found_entities / len(response_entities) if response_entities else 0.0
 
         # ===== Answer Relevance =====
-        # 使用 token overlap 作为简化指标
+        # 使用 token overlap 作为简化指标（与问题的相关性）
         response_tokens = set(self._normalize_text(response).split())
+        question_tokens = set(self._normalize_text(question).split())
+
+        if not response_tokens or not question_tokens:
+            relevance = 0.0
+        else:
+            overlap = len(response_tokens & question_tokens)
+            union = len(response_tokens | question_tokens)
+            relevance = overlap / union if union > 0 else 0.0
+
+        # ===== Answer Correctness =====
+        # 使用 token overlap 作为简化指标（与 ground_truth 的匹配程度）
         gt_tokens = set(self._normalize_text(ground_truth).split())
 
         if not response_tokens or not gt_tokens:
-            relevance = 0.0
+            correctness = 0.0
         else:
             overlap = len(response_tokens & gt_tokens)
             union = len(response_tokens | gt_tokens)
-            relevance = overlap / union if union > 0 else 0.0
+            correctness = overlap / union if union > 0 else 0.0
 
-        return (faithfulness, relevance)
+        return (faithfulness, relevance, correctness)
 
     # ==================== 统一评估接口 ====================
 
@@ -548,7 +584,9 @@ class RAGASEvaluator:
                     case_id=r.case_id,
                     faithfulness=r.faithfulness,
                     answer_relevance=r.answer_relevance,
-                    overall_score=(r.faithfulness + r.answer_relevance) / 2,
+                    answer_correctness=r.answer_correctness,
+                    # 综合分数 = (Faithfulness + Answer Relevance + Answer Correctness) / 3
+                    overall_score=(r.faithfulness + r.answer_relevance + r.answer_correctness) / 3,
                     question=r.question,
                 ))
 
@@ -593,12 +631,14 @@ class RAGASEvaluator:
             else:
                 avg_faithfulness = sum(r.faithfulness for r in tool_results) / n
                 avg_relevance = sum(r.answer_relevance for r in tool_results) / n
+                avg_correctness = sum(r.answer_correctness for r in tool_results) / n
                 tool_summary[tool_name] = {
                     "tool_type": "generation",
                     "case_count": n,
                     "faithfulness": avg_faithfulness,
                     "answer_relevance": avg_relevance,
-                    "avg_score": (avg_faithfulness + avg_relevance) / 2,
+                    "answer_correctness": avg_correctness,
+                    "avg_score": (avg_faithfulness + avg_relevance + avg_correctness) / 3,
                 }
 
         # 计算总体平均
